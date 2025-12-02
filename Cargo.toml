@@ -1,0 +1,38 @@
+[package]
+name = "io_board"
+version = "0.1.0"
+edition = "2024"
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[workspace]
+
+[dependencies]
+defmt = "0.3"
+defmt-rtt = "0.4"
+#panic-probe = "0.3" # print-defmt is really useful for debugging, but dramatically increases binary size
+panic-probe = { version = "0.3", features = ["print-defmt"] }
+
+embedded-hal = "1.0"
+embedded-hal-async = "1.0"
+
+cortex-m = { version = "0.7", features = ["inline-asm", "critical-section-single-core"] }
+cortex-m-rt = "0.7"
+alloc-cortex-m = "0.4"
+
+embassy-stm32 = { git = "https://github.com/embassy-rs/embassy", rev = "017064138003fa38b52f11dba872a43d4fec8b61", version = "0.4", features = ["stm32f105rc", "unstable-pac", "memory-x", "time-driver-any", "exti"]  }
+embassy-executor = { git = "https://github.com/embassy-rs/embassy", rev = "017064138003fa38b52f11dba872a43d4fec8b61", version = "0.9", features = ["arch-cortex-m", "executor-thread", "executor-interrupt"] }
+embassy-time = { git = "https://github.com/embassy-rs/embassy", rev = "017064138003fa38b52f11dba872a43d4fec8b61", version = "0.5", features = ["tick-hz-32_768"] }
+embassy-embedded-hal = { git = "https://github.com/embassy-rs/embassy", rev = "017064138003fa38b52f11dba872a43d4fec8b61", version = "0.5" }
+embassy-sync = { git = "https://github.com/embassy-rs/embassy", rev = "017064138003fa38b52f11dba872a43d4fec8b61", version = "0.7" }
+embassy-futures = { git = "https://github.com/embassy-rs/embassy", rev = "017064138003fa38b52f11dba872a43d4fec8b61", version = "0.1" }
+
+zencan-node = { git = "https://github.com/mcbridejc/zencan", rev = "4edcf8c9f7d06b51be9e773c511ab7c6360958b2", version = "0.0.1", default-features = false, features = [ "defmt" ] }
+zencan-common= { git = "https://github.com/mcbridejc/zencan", rev = "4edcf8c9f7d06b51be9e773c511ab7c6360958b2", version = "0.0.1", default-features = false, features = [ "defmt" ] }
+
+static_cell = "2"
+crc = "3"
+heapless = "0.9"
+
+[build-dependencies]
+zencan-build = { git = "https://github.com/mcbridejc/zencan", rev = "4edcf8c9f7d06b51be9e773c511ab7c6360958b2", version = "0.0.1", default-features = false }
+

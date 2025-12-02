@@ -1,0 +1,78 @@
+device_name = "can-io"
+
+# The device identity includes the vendor, product, revision and a serial
+# number. The serial number should be unique among all device instances, so it
+# is provided by the application at run-time -- e.g. from a value stored in
+# flash, or a MCU UID register.
+[identity]
+vendor_id = 0xCAFE
+product_code = 32
+revision_number = 1
+
+# PDOs are used for sending "process data". Values which are transferred
+# frequency on the bus, such as control commands or sensor readings, are
+# typically sent and recieved using Transmit PDOs (TPDOs) and Receive PDOs
+# (RPDOS). These are configured at run-time by writing to the appropriate PDO
+# configuration objects, but the number of PDOs which can be configured must be
+# defined here, at compile time.
+[pdos]
+num_tpdos = 4
+num_rpdos = 4
+
+# Create an array object to store the four u16 raw analog readings
+# It is read-only, so it can only be updated by the application
+# It can be mapped to transmit PDOs for sending data to the bus
+[[objects]]
+index = 0x2000
+parameter_name = "Raw Analog Input"
+object_type = "array"
+data_type = "uint16"
+access_type = "ro"
+array_size = 4
+default_value = [0, 0, 0, 0]
+pdo_mapping = "tpdo"
+
+# An object for storing the scaled analog values
+[[objects]]
+index = 0x2001
+parameter_name = "Scaled Analog Input"
+object_type = "array"
+data_type = "uint16"
+access_type = "ro"
+array_size = 4
+default_value = [0, 0, 0, 0]
+pdo_mapping = "tpdo"
+
+# A configuration object for controlling the frequency of analog readings
+[[objects]]
+index = 0x2100
+parameter_name = "Analog Read Period (ms)"
+object_type = "var"
+data_type = "uint32"
+access_type = "rw"
+default_value = 10
+
+# A configuration object which can be used to adjust the linear offset and scale transform used to
+# calculate the value in 0x2001
+[[objects]]
+index = 0x2101
+parameter_name = "Analog Scale Config"
+object_type = "record"
+[[objects.subs]]
+sub_index = 1
+parameter_name = "Scale Numerator"
+data_type = "uint16"
+access_type = "rw"
+default_value = 1
+[[objects.subs]]
+sub_index = 2
+parameter_name = "Scale Denominator"
+data_type = "uint16"
+access_type = "rw"
+default_value = 1
+[[objects.subs]]
+sub_index = 3
+parameter_name = "Offset"
+data_type = "uint16"
+access_type = "rw"
+default_value = 0
