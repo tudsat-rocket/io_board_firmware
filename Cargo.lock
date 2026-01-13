@@ -1461,7 +1461,7 @@ dependencies = [
 [[package]]
 name = "zencan-build"
 version = "0.0.1"
-source = "git+https://github.com/mcbridejc/zencan?rev=4edcf8c9f7d06b51be9e773c511ab7c6360958b2#4edcf8c9f7d06b51be9e773c511ab7c6360958b2"
+source = "git+https://gitlab.olaf.one/tomcruz/zencan?rev=b662174fc55b43c386991bad63a5546d3bdc03c3#b662174fc55b43c386991bad63a5546d3bdc03c3"
 dependencies = [
  "prettyplease",
  "proc-macro2",
@@ -1474,7 +1474,7 @@ dependencies = [
 [[package]]
 name = "zencan-common"
 version = "0.0.1"
-source = "git+https://github.com/mcbridejc/zencan?rev=4edcf8c9f7d06b51be9e773c511ab7c6360958b2#4edcf8c9f7d06b51be9e773c511ab7c6360958b2"
+source = "git+https://gitlab.olaf.one/tomcruz/zencan?rev=b662174fc55b43c386991bad63a5546d3bdc03c3#b662174fc55b43c386991bad63a5546d3bdc03c3"
 dependencies = [
  "critical-section",
  "defmt 1.0.1",
@@ -1489,7 +1489,7 @@ dependencies = [
 [[package]]
 name = "zencan-macro"
 version = "0.0.1"
-source = "git+https://github.com/mcbridejc/zencan?rev=4edcf8c9f7d06b51be9e773c511ab7c6360958b2#4edcf8c9f7d06b51be9e773c511ab7c6360958b2"
+source = "git+https://gitlab.olaf.one/tomcruz/zencan?rev=b662174fc55b43c386991bad63a5546d3bdc03c3#b662174fc55b43c386991bad63a5546d3bdc03c3"
 dependencies = [
  "darling",
  "proc-macro2",
@@ -1502,7 +1502,7 @@ dependencies = [
 [[package]]
 name = "zencan-node"
 version = "0.0.1"
-source = "git+https://github.com/mcbridejc/zencan?rev=4edcf8c9f7d06b51be9e773c511ab7c6360958b2#4edcf8c9f7d06b51be9e773c511ab7c6360958b2"
+source = "git+https://gitlab.olaf.one/tomcruz/zencan?rev=b662174fc55b43c386991bad63a5546d3bdc03c3#b662174fc55b43c386991bad63a5546d3bdc03c3"
 dependencies = [
  "crc16",
  "critical-section",

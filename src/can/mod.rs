@@ -79,6 +79,7 @@ async fn run_rx(can_rx: &'static mut CanRx<'static>, publisher: CanRxPub) -> ! {
     loop {
         match can_rx.read().await {
             Ok(envelope) => {
+                info!("received can msg");
                 let frame = envelope.frame;
                 // let Some(data) = frame.data() else {
                 //     continue;

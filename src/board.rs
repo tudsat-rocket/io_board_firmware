@@ -1,11 +1,12 @@
 use embassy_stm32::gpio::Output;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-use embassy_sync::pubsub::Subscriber;
+use embassy_sync::pubsub::{PubSubChannel, Publisher, Subscriber};
+use static_cell::StaticCell;
 
 #[allow(non_camel_case_types)]
 #[allow(clippy::upper_case_acronyms)]
 #[allow(unused)]
-mod pins {
+pub mod pins {
     use embassy_stm32::peripherals::*;
     pub type HSE_IN = PD0;
     pub type HSE_OUT = PD1;
@@ -64,6 +65,10 @@ mod pins {
 
 pub type HcOutputsSub = Subscriber<'static, CriticalSectionRawMutex, HcOutputsState, 4, 1, 1>;
 pub type StateLedSub = Subscriber<'static, CriticalSectionRawMutex, LedsState, 4, 1, 1>;
+pub type StateLedPub = Publisher<'static, CriticalSectionRawMutex, LedsState, 4, 1, 1>;
+
+pub static STATE_LED_PUB_SUB: StaticCell<PubSubChannel<CriticalSectionRawMutex, LedsState, 4, 1, 1>> =
+    StaticCell::new();
 
 #[derive(Clone)]
 pub struct HcOutputsState {
@@ -111,11 +116,11 @@ pub async fn run_hc_outputs(
     }
 }
 
-#[derive(Default, Clone)]
+#[derive(Default, Clone, Copy)]
 pub struct LedsState {
-    red: bool,
-    yellow: bool,
-    white: bool,
+    pub red: bool,
+    pub yellow: bool,
+    pub white: bool,
 }
 impl From<[bool; 3]> for LedsState {
     fn from(value: [bool; 3]) -> Self {
@@ -133,13 +138,13 @@ pub async fn run_leds(
     initial: LedsState,
     mut leds_state_sub: StateLedSub,
 ) -> ! {
-    leds.0.set_level(initial.red.into());
-    leds.1.set_level(initial.yellow.into());
-    leds.2.set_level(initial.white.into());
+    leds.0.set_level((!initial.red).into());
+    leds.1.set_level((!initial.yellow).into());
+    leds.2.set_level((!initial.white).into());
     loop {
         let leds_state = leds_state_sub.next_message_pure().await;
-        leds.0.set_level(leds_state.red.into());
-        leds.1.set_level(leds_state.yellow.into());
-        leds.2.set_level(leds_state.white.into());
+        leds.0.set_level((!leds_state.red).into());
+        leds.1.set_level((!leds_state.yellow).into());
+        leds.2.set_level((!leds_state.white).into());
     }
 }

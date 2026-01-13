@@ -53,6 +53,5 @@ pub fn setup() -> Peripherals {
 
     // analog digital converter: 12 MHz (max: 14MHz)
     config.rcc.adc_pre = ADCPrescaler::DIV6;
-    let p = embassy_stm32::init(config);
-    p
+    embassy_stm32::init(config)
 }

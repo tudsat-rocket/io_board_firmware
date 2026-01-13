@@ -42,6 +42,7 @@ pub async fn run_zencan(mut node: zencan_node::Node, mut can_rx_sub: can::CanRxS
                 error!("CanOpen tried to publish non standard message, dropping");
             }
         }
+        // quick and dirty message to led task
     }
 }
 

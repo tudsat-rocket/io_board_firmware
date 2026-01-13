@@ -11,18 +11,21 @@ use embassy_stm32::interrupt;
 use embassy_stm32::interrupt::InterruptExt;
 use embassy_stm32::interrupt::Priority;
 use embassy_stm32::wdg::IndependentWatchdog;
-use embassy_sync::pubsub::PubSubChannel;
+use embassy_sync::pubsub::{self, PubSubChannel};
 use embassy_time::{Duration, Ticker};
 
 use heapless::Vec;
 use zencan_common::NodeId;
 use zencan_node::Node;
 
+use crate::board::LedsState;
+
 use {defmt_rtt as _, panic_probe as _};
 
 mod board;
 mod can;
 mod current_sens;
+mod ext_adc;
 mod hw;
 mod zencan;
 
@@ -34,18 +37,13 @@ static ALLOCATOR: alloc_cortex_m::CortexMHeap = alloc_cortex_m::CortexMHeap::emp
 pub static EXECUTOR_HIGH: InterruptExecutor = InterruptExecutor::new();
 
 #[embassy_executor::main]
-async fn main(spawner: Spawner) -> ! {
+async fn main(spawner: Spawner) {
     let mut p = hw::setup();
     // let mut iwdg = IndependentWatchdog::new(p.IWDG, 512_000); // 512ms timeout
     // iwdg.unleash();
 
     let mut adc = Adc::new(p.ADC1);
     adc.set_sample_time(embassy_stm32::adc::SampleTime::CYCLES239_5);
-
-    let led_red = Output::new(p.PC7, Level::Low, Speed::Low);
-    let led_yellow = Output::new(p.PC8, Level::Low, Speed::Low);
-    let led_green = Output::new(p.PC9, Level::Low, Speed::Low);
-    let mut leds = (led_red, led_yellow, led_green);
 
     // let mut i2c_config = embassy_stm32::i2c::Config::default();
     // i2c_config.timeout = Duration::from_millis(10);
@@ -82,11 +80,30 @@ async fn main(spawner: Spawner) -> ! {
         Node::new(NodeId::new(CANOPEN_NODE_ID).unwrap(), &zencan::NODE_MBOX, &zencan::NODE_STATE, &zencan::OD_TABLE);
     spawner.spawn(can::canopen::run_zencan(node, can_in.subscriber().unwrap(), can_out.publisher().unwrap()).unwrap());
 
-    let mut ticker = Ticker::every(Duration::from_secs(1));
-    // let can_heartbeat_pub = can_out.publisher().unwrap();
+    // status leds
+    //
+    let led_red = Output::new(p.PC7, Level::Low, Speed::Low);
+    let led_yellow = Output::new(p.PC8, Level::Low, Speed::Low);
+    let led_white = Output::new(p.PC9, Level::Low, Speed::Low);
+    let leds = (led_red, led_yellow, led_white);
+
+    let led_pub_sub = board::STATE_LED_PUB_SUB.init(PubSubChannel::new());
+    spawner.spawn(pdo_watcher(led_pub_sub.publisher().unwrap()).unwrap());
+    spawner.spawn(board::run_leds(leds, LedsState::default(), led_pub_sub.subscriber().unwrap()).unwrap());
+}
+
+#[embassy_executor::task]
+pub async fn pdo_watcher(publisher: board::StateLedPub) {
+    // red_led
+    use board::LedsState;
+    let mut leds_state = LedsState::from([false, false, false]);
+    let mut ticker = Ticker::every(Duration::from_hz(10));
     loop {
-        leds.0.toggle();
-        // let _ = can_heartbeat_pub.publish((0x704, Vec::from_array([0x7f]))).await;
+        let red_led_state = zencan::OBJECT2100.get_value();
+        let red_led_state = red_led_state > 0;
+        // info!("object red_led: {}", red_led_state);
+        leds_state.red = red_led_state;
+        publisher.publish(leds_state).await;
         ticker.next().await;
     }
 }
