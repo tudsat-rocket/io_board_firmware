@@ -1,22 +1,16 @@
 #![no_std]
 #![no_main]
 
-use defmt::info;
-use embassy_executor::Spawner;
-use embassy_executor::{InterruptExecutor, main};
-use embassy_stm32::adc::Adc;
-use embassy_stm32::gpio::{Input, Level, Output, Pull, Speed};
-use embassy_stm32::i2c::I2c;
-use embassy_stm32::interrupt;
-use embassy_stm32::interrupt::InterruptExt;
-use embassy_stm32::interrupt::Priority;
-use embassy_stm32::wdg::IndependentWatchdog;
-use embassy_sync::pubsub::{self, PubSubChannel};
-use embassy_time::{Duration, Ticker};
-
-use heapless::Vec;
-use zencan_common::NodeId;
-use zencan_node::Node;
+use embassy_executor::{InterruptExecutor, Spawner};
+use embassy_stm32::gpio::{Level, Output, Speed};
+use embassy_stm32::{
+    adc::Adc,
+    i2c::{I2c, Master},
+    mode::Async,
+};
+use embassy_sync::pubsub::PubSubChannel;
+use embassy_time::Duration;
+use static_cell::StaticCell;
 
 use crate::board::LedsState;
 
@@ -24,17 +18,22 @@ use {defmt_rtt as _, panic_probe as _};
 
 mod board;
 mod can;
-mod current_sens;
+mod command_listener;
 mod ext_adc;
+mod high_current_out;
 mod hw;
+mod utils;
 mod zencan;
 
-const CANOPEN_NODE_ID: u8 = 4;
+// const CANOPEN_NODE_ID: u8 = X;
 
 #[global_allocator]
 static ALLOCATOR: alloc_cortex_m::CortexMHeap = alloc_cortex_m::CortexMHeap::empty();
 
 pub static EXECUTOR_HIGH: InterruptExecutor = InterruptExecutor::new();
+
+static COM1_I2C: StaticCell<I2c<'static, Async, Master>> = StaticCell::new();
+static COM2_I2C: StaticCell<I2c<'static, Async, Master>> = StaticCell::new();
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
@@ -45,13 +44,6 @@ async fn main(spawner: Spawner) {
     let mut adc = Adc::new(p.ADC1);
     adc.set_sample_time(embassy_stm32::adc::SampleTime::CYCLES239_5);
 
-    // let mut i2c_config = embassy_stm32::i2c::Config::default();
-    // i2c_config.timeout = Duration::from_millis(10);
-    // let i2c_freq = Hertz::khz(100);
-    //
-    // let input0 = I2c::new(p.I2C1, p.PB6, p.PB7, io_module_firmware::Irqs, p.DMA1_CH6, p.DMA1_CH7, i2c_config);
-    // let input1 = I2c::new(p.I2C2, p.PB10, p.PB11, io_module_firmware::Irqs, p.DMA1_CH4, p.DMA1_CH5, i2c_config);
-    //
     //configure CANs
     use can::{CAN_IN, CAN_OUT};
     let can_in = CAN_IN.init(PubSubChannel::new());
@@ -72,38 +64,60 @@ async fn main(spawner: Spawner) {
     // published on can_out.
     can::spawn(can1, spawner, can_in.publisher().unwrap(), can_out.subscriber().unwrap()).await;
 
-    // CanOpen
-    let serial_num: u32 = 42;
-    zencan::OBJECT1018.set_serial(serial_num);
+    // -- ext adcs
+    let i2c_config = embassy_stm32::i2c::Config::default();
 
-    let node =
-        Node::new(NodeId::new(CANOPEN_NODE_ID).unwrap(), &zencan::NODE_MBOX, &zencan::NODE_STATE, &zencan::OD_TABLE);
-    spawner.spawn(can::canopen::run_zencan(node, can_in.subscriber().unwrap(), can_out.publisher().unwrap()).unwrap());
+    let com1_i2c = COM1_I2C.init(I2c::new(p.I2C1, p.PB6, p.PB7, hw::Irqs, p.DMA1_CH6, p.DMA1_CH7, i2c_config));
+    let com2_i2c = COM2_I2C.init(I2c::new(p.I2C2, p.PB10, p.PB11, hw::Irqs, p.DMA1_CH4, p.DMA1_CH5, i2c_config));
+    spawner.spawn(
+        ext_adc::run_ext_adc_to_can(
+            Some(com1_i2c),
+            Some(com2_i2c),
+            can_out.publisher().unwrap(),
+            ext_adc::Settings {
+                broadcast_interval: Duration::from_millis(150),
+            },
+        )
+        .unwrap(),
+    );
+    // high current outputs,
+    // let hco1 = Hco1::new(p.PC0);
+    // let hco2 = Hco2::new(p.PC15);
+    let mut out_temp = Output::new(p.PC15, Level::High, Speed::Low);
+    out_temp.set_high();
+    core::mem::forget(out_temp);
+
+    // let (hco3, hco4) = new_hco3and4(p.TIM3, p.PB0, p.PB1);
+
+    // let cm_listener = command_listener::CommandListener::new(
+    //     (can_out.publisher().unwrap(), can_in.subscriber().unwrap()),
+    //     hco1,
+    //     hco2,
+    //     hco3,
+    //     hco4,
+    // );
+    // spawner.spawn(command_listener::run_command_listener(cm_listener).unwrap());
+
+    // spawner.spawn(high_current_out::new_virtual_pwm(p.TIM2, p.PC0).unwrap());
 
     // status leds
-    //
     let led_red = Output::new(p.PC7, Level::Low, Speed::Low);
     let led_yellow = Output::new(p.PC8, Level::Low, Speed::Low);
     let led_white = Output::new(p.PC9, Level::Low, Speed::Low);
     let leds = (led_red, led_yellow, led_white);
-
     let led_pub_sub = board::STATE_LED_PUB_SUB.init(PubSubChannel::new());
-    spawner.spawn(pdo_watcher(led_pub_sub.publisher().unwrap()).unwrap());
+    // spawner.spawn(pdo_watcher(led_pub_sub.publisher().unwrap()).unwrap());
     spawner.spawn(board::run_leds(leds, LedsState::default(), led_pub_sub.subscriber().unwrap()).unwrap());
 }
 
-#[embassy_executor::task]
-pub async fn pdo_watcher(publisher: board::StateLedPub) {
-    // red_led
-    use board::LedsState;
-    let mut leds_state = LedsState::from([false, false, false]);
-    let mut ticker = Ticker::every(Duration::from_hz(10));
-    loop {
-        let red_led_state = zencan::OBJECT2100.get_value();
-        let red_led_state = red_led_state > 0;
-        // info!("object red_led: {}", red_led_state);
-        leds_state.red = red_led_state;
-        publisher.publish(leds_state).await;
-        ticker.next().await;
-    }
-}
+// #[embassy_executor::task]
+// pub async fn pdo_watcher(publisher: board::StateLedPub) {
+//     // red_led
+//     use board::LedsState;
+//     let mut leds_state = LedsState::from([false, false, false]);
+//     let mut ticker = Ticker::every(Duration::from_hz(10));
+//     loop {
+//         publisher.publish(leds_state).await;
+//         ticker.next().await;
+//     }
+// }

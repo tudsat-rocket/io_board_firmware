@@ -70,6 +70,25 @@ data_type = "uint16"
 access_type = "ro"
 pdo_mapping = "tpdo"
 
+# High Current Outputs
+# [[objects]]
+# index = 0x2020
+# parameter_name = "high current outputs"
+# object_type "array"
+# data_type = "bool"
+# default_value = false
+
+# High Current Outputs microseconds duty (only index 2, 3 are supported)
+# [[objects]]
+# index = 0x2021
+# parameter_name = "high current outputs"
+# object_type "array"
+# data_type = "u16"
+# default_value = 0
+
+
+
+
 # onboard leds
 [[objects]]
 index = 0x2100

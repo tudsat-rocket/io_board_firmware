@@ -8,7 +8,7 @@ use embassy_sync::pubsub::{PubSubChannel, Publisher, Subscriber};
 use heapless::Vec;
 use static_cell::StaticCell;
 
-pub mod canopen;
+// pub mod canopen;
 
 const CAN_QUEUE_SIZE: usize = 5;
 const NUM_CAN_SUB: usize = 2;
