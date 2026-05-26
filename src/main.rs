@@ -9,10 +9,12 @@ use embassy_stm32::{
     mode::Async,
 };
 use embassy_sync::pubsub::PubSubChannel;
-use embassy_time::Duration;
+use embassy_time::{Duration, Ticker};
+use heapless::Vec;
 use static_cell::StaticCell;
 
 use crate::board::LedsState;
+use crate::can::CanTxPub;
 
 use {defmt_rtt as _, panic_probe as _};
 
@@ -23,7 +25,6 @@ mod ext_adc;
 mod high_current_out;
 mod hw;
 mod utils;
-mod zencan;
 
 // const CANOPEN_NODE_ID: u8 = X;
 
@@ -63,6 +64,7 @@ async fn main(spawner: Spawner) {
     // Run CAN bus, publishing received messages on can_in and transmitting messages
     // published on can_out.
     can::spawn(can1, spawner, can_in.publisher().unwrap(), can_out.subscriber().unwrap()).await;
+    spawner.spawn(run_heartbeat(can_out.publisher().unwrap()).unwrap());
 
     // -- ext adcs
     let i2c_config = embassy_stm32::i2c::Config::default();
@@ -108,6 +110,16 @@ async fn main(spawner: Spawner) {
     let led_pub_sub = board::STATE_LED_PUB_SUB.init(PubSubChannel::new());
     // spawner.spawn(pdo_watcher(led_pub_sub.publisher().unwrap()).unwrap());
     spawner.spawn(board::run_leds(leds, LedsState::default(), led_pub_sub.subscriber().unwrap()).unwrap());
+}
+#[embassy_executor::task]
+pub async fn run_heartbeat(can_tx: CanTxPub) {
+    let mut ticker = Ticker::every(Duration::from_hz(1));
+    let id: u16 = 0x12;
+    let body: Vec<u8, 8> = Vec::from_array([0, 0, 0, 0, 0, 0, 0, 0]);
+    loop {
+        can_tx.publish_immediate(((id, body.clone())));
+        ticker.next().await
+    }
 }
 
 // #[embassy_executor::task]

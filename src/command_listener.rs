@@ -2,7 +2,7 @@ use defmt::{error, info, warn};
 use heapless::Vec;
 
 use crate::can::{CanFrame, CanRxSub, CanTxPub};
-// use crate::high_current_out::{DigitalOutput, Hco1, Hco2, Hco3, Hco4, ServoOutput};
+use crate::high_current_out::{HcoController, HighCurrentOutput as Hco};
 use crate::utils::anychannel::{AnyReceiver, AnySender};
 
 const NODE_ID: u8 = 10;
@@ -10,19 +10,15 @@ const NODE_ID: u8 = 10;
 pub struct CommandListener<S: AnySender<CanFrame>, R: AnyReceiver<CanFrame>> {
     node_id: u8,
     can: (S, R),
-    HcoState,
-
+    hco: HcoController,
 }
 
 impl<S: AnySender<CanFrame>, R: AnyReceiver<CanFrame>> CommandListener<S, R> {
-    pub fn new(can: (S, R), hco1: Hco1, hco2: Hco2, hco3: Hco3, hco4: Hco4) -> Self {
+    pub fn new(can: (S, R), hco: HcoController) -> Self {
         Self {
             node_id: NODE_ID,
             can,
-            hco1,
-            hco2,
-            hco3,
-            hco4,
+            hco,
         }
     }
     async fn listen_loop(&mut self) {
@@ -71,15 +67,15 @@ impl<S: AnySender<CanFrame>, R: AnyReceiver<CanFrame>> CommandListener<S, R> {
                         match dict_index {
                             0x2020 => {
                                 // binary high current outputs
-                                let Some(level) = sdo_data.get(0) else {
+                                let Some(level) = sdo_data.first() else {
                                     warn!("sdo upload to binary high current output with insufficient data");
                                     continue;
                                 };
                                 match dict_subindex {
-                                    0 => self.hco1.set_level(*level != 0).await,
-                                    1 => self.hco2.set_level(*level != 0).await,
-                                    2 => self.hco3.set_level(*level != 0).await,
-                                    3 => self.hco4.set_level(*level != 0).await,
+                                    0 => self.hco.set_level(Hco::_1, (*level != 0).into()),
+                                    1 => self.hco.set_level(Hco::_2, (*level != 0).into()),
+                                    2 => self.hco.set_level(Hco::_3, (*level != 0).into()),
+                                    3 => self.hco.set_level(Hco::_4, (*level != 0).into()),
                                     _ => warn!(
                                         "sdo upload to binary high current output with unassigned subindex {}",
                                         dict_subindex
@@ -100,8 +96,10 @@ impl<S: AnySender<CanFrame>, R: AnyReceiver<CanFrame>> CommandListener<S, R> {
                                 // TODO: sketchy unwrap
                                 let duty_micros = u16::from_le_bytes(input.try_into().unwrap());
                                 match dict_subindex {
-                                    2 => self.hco3.set_duty_micros(duty_micros).await,
-                                    3 => self.hco4.set_duty_micros(duty_micros).await,
+                                    0 => self.hco.set_pwm_micros(Hco::_1, duty_micros),
+                                    1 => self.hco.set_pwm_micros(Hco::_2, duty_micros),
+                                    2 => self.hco.set_pwm_micros(Hco::_3, duty_micros),
+                                    3 => self.hco.set_pwm_micros(Hco::_4, duty_micros),
                                     _ => warn!("sdo upload to duty high current output with unassigned subindex"),
                                 }
                             }
