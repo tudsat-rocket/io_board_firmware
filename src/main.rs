@@ -51,20 +51,7 @@ async fn main(spawner: Spawner) {
     let can_out = CAN_OUT.init(PubSubChannel::new());
 
     let can1 = embassy_stm32::can::Can::new(p.CAN1, p.PB8, p.PB9, hw::Irqs);
-    // let can2 = embassy_stm32::can::Can::new(p.CAN2, p.PB12, p.PB13, hw::Irqs);
-    //
-    // interrupt::SPI2.set_priority(Priority::P6);
-    // let high_priority_spawner = io_module_firmware::EXECUTOR_HIGH.start(interrupt::SPI2);
-    //
-    // // temporary heartbeat for thermal test
-    // high_priority_spawner
-    //     .spawn(crate::heartbeat::run(can_out.publisher().unwrap(), can_in.subscriber().unwrap()).unwrap());
-    // spawner.spawn(crate::heartbeat::run_leds(leds).unwrap());
-    //
-    // Run CAN bus, publishing received messages on can_in and transmitting messages
-    // published on can_out.
     can::spawn(can1, spawner, can_in.publisher().unwrap(), can_out.subscriber().unwrap()).await;
-    spawner.spawn(run_heartbeat(can_out.publisher().unwrap()).unwrap());
 
     // -- ext adcs
     let i2c_config = embassy_stm32::i2c::Config::default();
@@ -77,7 +64,7 @@ async fn main(spawner: Spawner) {
             Some(com2_i2c),
             can_out.publisher().unwrap(),
             ext_adc::Settings {
-                broadcast_interval: Duration::from_millis(150),
+                broadcast_interval: Duration::from_millis(1),
             },
         )
         .unwrap(),
@@ -111,16 +98,17 @@ async fn main(spawner: Spawner) {
     // spawner.spawn(pdo_watcher(led_pub_sub.publisher().unwrap()).unwrap());
     spawner.spawn(board::run_leds(leds, LedsState::default(), led_pub_sub.subscriber().unwrap()).unwrap());
 }
-#[embassy_executor::task]
-pub async fn run_heartbeat(can_tx: CanTxPub) {
-    let mut ticker = Ticker::every(Duration::from_hz(1));
-    let id: u16 = 0x12;
-    let body: Vec<u8, 8> = Vec::from_array([0, 0, 0, 0, 0, 0, 0, 0]);
-    loop {
-        can_tx.publish_immediate(((id, body.clone())));
-        ticker.next().await
-    }
-}
+
+// #[embassy_executor::task]
+// pub async fn run_heartbeat(can_tx: CanTxPub) {
+//     let mut ticker = Ticker::every(Duration::from_hz(1));
+//     let id: u16 = 0x12;
+//     let body: Vec<u8, 8> = Vec::from_array([0, 0, 0, 0, 0, 0, 0, 0]);
+//     loop {
+//         can_tx.publish_immediate(((id, body.clone())));
+//         ticker.next().await
+//     }
+// }
 
 // #[embassy_executor::task]
 // pub async fn pdo_watcher(publisher: board::StateLedPub) {

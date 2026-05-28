@@ -96,16 +96,23 @@ pub async fn run_ext_adc_to_can(
     can_pub: CanTxPub,
     settings: Settings,
 ) {
-    const CAN_ID: u16 = 190;
+    const CAN_ID0: u16 = 190;
+    const CAN_ID1: u16 = 191;
     let mut ticker = Ticker::every(settings.broadcast_interval);
-    let enabled: [bool; NUM_ADCS] = [false, false, false, false, false, false];
+    let enabled: [bool; NUM_ADCS] = [true, false, false, true, false, false];
     let mut adcs = ExtAdcs::new(enabled);
 
     loop {
         let _ = adcs.read_all(com1_i2c.as_deref_mut(), com2_i2c.as_deref_mut()).await;
+        // NOTE: publish only from 2 hardcoded i2c devices
+        // com1_i2c float, float | com2_i2c float, float
         let reading0: Option<[u8; 2]> = adcs.measurements[0].map(|meas| meas.value.to_le_bytes());
+        let reading1: Option<[u8; 2]> = adcs.measurements[3].map(|meas| meas.value.to_le_bytes());
         if let Some(reading) = reading0 {
-            can_pub.publish_immediate((CAN_ID, Vec::from_slice(&reading).unwrap()));
+            can_pub.publish_immediate((CAN_ID0, Vec::from_slice(&reading).unwrap()));
+        }
+        if let Some(reading) = reading1 {
+            can_pub.publish_immediate((CAN_ID1, Vec::from_slice(&reading).unwrap()));
         }
 
         ticker.next().await;
