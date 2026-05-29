@@ -64,7 +64,7 @@ async fn main(spawner: Spawner) {
             Some(com2_i2c),
             can_out.publisher().unwrap(),
             ext_adc::Settings {
-                broadcast_interval: Duration::from_millis(1),
+                broadcast_interval: Duration::from_millis(100),
             },
         )
         .unwrap(),

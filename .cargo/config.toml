@@ -24,4 +24,4 @@ rustflags = [
 target = "thumbv7m-none-eabi"
 
 [env]
-DEFMT_LOG = "error"
+DEFMT_LOG = "debug"

@@ -61,7 +61,8 @@ async fn run_tx(can_tx: &'static mut CanTx<'static>, mut subscriber: CanTxSub) -
     loop {
         let (address, data) = subscriber.next_message_pure().await;
         let disp_data = data.as_slice();
-        info!("Sending Can message: id: 0x{:02x}, data: {:02x}", address, disp_data);
+        // TODO: uncomment
+        // info!("Sending Can message: id: 0x{:02x}, data: {:02x}", address, disp_data);
         if let Some(sid) = StandardId::new(address) {
             match Frame::new_data(sid, &data) {
                 Ok(frame) => {

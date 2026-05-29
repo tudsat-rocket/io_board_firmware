@@ -78,11 +78,19 @@ async fn read_i2c_adc<I2C: embedded_hal_async::i2c::I2c>(
     let conversion_register = u16::from_be_bytes(buffer);
     let alert_flag = (conversion_register >> 15) > 0;
     let conversion_result = (conversion_register >> 2) & 0x3ff;
+    let milli: f32 = to_millivolts(conversion_result);
+    defmt::info!("altert: {}, conversion_res: {} => {} mV", alert_flag, conversion_result, milli);
 
     Ok(ExtAdcReading {
         value: conversion_result,
         alert_flag,
     })
+}
+
+fn to_millivolts(sample: u16) -> f32 {
+    let u = 3_300f32 / 1024f32;
+    let milli_v = u * sample as f32;
+    milli_v
 }
 
 pub struct Settings {
@@ -99,7 +107,8 @@ pub async fn run_ext_adc_to_can(
     const CAN_ID0: u16 = 190;
     const CAN_ID1: u16 = 191;
     let mut ticker = Ticker::every(settings.broadcast_interval);
-    let enabled: [bool; NUM_ADCS] = [true, false, false, true, false, false];
+    // let enabled: [bool; NUM_ADCS] = [true, false, false, true, false, false];
+    let enabled: [bool; NUM_ADCS] = [true, false, false, false, false, false];
     let mut adcs = ExtAdcs::new(enabled);
 
     loop {
@@ -112,7 +121,7 @@ pub async fn run_ext_adc_to_can(
             can_pub.publish_immediate((CAN_ID0, Vec::from_slice(&reading).unwrap()));
         }
         if let Some(reading) = reading1 {
-            can_pub.publish_immediate((CAN_ID1, Vec::from_slice(&reading).unwrap()));
+            // can_pub.publish_immediate((CAN_ID1, Vec::from_slice(&reading).unwrap()));
         }
 
         ticker.next().await;
