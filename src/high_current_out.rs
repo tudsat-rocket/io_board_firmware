@@ -20,7 +20,8 @@ type Hco1OutType = Mutex<CriticalSectionRawMutex, Option<Output<'static>>>;
 type Hco2OutType = Mutex<CriticalSectionRawMutex, Option<Output<'static>>>;
 static HCO1_OUT: Hco1OutType = Mutex::new(None);
 static HCO2_OUT: Hco2OutType = Mutex::new(None);
-static HCO1_2_TIM: Mutex<CriticalSectionRawMutex, Option<Timer<'static, p::TIM2>>> = Mutex::new(None);
+// FIXME:
+// static HCO1_2_TIM: Mutex<CriticalSectionRawMutex, Option<Timer<'static, p::TIM2>>> = Mutex::new(None);
 
 static PULSE_US_PWM1: AtomicU16 = AtomicU16::new(1500);
 static PULSE_US_PWM2: AtomicU16 = AtomicU16::new(1500);
@@ -57,7 +58,7 @@ impl HcoController {
         self.set_state(new_state);
     }
     pub fn get_state(&self) -> HcoState {
-        self.state_mutex.try_lock().unwrap().clone()
+        *self.state_mutex.try_lock().unwrap()
     }
     pub fn set_state(&mut self, target_state: HcoState) {
         *self.state_mutex.try_lock().unwrap() = target_state;

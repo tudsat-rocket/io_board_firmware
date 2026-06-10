@@ -15,12 +15,15 @@ use static_cell::StaticCell;
 
 use crate::board::LedsState;
 use crate::can::CanTxPub;
+use crate::ereg::run_ereg;
+use crate::high_current_out::HcoController;
 
 use {defmt_rtt as _, panic_probe as _};
 
 mod board;
 mod can;
 mod command_listener;
+mod ereg;
 mod ext_adc;
 mod high_current_out;
 mod hw;
@@ -69,14 +72,10 @@ async fn main(spawner: Spawner) {
         )
         .unwrap(),
     );
-    // high current outputs,
-    // let hco1 = Hco1::new(p.PC0);
-    // let hco2 = Hco2::new(p.PC15);
-    let mut out_temp = Output::new(p.PC15, Level::High, Speed::Low);
-    out_temp.set_high();
-    core::mem::forget(out_temp);
 
-    // let (hco3, hco4) = new_hco3and4(p.TIM3, p.PB0, p.PB1);
+    let hco_contoler = HcoController::new(p.PC0, p.PC15, p.PB0, p.PB1, p.TIM2, p.TIM3).await;
+
+    spawner.spawn(run_ereg(hco_contoler).unwrap());
 
     // let cm_listener = command_listener::CommandListener::new(
     //     (can_out.publisher().unwrap(), can_in.subscriber().unwrap()),
