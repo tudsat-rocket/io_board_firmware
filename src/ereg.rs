@@ -26,7 +26,7 @@ impl CalibServo {
         debug_assert!(self.min_us < self.max_us);
         let span = self.max_us - self.min_us;
 
-        let pwm = u16::try_from(((span as u32) * (angle_deci as u32)) / self.total_angle as u32).unwrap();
+        let pwm = self.min_us + u16::try_from(((span as u32) * (angle_deci as u32)) / self.total_angle as u32).unwrap();
         debug_assert!(self.min_us <= pwm && pwm <= self.max_us);
         pwm
     }

@@ -1,5 +1,5 @@
 use core::sync::atomic::{AtomicU16, Ordering};
-use defmt::error;
+use defmt::{Debug2Format, error};
 
 use embassy_stm32::{
     Peri,
@@ -53,6 +53,7 @@ impl HcoController {
     }
 
     pub fn set_pwm_micros(&mut self, output: HighCurrentOutput, micros: u16) {
+        defmt::info!("{} set pwm us: {}", Debug2Format(&output), micros);
         let mut new_state = self.get_state();
         new_state.set_pwm_micros(output, micros);
         self.set_state(new_state);
@@ -130,6 +131,15 @@ pub enum Level {
     #[default]
     Low,
 }
+impl Level {
+    pub fn as_u8(&self) -> u8 {
+        match self {
+            Level::High => 1,
+            Level::Low => 0,
+        }
+    }
+}
+
 impl From<Level> for gpio::Level {
     fn from(value: Level) -> Self {
         match value {
@@ -237,6 +247,15 @@ impl HcoState {
             HighCurrentOutput::_2 => self._2 = State::Pwm(PwmMicros::from_u16_clamped(micros)),
             HighCurrentOutput::_3 => self._3 = State::Pwm(PwmMicros::from_u16_clamped(micros)),
             HighCurrentOutput::_4 => self._4 = State::Pwm(PwmMicros::from_u16_clamped(micros)),
+        }
+    }
+    pub fn get_state_0_indexed(&self, index: usize) -> Option<&State> {
+        match index {
+            0 => Some(&self._1),
+            1 => Some(&self._2),
+            2 => Some(&self._3),
+            3 => Some(&self._4),
+            _ => None,
         }
     }
 }

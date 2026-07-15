@@ -26,10 +26,10 @@ embassy-embedded-hal = { git = "https://github.com/embassy-rs/embassy", rev = "0
 embassy-sync = { git = "https://github.com/embassy-rs/embassy", rev = "017064138003fa38b52f11dba872a43d4fec8b61", version = "0.7" }
 embassy-futures = { git = "https://github.com/embassy-rs/embassy", rev = "017064138003fa38b52f11dba872a43d4fec8b61", version = "0.1" }
 
-# zencan-node = { git = "https://github.com/mcbridejc/zencan", rev = "4edcf8c9f7d06b51be9e773c511ab7c6360958b2", version = "0.0.1", default-features = false, features = [ "defmt" ] }
-zencan-node = { git = "https://gitlab.olaf.one/tomcruz/zencan", rev = "b662174fc55b43c386991bad63a5546d3bdc03c3", version = "0.0.1", default-features = false, features = [ "defmt" ] }
-# zencan-common= { git = "https://github.com/mcbridejc/zencan", rev = "4edcf8c9f7d06b51be9e773c511ab7c6360958b2", version = "0.0.1", default-features = false, features = [ "defmt" ] }
-zencan-common= { git = "https://gitlab.olaf.one/tomcruz/zencan", rev = "b662174fc55b43c386991bad63a5546d3bdc03c3", version = "0.0.1", default-features = false, features = [ "defmt" ] }
+zencan-node = { version = "0.0.4", default-features = false, features = [ "defmt" ] }
+zencan-common = { version = "0.0.4", default-features = false, features = [ "defmt" ] }
+# zencan-node = { git = "https://gitlab.olaf.one/tomcruz/zencan", rev = "b662174fc55b43c386991bad63a5546d3bdc03c3", version = "0.0.1", default-features = false, features = [ "defmt" ] }
+# zencan-common= { git = "https://gitlab.olaf.one/tomcruz/zencan", rev = "b662174fc55b43c386991bad63a5546d3bdc03c3", version = "0.0.1", default-features = false, features = [ "defmt" ] }
 
 static_cell = "2"
 crc = "3"

@@ -19,72 +19,89 @@ revision_number = 1
 num_tpdos = 6
 num_rpdos = 4
 
-# --- i2c external adc inputs ("Amplifier boards")
-# com1
 [[objects]]
 index = 0x2000
-parameter_name = "raw ext adc com1 id1" 
-object_type = "var"
+parameter_name = "raw external adc reading - i2c bus0"
+object_type = "array"
 data_type = "uint16"
 access_type = "ro"
+array_size = 16 
+default_value = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
 pdo_mapping = "tpdo"
 
 [[objects]]
 index = 0x2001
-parameter_name = "raw ext adc com1 id2" 
-object_type = "var"
+parameter_name = "raw external adc reading - i2c bus1"
+object_type = "array"
 data_type = "uint16"
 access_type = "ro"
+array_size = 16 
+default_value = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
 pdo_mapping = "tpdo"
 
 [[objects]]
 index = 0x2002
-parameter_name = "raw ext adc com1 id3" 
-object_type = "var"
+parameter_name = "temperature sensor readings in centi Celcius"
+object_type = "array"
 data_type = "uint16"
 access_type = "ro"
+array_size = 32
+default_value = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
 pdo_mapping = "tpdo"
 
-# com2 
 [[objects]]
 index = 0x2003
-parameter_name = "raw ext adc com2 id1" 
-object_type = "var"
+parameter_name = "pressure sensor readings kilo Pascal"
+object_type = "array"
 data_type = "uint16"
 access_type = "ro"
+array_size = 32
+default_value = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
 pdo_mapping = "tpdo"
+
 
 [[objects]]
 index = 0x2004
-parameter_name = "raw ext adc com2 id2" 
-object_type = "var"
+parameter_name = "selected sensor readings"
+object_type = "array"
 data_type = "uint16"
 access_type = "ro"
+array_size = 8
+default_value = [0, 0, 0, 0, 0, 0, 0, 0]
 pdo_mapping = "tpdo"
+
 
 [[objects]]
 index = 0x2005
-parameter_name = "raw ext adc com2 id3" 
-object_type = "var"
+parameter_name = "valve open promille"
+object_type = "array"
 data_type = "uint16"
-access_type = "ro"
-pdo_mapping = "tpdo"
+access_type = "rw"
+array_size = 4
+default_value = [0, 0, 0, 0]
 
-# High Current Outputs
-# [[objects]]
-# index = 0x2020
-# parameter_name = "high current outputs"
-# object_type "array"
-# data_type = "bool"
-# default_value = false
 
-# High Current Outputs microseconds duty (only index 2, 3 are supported)
-# [[objects]]
-# index = 0x2021
-# parameter_name = "high current outputs"
-# object_type "array"
-# data_type = "u16"
-# default_value = 0
+
+
+# High Current Outputs binary on/off
+[[objects]]
+index = 0x2006
+parameter_name = "high current outputs binary"
+object_type = "array"
+data_type = "uint8"
+access_type = "rw"
+array_size = 4
+default_value = [0, 0, 0, 0]
+
+# High Current Outputs microseconds duty 
+[[objects]]
+index = 0x2007
+parameter_name = "high current outputs pwm"
+object_type = "array"
+data_type = "uint16"
+access_type = "rw"
+array_size = 4
+default_value = [0, 0, 0, 0]
 
 
 

@@ -10,24 +10,25 @@ use embassy_stm32::{
 };
 use embassy_sync::pubsub::PubSubChannel;
 use embassy_time::{Duration, Ticker};
-use heapless::Vec;
 use static_cell::StaticCell;
 
 use crate::board::LedsState;
-use crate::can::CanTxPub;
-use crate::ereg::run_ereg;
+use crate::canopen_interface::{CanOpenInterface, run_can_command_listener};
 use crate::high_current_out::HcoController;
 
 use {defmt_rtt as _, panic_probe as _};
 
 mod board;
 mod can;
-mod command_listener;
+mod canopen_interface;
 mod ereg;
 mod ext_adc;
 mod high_current_out;
 mod hw;
+mod sensors;
+mod store;
 mod utils;
+mod valves;
 
 // const CANOPEN_NODE_ID: u8 = X;
 
@@ -66,16 +67,20 @@ async fn main(spawner: Spawner) {
             Some(com1_i2c),
             Some(com2_i2c),
             can_out.publisher().unwrap(),
-            ext_adc::Settings {
+            ext_adc::SensorSettings {
                 broadcast_interval: Duration::from_millis(100),
             },
         )
         .unwrap(),
     );
 
-    let hco_contoler = HcoController::new(p.PC0, p.PC15, p.PB0, p.PB1, p.TIM2, p.TIM3).await;
+    let hco_controller = HcoController::new(p.PC0, p.PC15, p.PB0, p.PB1, p.TIM2, p.TIM3).await;
 
-    spawner.spawn(run_ereg(hco_contoler).unwrap());
+    // spawner.spawn(run_ereg(hco_contoler).unwrap());
+
+    let can_open_interface =
+        CanOpenInterface::new((can_out.publisher().unwrap(), can_in.subscriber().unwrap()), hco_controller);
+    spawner.spawn(run_can_command_listener(can_open_interface).unwrap());
 
     // let cm_listener = command_listener::CommandListener::new(
     //     (can_out.publisher().unwrap(), can_in.subscriber().unwrap()),
