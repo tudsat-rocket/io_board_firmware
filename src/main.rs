@@ -12,9 +12,9 @@ use embassy_sync::pubsub::PubSubChannel;
 use embassy_time::{Duration, Ticker};
 use static_cell::StaticCell;
 
-use crate::board::LedsState;
+use crate::board::{CurrentBoard, LedsState};
 use crate::canopen_interface::{CanOpenInterface, run_can_command_listener};
-use crate::high_current_out::HcoController;
+use board::high_current_outputs::HcoControl;
 
 use {defmt_rtt as _, panic_probe as _};
 
@@ -23,8 +23,6 @@ mod can;
 mod canopen_interface;
 mod ereg;
 mod ext_adc;
-mod high_current_out;
-mod hw;
 mod sensors;
 mod store;
 mod utils;
@@ -32,8 +30,8 @@ mod valves;
 
 // const CANOPEN_NODE_ID: u8 = X;
 
-#[global_allocator]
-static ALLOCATOR: alloc_cortex_m::CortexMHeap = alloc_cortex_m::CortexMHeap::empty();
+// #[global_allocator]
+// static ALLOCATOR: alloc_cortex_m::CortexMHeap = alloc_cortex_m::CortexMHeap::empty();
 
 pub static EXECUTOR_HIGH: InterruptExecutor = InterruptExecutor::new();
 
@@ -42,30 +40,21 @@ static COM2_I2C: StaticCell<I2c<'static, Async, Master>> = StaticCell::new();
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
-    let mut p = hw::setup();
+    let mut board: CurrentBoard = board::init_board(spawner).await;
+    // let mut p = hw::setup();
     // let mut iwdg = IndependentWatchdog::new(p.IWDG, 512_000); // 512ms timeout
     // iwdg.unleash();
 
-    let mut adc = Adc::new(p.ADC1);
-    adc.set_sample_time(embassy_stm32::adc::SampleTime::CYCLES239_5);
-
-    //configure CANs
     use can::{CAN_IN, CAN_OUT};
     let can_in = CAN_IN.init(PubSubChannel::new());
     let can_out = CAN_OUT.init(PubSubChannel::new());
 
-    let can1 = embassy_stm32::can::Can::new(p.CAN1, p.PB8, p.PB9, hw::Irqs);
-    can::spawn(can1, spawner, can_in.publisher().unwrap(), can_out.subscriber().unwrap()).await;
+    can::spawn(board.can1, spawner, can_in.publisher().unwrap(), can_out.subscriber().unwrap()).await;
 
-    // -- ext adcs
-    let i2c_config = embassy_stm32::i2c::Config::default();
-
-    let com1_i2c = COM1_I2C.init(I2c::new(p.I2C1, p.PB6, p.PB7, hw::Irqs, p.DMA1_CH6, p.DMA1_CH7, i2c_config));
-    let com2_i2c = COM2_I2C.init(I2c::new(p.I2C2, p.PB10, p.PB11, hw::Irqs, p.DMA1_CH4, p.DMA1_CH5, i2c_config));
     spawner.spawn(
         ext_adc::run_ext_adc_to_can(
-            Some(com1_i2c),
-            Some(com2_i2c),
+            Some(board.com1_i2c),
+            Some(board.com2_i2c),
             can_out.publisher().unwrap(),
             ext_adc::SensorSettings {
                 broadcast_interval: Duration::from_millis(100),
@@ -74,33 +63,11 @@ async fn main(spawner: Spawner) {
         .unwrap(),
     );
 
-    let hco_controller = HcoController::new(p.PC0, p.PC15, p.PB0, p.PB1, p.TIM2, p.TIM3).await;
-
     // spawner.spawn(run_ereg(hco_contoler).unwrap());
 
     let can_open_interface =
-        CanOpenInterface::new((can_out.publisher().unwrap(), can_in.subscriber().unwrap()), hco_controller);
+        CanOpenInterface::new((can_out.publisher().unwrap(), can_in.subscriber().unwrap()), board.hco_controller);
     spawner.spawn(run_can_command_listener(can_open_interface).unwrap());
-
-    // let cm_listener = command_listener::CommandListener::new(
-    //     (can_out.publisher().unwrap(), can_in.subscriber().unwrap()),
-    //     hco1,
-    //     hco2,
-    //     hco3,
-    //     hco4,
-    // );
-    // spawner.spawn(command_listener::run_command_listener(cm_listener).unwrap());
-
-    // spawner.spawn(high_current_out::new_virtual_pwm(p.TIM2, p.PC0).unwrap());
-
-    // status leds
-    let led_red = Output::new(p.PC7, Level::Low, Speed::Low);
-    let led_yellow = Output::new(p.PC8, Level::Low, Speed::Low);
-    let led_white = Output::new(p.PC9, Level::Low, Speed::Low);
-    let leds = (led_red, led_yellow, led_white);
-    let led_pub_sub = board::STATE_LED_PUB_SUB.init(PubSubChannel::new());
-    // spawner.spawn(pdo_watcher(led_pub_sub.publisher().unwrap()).unwrap());
-    spawner.spawn(board::run_leds(leds, LedsState::default(), led_pub_sub.subscriber().unwrap()).unwrap());
 }
 
 // #[embassy_executor::task]

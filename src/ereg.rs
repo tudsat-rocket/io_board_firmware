@@ -1,4 +1,7 @@
-use crate::high_current_out::{HcoController, HighCurrentOutput, Level};
+use crate::{
+    board::HcoControl,
+    high_current_outputs::{HcoControl, HighCurrentOutput, Level},
+};
 use embassy_time::{Duration, Ticker};
 
 // in the future there could be angle offset calibration added here
@@ -42,7 +45,7 @@ impl CalibServo {
 }
 
 #[embassy_executor::task]
-pub async fn run_ereg(mut hco: HcoController) {
+pub async fn run_ereg(mut hco: impl HcoControl) {
     let servo = CalibServo::new_270_deg();
 
     // NOTE: when using the 3pin header set (hco4 to signal) (hco3 to power)

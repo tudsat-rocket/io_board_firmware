@@ -4,6 +4,7 @@ use zencan_common::{CanMessage, messages::CanId, sdo::SdoRequest};
 
 use defmt::{Debug2Format, error, info, warn};
 
+use crate::board::HcoControl;
 use crate::can::{CanFrame, CanRxSub, CanTxPub};
 use crate::high_current_out::{HcoController, HighCurrentOutput as Hco, Level, PwmMicros, State};
 use crate::store::{CanInterfaceStore, NODE_ID, STORE, StoreWriteError, store_idx::*};
@@ -13,11 +14,11 @@ use crate::valves::{self, NUM_SUPPORTED_VALVES, VALVES};
 // pub type StoreDirtySigType = Signal<CriticalSectionRawMutex, bool>;
 // pub static STORE_DIRTY_SIG: StoreDirtySigType = Signal::new();
 
-pub struct CanOpenInterface<SC: AnySender<CanFrame>, RC: AnyReceiver<CanFrame>> {
+pub struct CanOpenInterface<SC: AnySender<CanFrame>, RC: AnyReceiver<CanFrame>, HCO: HcoControl> {
     node_id: u8,
     can: (SC, RC),
     // store_dirty_sig: StoreDirtySigType,
-    hco_controller: HcoController,
+    hco_controller: HCO,
 }
 
 /// update store hco to reflect new actual state
@@ -127,7 +128,7 @@ async fn try_write_to_store(
     }
 }
 
-impl<SC: AnySender<CanFrame>, RC: AnyReceiver<CanFrame>> CanOpenInterface<SC, RC> {
+impl<SC: AnySender<CanFrame>, RC: AnyReceiver<CanFrame>> CanOpenInterface<SC, RC, HCO> {
     pub fn new(can: (SC, RC), hco_controller: HcoController) -> Self {
         Self {
             node_id: NODE_ID,
@@ -222,6 +223,6 @@ impl<SC: AnySender<CanFrame>, RC: AnyReceiver<CanFrame>> CanOpenInterface<SC, RC
 }
 
 #[embassy_executor::task]
-pub async fn run_can_command_listener(mut can_open_interface: CanOpenInterface<CanTxPub, CanRxSub>) {
+pub async fn run_can_command_listener(mut can_open_interface: CanOpenInterface<CanTxPub, CanRxSub, HCO>) {
     can_open_interface.listen_loop().await;
 }

@@ -16,20 +16,29 @@ use embassy_stm32::{
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, mutex::Mutex};
 use embassy_time::Duration;
 
+use super::HcoControl;
+use super::types::*;
+
 type Hco1OutType = Mutex<CriticalSectionRawMutex, Option<Output<'static>>>;
 type Hco2OutType = Mutex<CriticalSectionRawMutex, Option<Output<'static>>>;
-static HCO1_OUT: Hco1OutType = Mutex::new(None);
-static HCO2_OUT: Hco2OutType = Mutex::new(None);
-// FIXME:
-// static HCO1_2_TIM: Mutex<CriticalSectionRawMutex, Option<Timer<'static, p::TIM2>>> = Mutex::new(None);
 
+#[cfg(feature = "rev2")]
+static HCO1_OUT: Hco1OutType = Mutex::new(None);
+
+#[cfg(feature = "rev2")]
+static HCO2_OUT: Hco2OutType = Mutex::new(None);
+
+#[cfg(feature = "rev2")]
 static PULSE_US_PWM1: AtomicU16 = AtomicU16::new(1500);
+
+#[cfg(feature = "rev2")]
 static PULSE_US_PWM2: AtomicU16 = AtomicU16::new(1500);
 
 /// Represents the current state of the high current outputs. Use [`HcoController`] to change the
 /// state.
 // This needs to be implemented via Mutex, because the interrupt service routine needs access to
 // the state.
+#[cfg(feature = "rev2")]
 static HCO_STATE: Mutex<CriticalSectionRawMutex, HcoState> = Mutex::new(HcoState {
     _1: State::Digital(Level::Low),
     _2: State::Digital(Level::Low),
@@ -37,7 +46,8 @@ static HCO_STATE: Mutex<CriticalSectionRawMutex, HcoState> = Mutex::new(HcoState
     _4: State::Digital(Level::Low),
 });
 
-pub struct HcoController {
+/// High current output controller for IO board rev2.
+pub struct HcoControllerRev2 {
     state_mutex: &'static Mutex<CriticalSectionRawMutex, HcoState>,
     out1: &'static Hco1OutType,
     out2: &'static Hco2OutType,
@@ -45,23 +55,36 @@ pub struct HcoController {
     out4: SimplePwmChannel<'static, p::TIM3>,
     virtual_timer: Timer<'static, p::TIM2>,
 }
-impl HcoController {
-    pub fn set_level(&mut self, output: HighCurrentOutput, level: Level) {
+
+#[cfg(feature = "rev3")]
+impl HcoControl for HcoControllerRev2 {
+    fn set_level(&mut self, output: HighCurrentOutput, level: Level) {}
+
+    fn set_pwm_micros(&mut self, output: HighCurrentOutput, micros: u16) {}
+    fn get_state(&self) -> HcoState {
+        HcoState::default()
+    }
+    fn set_state(&mut self, target_state: HcoState) {}
+}
+
+#[cfg(feature = "rev2")]
+impl HcoControl for HcoControllerRev2 {
+    fn set_level(&mut self, output: HighCurrentOutput, level: Level) {
         let mut new_state = self.get_state();
         new_state.set_level(output, level);
         self.set_state(new_state);
     }
 
-    pub fn set_pwm_micros(&mut self, output: HighCurrentOutput, micros: u16) {
+    fn set_pwm_micros(&mut self, output: HighCurrentOutput, micros: u16) {
         defmt::info!("{} set pwm us: {}", Debug2Format(&output), micros);
         let mut new_state = self.get_state();
         new_state.set_pwm_micros(output, micros);
         self.set_state(new_state);
     }
-    pub fn get_state(&self) -> HcoState {
+    fn get_state(&self) -> HcoState {
         *self.state_mutex.try_lock().unwrap()
     }
-    pub fn set_state(&mut self, target_state: HcoState) {
+    fn set_state(&mut self, target_state: HcoState) {
         *self.state_mutex.try_lock().unwrap() = target_state;
         match target_state._1 {
             State::Digital(ref level) => {
@@ -118,149 +141,8 @@ impl HcoController {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum HighCurrentOutput {
-    _1,
-    _2,
-    _3,
-    _4,
-}
-#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
-pub enum Level {
-    High,
-    #[default]
-    Low,
-}
-impl Level {
-    pub fn as_u8(&self) -> u8 {
-        match self {
-            Level::High => 1,
-            Level::Low => 0,
-        }
-    }
-}
-
-impl From<Level> for gpio::Level {
-    fn from(value: Level) -> Self {
-        match value {
-            Level::High => gpio::Level::High,
-            Level::Low => gpio::Level::Low,
-        }
-    }
-}
-impl From<gpio::Level> for Level {
-    fn from(value: gpio::Level) -> Self {
-        match value {
-            gpio::Level::High => Level::High,
-            gpio::Level::Low => Level::Low,
-        }
-    }
-}
-impl From<bool> for Level {
-    fn from(value: bool) -> Self {
-        match value {
-            false => Level::Low,
-            true => Level::High,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum State {
-    Digital(Level),
-    /// Set duty cycle for high current output in microseconds
-    Pwm(PwmMicros),
-}
-impl Default for State {
-    fn default() -> Self {
-        Self::Digital(Level::default())
-    }
-}
-
-#[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct PwmMicros(u16);
-impl From<PwmMicros> for u16 {
-    fn from(value: PwmMicros) -> Self {
-        value.as_u16()
-    }
-}
-impl PwmMicros {
-    pub fn as_u16(&self) -> u16 {
-        self.0
-    }
-    pub fn from_u16_clamped(value: u16) -> Self {
-        Self(value.clamp(500, 2500))
-    }
-}
-impl TryFrom<u16> for PwmMicros {
-    type Error = ();
-    fn try_from(value: u16) -> Result<Self, Self::Error> {
-        if 500 <= value && value <= 2500 {
-            Ok(Self(value))
-        } else {
-            Err(())
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
-pub struct HcoState {
-    _1: State,
-    _2: State,
-    _3: State,
-    _4: State,
-}
-
-impl HcoState {
-    /// helper method for avoiding match statements
-    pub fn set_high(&mut self, output: HighCurrentOutput) {
-        match output {
-            HighCurrentOutput::_1 => self._1 = State::Digital(Level::High),
-            HighCurrentOutput::_2 => self._2 = State::Digital(Level::High),
-            HighCurrentOutput::_3 => self._3 = State::Digital(Level::High),
-            HighCurrentOutput::_4 => self._4 = State::Digital(Level::High),
-        }
-    }
-    /// helper method for avoiding match statements
-    pub fn set_low(&mut self, output: HighCurrentOutput) {
-        match output {
-            HighCurrentOutput::_1 => self._1 = State::Digital(Level::Low),
-            HighCurrentOutput::_2 => self._2 = State::Digital(Level::Low),
-            HighCurrentOutput::_3 => self._3 = State::Digital(Level::Low),
-            HighCurrentOutput::_4 => self._4 = State::Digital(Level::Low),
-        }
-    }
-    /// helper method for avoiding match statements
-    pub fn set_level(&mut self, output: HighCurrentOutput, level: Level) {
-        match output {
-            HighCurrentOutput::_1 => self._1 = State::Digital(level),
-            HighCurrentOutput::_2 => self._2 = State::Digital(level),
-            HighCurrentOutput::_3 => self._3 = State::Digital(level),
-            HighCurrentOutput::_4 => self._4 = State::Digital(level),
-        }
-    }
-
-    /// helper method for avoiding match statements
-    pub fn set_pwm_micros(&mut self, output: HighCurrentOutput, micros: u16) {
-        match output {
-            HighCurrentOutput::_1 => self._1 = State::Pwm(PwmMicros::from_u16_clamped(micros)),
-            HighCurrentOutput::_2 => self._2 = State::Pwm(PwmMicros::from_u16_clamped(micros)),
-            HighCurrentOutput::_3 => self._3 = State::Pwm(PwmMicros::from_u16_clamped(micros)),
-            HighCurrentOutput::_4 => self._4 = State::Pwm(PwmMicros::from_u16_clamped(micros)),
-        }
-    }
-    pub fn get_state_0_indexed(&self, index: usize) -> Option<&State> {
-        match index {
-            0 => Some(&self._1),
-            1 => Some(&self._2),
-            2 => Some(&self._3),
-            3 => Some(&self._4),
-            _ => None,
-        }
-    }
-}
-
-impl HcoController {
+#[cfg(feature = "rev2")]
+impl HcoControllerRev2 {
     pub async fn new(
         pin1: Peri<'static, impl gpio::Pin>,
         pin2: Peri<'static, impl gpio::Pin>,
@@ -319,11 +201,15 @@ impl HcoController {
     }
 }
 
+#[cfg(feature = "rev2")]
 embassy_stm32::bind_interrupts!(struct Irqs {
     TIM2 => Tim2Handler;
 });
 
+#[cfg(feature = "rev2")]
 struct Tim2Handler;
+
+#[cfg(feature = "rev2")]
 impl interrupt::typelevel::Handler<interrupt::typelevel::TIM2> for Tim2Handler {
     unsafe fn on_interrupt() {
         let timer = embassy_stm32::pac::TIM2;

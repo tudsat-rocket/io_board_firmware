@@ -28,12 +28,15 @@ embassy-futures = { git = "https://github.com/embassy-rs/embassy", rev = "017064
 
 zencan-node = { version = "0.0.4", default-features = false, features = [ "defmt" ] }
 zencan-common = { version = "0.0.4", default-features = false, features = [ "defmt" ] }
-# zencan-node = { git = "https://gitlab.olaf.one/tomcruz/zencan", rev = "b662174fc55b43c386991bad63a5546d3bdc03c3", version = "0.0.1", default-features = false, features = [ "defmt" ] }
-# zencan-common= { git = "https://gitlab.olaf.one/tomcruz/zencan", rev = "b662174fc55b43c386991bad63a5546d3bdc03c3", version = "0.0.1", default-features = false, features = [ "defmt" ] }
 
 static_cell = "2"
 crc = "3"
 heapless = "0.9"
+
+[fetures]
+default = ["rev2"]
+rev2 = []
+rev3 = []
 
 [build-dependencies]
 # zencan-build = { git = "https://github.com/mcbridejc/zencan", rev = "4edcf8c9f7d06b51be9e773c511ab7c6360958b2", version = "0.0.1", default-features = false }

@@ -39,7 +39,6 @@ pub enum SensorKind {
 pub async fn run_sensors(
     mut com1_i2c: Option<&'static mut I2c<'static, Async, Master>>,
     mut com2_i2c: Option<&'static mut I2c<'static, Async, Master>>,
-    //can_pub: CanTxPub,
     settings: SensorSettings,
 ) {
     let mut ticker = Ticker::every(settings.broadcast_interval);
