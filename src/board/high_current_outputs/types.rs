@@ -1,15 +1,7 @@
 use embassy_stm32::gpio;
 
-pub trait HcoControl {
-    fn set_level(&mut self, output: HighCurrentOutput, level: Level);
-    fn set_pwm_micros(&mut self, output: HighCurrentOutput, micros: u16);
-
-    fn get_state(&self) -> HcoState;
-    fn set_state(&mut self, target_state: HcoState);
-}
-
 /// State of all 4 high current outpus.
-#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, Hash, PartialEq)]
 pub struct HcoState {
     pub _1: State,
     pub _2: State,

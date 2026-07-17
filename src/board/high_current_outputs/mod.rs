@@ -3,8 +3,8 @@ pub use types::*;
 
 mod rev2;
 mod rev3;
-use rev2::HcoControllerRev2;
-use rev3::HcoControllerRev3;
+pub use rev2::HcoControllerRev2;
+pub use rev3::HcoControllerRev3;
 
 pub trait HcoControl {
     fn set_level(&mut self, output: HighCurrentOutput, level: Level);
@@ -42,8 +42,8 @@ impl HcoControl for GenericHcoController {
     }
     fn set_state(&mut self, target_state: HcoState) {
         match self {
-            Self::Rev2(c) => c.set_state(),
-            Self::Rev3(c) => c.set_state(),
+            Self::Rev2(c) => c.set_state(target_state),
+            Self::Rev3(c) => c.set_state(target_state),
         }
     }
 }

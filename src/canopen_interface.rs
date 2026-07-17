@@ -1,28 +1,24 @@
-use embassy_sync::signal::Signal;
 use zencan_common::messages::ZencanMessage;
 use zencan_common::{CanMessage, messages::CanId, sdo::SdoRequest};
 
-use defmt::{Debug2Format, error, info, warn};
+use defmt::{Debug2Format, info, warn};
 
-use crate::board::HcoControl;
+use crate::board::high_current_outputs::{HighCurrentOutput as Hco, Level, PwmMicros, State};
+use crate::board::{GenericHcoController, HcoControl};
 use crate::can::{CanFrame, CanRxSub, CanTxPub};
-use crate::high_current_out::{HcoController, HighCurrentOutput as Hco, Level, PwmMicros, State};
 use crate::store::{CanInterfaceStore, NODE_ID, STORE, StoreWriteError, store_idx::*};
 use crate::utils::anychannel::{AnyReceiver, AnySender};
-use crate::valves::{self, NUM_SUPPORTED_VALVES, VALVES};
+use crate::valves::VALVES;
 
-// pub type StoreDirtySigType = Signal<CriticalSectionRawMutex, bool>;
-// pub static STORE_DIRTY_SIG: StoreDirtySigType = Signal::new();
-
-pub struct CanOpenInterface<SC: AnySender<CanFrame>, RC: AnyReceiver<CanFrame>, HCO: HcoControl> {
+pub struct CanOpenInterface<SC: AnySender<CanFrame>, RC: AnyReceiver<CanFrame>> {
     node_id: u8,
     can: (SC, RC),
     // store_dirty_sig: StoreDirtySigType,
-    hco_controller: HCO,
+    hco_controller: GenericHcoController,
 }
 
 /// update store hco to reflect new actual state
-pub fn update_store_hco_state(store: &mut CanInterfaceStore, hco_controller: &mut HcoController) {
+pub fn update_store_hco_state(store: &mut CanInterfaceStore, hco_controller: &mut GenericHcoController) {
     let state = hco_controller.get_state();
     for (i, hco_binary_state) in store.hco_binary.iter_mut().enumerate() {
         *hco_binary_state = match state.get_state_0_indexed(i) {
@@ -45,7 +41,7 @@ async fn try_write_to_store(
     index: u16,
     sub: u8,
     data: &[u8],
-    hco_controller: &mut HcoController,
+    hco_controller: &mut GenericHcoController,
 ) -> Result<(), StoreWriteError> {
     defmt::debug!("fn try_write_to_store: index: {}, sub: {}", index, sub);
     let sub = sub as usize;
@@ -128,8 +124,8 @@ async fn try_write_to_store(
     }
 }
 
-impl<SC: AnySender<CanFrame>, RC: AnyReceiver<CanFrame>> CanOpenInterface<SC, RC, HCO> {
-    pub fn new(can: (SC, RC), hco_controller: HcoController) -> Self {
+impl<SC: AnySender<CanFrame>, RC: AnyReceiver<CanFrame>> CanOpenInterface<SC, RC> {
+    pub fn new(can: (SC, RC), hco_controller: GenericHcoController) -> Self {
         Self {
             node_id: NODE_ID,
             //store_dirty_sig,
@@ -223,6 +219,6 @@ impl<SC: AnySender<CanFrame>, RC: AnyReceiver<CanFrame>> CanOpenInterface<SC, RC
 }
 
 #[embassy_executor::task]
-pub async fn run_can_command_listener(mut can_open_interface: CanOpenInterface<CanTxPub, CanRxSub, HCO>) {
+pub async fn run_can_command_listener(mut can_open_interface: CanOpenInterface<CanTxPub, CanRxSub>) {
     can_open_interface.listen_loop().await;
 }

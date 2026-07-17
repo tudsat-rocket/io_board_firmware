@@ -2,19 +2,14 @@
 #![no_main]
 
 use embassy_executor::{InterruptExecutor, Spawner};
-use embassy_stm32::gpio::{Level, Output, Speed};
-use embassy_stm32::{
-    adc::Adc,
-    i2c::{I2c, Master},
-    mode::Async,
-};
 use embassy_sync::pubsub::PubSubChannel;
 use embassy_time::{Duration, Ticker};
-use static_cell::StaticCell;
 
-use crate::board::{CurrentBoard, LedsState};
+#[cfg(feature = "rev3")]
+use crate::board::{CurrentSens, OnboardSensRev3, TemperatureSens, VoltageSens};
+
+use crate::board::{Board, LedsState};
 use crate::canopen_interface::{CanOpenInterface, run_can_command_listener};
-use board::high_current_outputs::HcoControl;
 
 use {defmt_rtt as _, panic_probe as _};
 
@@ -35,12 +30,12 @@ mod valves;
 
 pub static EXECUTOR_HIGH: InterruptExecutor = InterruptExecutor::new();
 
-static COM1_I2C: StaticCell<I2c<'static, Async, Master>> = StaticCell::new();
-static COM2_I2C: StaticCell<I2c<'static, Async, Master>> = StaticCell::new();
+// static COM1_I2C: StaticCell<I2c<'static, Async, Master>> = StaticCell::new();
+// static COM2_I2C: StaticCell<I2c<'static, Async, Master>> = StaticCell::new();
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
-    let mut board: CurrentBoard = board::init_board(spawner).await;
+    let mut board: Board = board::init_board(spawner).await;
     // let mut p = hw::setup();
     // let mut iwdg = IndependentWatchdog::new(p.IWDG, 512_000); // 512ms timeout
     // iwdg.unleash();
@@ -68,27 +63,29 @@ async fn main(spawner: Spawner) {
     let can_open_interface =
         CanOpenInterface::new((can_out.publisher().unwrap(), can_in.subscriber().unwrap()), board.hco_controller);
     spawner.spawn(run_can_command_listener(can_open_interface).unwrap());
+
+    #[cfg(feature = "rev3")]
+    spawner.spawn(onboard_sens_debug(board.onboard_sens).unwrap());
 }
 
-// #[embassy_executor::task]
-// pub async fn run_heartbeat(can_tx: CanTxPub) {
-//     let mut ticker = Ticker::every(Duration::from_hz(1));
-//     let id: u16 = 0x12;
-//     let body: Vec<u8, 8> = Vec::from_array([0, 0, 0, 0, 0, 0, 0, 0]);
-//     loop {
-//         can_tx.publish_immediate(((id, body.clone())));
-//         ticker.next().await
-//     }
-// }
+#[embassy_executor::task]
+#[cfg(feature = "rev3")]
+pub async fn onboard_sens_debug(mut sens: OnboardSensRev3) {
+    let mut ticker = Ticker::every(Duration::from_hz(1));
+    loop {
+        let v_logic = sens.logic_supply_voltage_milli_v().await;
+        let v_hco12 = sens.hco12_supply_voltage_milli_v().await;
+        let v_hco34 = sens.hco34_supply_voltage_milli_v().await;
 
-// #[embassy_executor::task]
-// pub async fn pdo_watcher(publisher: board::StateLedPub) {
-//     // red_led
-//     use board::LedsState;
-//     let mut leds_state = LedsState::from([false, false, false]);
-//     let mut ticker = Ticker::every(Duration::from_hz(10));
-//     loop {
-//         publisher.publish(leds_state).await;
-//         ticker.next().await;
-//     }
-// }
+        let i_logic = sens.logic_supply_current_ma().await.unwrap_or(0);
+        let i_hco12 = sens.hco12_current_ma().await;
+        let i_hco34 = sens.hco34_current_ma().await;
+
+        defmt::info!("logic: {} mV, {} mA", v_logic, i_logic);
+        defmt::info!("hco12: {} mV, {} mA", v_hco12, i_hco12);
+        defmt::info!("hco34: {} mV, {} mA \n", v_hco34, i_hco34);
+        defmt::info!(" ");
+
+        ticker.next().await;
+    }
+}

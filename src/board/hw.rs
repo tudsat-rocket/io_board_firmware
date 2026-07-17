@@ -1,5 +1,7 @@
 use embassy_stm32::Peripherals;
-use embassy_stm32::peripherals::{CAN1, CAN2, I2C1, I2C2, UART5, USART1, USART2, USART3};
+use embassy_stm32::peripherals::{
+    CAN1, CAN2, DMA1_CH4, DMA1_CH5, DMA1_CH6, DMA1_CH7, I2C1, I2C2, UART5, USART1, USART2, USART3,
+};
 use embassy_stm32::rcc::*;
 use embassy_stm32::time::Hertz;
 
@@ -17,9 +19,14 @@ embassy_stm32::bind_interrupts!(pub struct Irqs {
 
     I2C1_EV => embassy_stm32::i2c::EventInterruptHandler<I2C1>;
     I2C1_ER => embassy_stm32::i2c::ErrorInterruptHandler<I2C1>;
+    DMA1_CHANNEL6 => embassy_stm32::dma::InterruptHandler<DMA1_CH6>;
+    DMA1_CHANNEL7 => embassy_stm32::dma::InterruptHandler<DMA1_CH7>;
+
 
     I2C2_EV => embassy_stm32::i2c::EventInterruptHandler<I2C2>;
     I2C2_ER => embassy_stm32::i2c::ErrorInterruptHandler<I2C2>;
+    DMA1_CHANNEL4 => embassy_stm32::dma::InterruptHandler<DMA1_CH4>;
+    DMA1_CHANNEL5 => embassy_stm32::dma::InterruptHandler<DMA1_CH5>;
 
     USART1 => embassy_stm32::usart::InterruptHandler<USART1>;
     USART2 => embassy_stm32::usart::InterruptHandler<USART2>;

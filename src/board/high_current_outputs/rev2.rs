@@ -58,13 +58,15 @@ pub struct HcoControllerRev2 {
 
 #[cfg(feature = "rev3")]
 impl HcoControl for HcoControllerRev2 {
-    fn set_level(&mut self, output: HighCurrentOutput, level: Level) {}
+    fn set_level(&mut self, _output: HighCurrentOutput, _level: Level) {}
 
-    fn set_pwm_micros(&mut self, output: HighCurrentOutput, micros: u16) {}
+    fn set_pwm_micros(&mut self, _output: HighCurrentOutput, _micros: u16) {}
+
     fn get_state(&self) -> HcoState {
         HcoState::default()
     }
-    fn set_state(&mut self, target_state: HcoState) {}
+
+    fn set_state(&mut self, _target_state: HcoState) {}
 }
 
 #[cfg(feature = "rev2")]
@@ -82,10 +84,9 @@ impl HcoControl for HcoControllerRev2 {
         self.set_state(new_state);
     }
     fn get_state(&self) -> HcoState {
-        *self.state_mutex.try_lock().unwrap()
+        self.state_mutex.try_lock().unwrap().clone()
     }
     fn set_state(&mut self, target_state: HcoState) {
-        *self.state_mutex.try_lock().unwrap() = target_state;
         match target_state._1 {
             State::Digital(ref level) => {
                 self.virtual_timer.enable_input_interrupt(Channel::Ch1, false);
@@ -123,7 +124,7 @@ impl HcoControl for HcoControllerRev2 {
             },
             State::Pwm(duty) => {
                 let micros = duty.as_u16().clamp(500, 2500);
-                let num = (micros * 5) / 10;
+                let num = (u32::from(micros) * 5) / 10;
                 self.out3.set_duty_cycle_fraction(num, 10_000);
             }
         }
@@ -134,10 +135,11 @@ impl HcoControl for HcoControllerRev2 {
             },
             State::Pwm(duty) => {
                 let micros = duty.as_u16().clamp(500, 2500);
-                let num = (micros * 5) / 10;
+                let num = (u32::from(micros) * 5) / 10;
                 self.out4.set_duty_cycle_fraction(num, 10_000);
             }
         }
+        *self.state_mutex.try_lock().unwrap() = target_state;
     }
 }
 
@@ -160,7 +162,7 @@ impl HcoControllerRev2 {
         let period = Duration::from_hz(50);
         let mut tim2 = Timer::new(virtual_timer);
         tim2.set_tick_freq(Hertz::mhz(1));
-        tim2.set_max_compare_value((period.as_micros() - 1) as u32);
+        tim2.set_max_compare_value((period.as_micros() - 1) as u16);
         tim2.set_autoreload_preload(true);
         tim2.enable_update_interrupt(true);
         tim2.set_output_compare_mode(Channel::Ch1, OutputCompareMode::Frozen);

@@ -1,7 +1,7 @@
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::mutex::Mutex;
 
-use crate::high_current_out::{HcoController, HighCurrentOutput, Level};
+use crate::board::high_current_outputs::{GenericHcoController, HcoControl, HighCurrentOutput, Level};
 
 // TODO: gather this somewhere global
 pub static VALVES: Mutex<CriticalSectionRawMutex, Valves> = Mutex::new(Valves([
@@ -73,7 +73,7 @@ impl Valves {
         &mut self,
         valve_num: usize,
         open_promille: u16,
-        hco_controler: &mut HcoController,
+        hco_controler: &mut GenericHcoController,
     ) -> Result<(), ()> {
         if valve_num >= self.0.len() {
             defmt::error!("bug: set_valve was called with valve out of range");

@@ -7,7 +7,7 @@ runner = [
     "--catch-hardfault",
     "--always-print-stacktrace",
     "--connect-under-reset",
-     "--log-format",
+    "--log-format",
     "{L} {m:white} {s}"
 ]
 

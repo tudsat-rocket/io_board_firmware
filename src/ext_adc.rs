@@ -163,7 +163,7 @@ pub async fn run_external_adc(
     let mut ticker = Ticker::every(settings.broadcast_interval);
     let enabled: [bool; NUM_ADCS] = [false; NUM_ADCS];
     let mut adcs = ExtAdcs::new(enabled);
-    adcs.scan_and_enable(com1_i2c, com2_i2c);
+    adcs.scan_and_enable(com1_i2c, com2_i2c).await;
 }
 
 #[embassy_executor::task]
