@@ -2,8 +2,13 @@
 #![no_main]
 
 use embassy_executor::{InterruptExecutor, Spawner};
+use embassy_stm32::can::Frame;
+use embassy_stm32::flash::Flash;
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::pubsub::PubSubChannel;
-use embassy_time::{Duration, Ticker};
+use embassy_time::Duration;
+
+use cancan::{CanCan, CanCanChannels};
 
 #[cfg(feature = "rev3")]
 use crate::board::{CurrentSens, OnboardSensRev3, TemperatureSens, VoltageSens};
@@ -22,6 +27,19 @@ mod sensors;
 mod store;
 mod utils;
 mod valves;
+
+// Firmware metadata generated using `cancan-build`
+include!(concat!(env!("OUT_DIR"), "/cancan_metadata.rs"));
+
+pub const NODE_ID: u8 = 0xff;
+
+#[cfg(feature = "rev2")]
+pub const NODE_NAME: &str = "I/O [rev2]";
+#[cfg(feature = "rev3")]
+pub const NODE_NAME: &str = "I/O [rev3]";
+
+// Channels for firmware updates during runtime
+static CANCAN: CanCanChannels<CriticalSectionRawMutex, Frame> = CanCanChannels::new();
 
 // const CANOPEN_NODE_ID: u8 = X;
 
@@ -44,7 +62,8 @@ async fn main(spawner: Spawner) {
     let can_in = CAN_IN.init(PubSubChannel::new());
     let can_out = CAN_OUT.init(PubSubChannel::new());
 
-    can::spawn(board.can1, spawner, can_in.publisher().unwrap(), can_out.subscriber().unwrap()).await;
+    can::spawn(board.can1, &mut board.cancan, spawner, can_in.publisher().unwrap(), can_out.subscriber().unwrap())
+        .await;
 
     spawner.spawn(
         ext_adc::run_ext_adc_to_can(
@@ -66,12 +85,20 @@ async fn main(spawner: Spawner) {
 
     #[cfg(feature = "rev3")]
     spawner.spawn(onboard_sens_debug(board.onboard_sens).unwrap());
+
+    spawner.spawn(run_cancan(board.cancan).unwrap());
+}
+
+/// Runs cancan, the firmware updater/bootloader task.
+#[embassy_executor::task]
+async fn run_cancan(cancan: CanCan<Flash<'static, embassy_stm32::flash::Blocking>>) {
+    cancan.run(&CANCAN).await
 }
 
 #[embassy_executor::task]
 #[cfg(feature = "rev3")]
 pub async fn onboard_sens_debug(mut sens: OnboardSensRev3) {
-    let mut ticker = Ticker::every(Duration::from_hz(1));
+    let mut ticker = embassy_time::Ticker::every(Duration::from_hz(1));
     loop {
         let v_logic = sens.logic_supply_voltage_milli_v().await;
         let v_hco12 = sens.hco12_supply_voltage_milli_v().await;

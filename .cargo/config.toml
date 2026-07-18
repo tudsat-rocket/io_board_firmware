@@ -11,6 +11,10 @@ runner = [
     "{L} {m:white} {s}"
 ]
 
+# Once flashed at least once, and assuming you have a working socketcan interface on the
+# host, this can be used instead to flash via CAN:
+#runner = "cancan flash 0xff"
+
 rustflags = [
     "-C", "linker=flip-link",
     "-C", "link-arg=-Tlink.x",
@@ -24,4 +28,4 @@ rustflags = [
 target = "thumbv7m-none-eabi"
 
 [env]
-DEFMT_LOG = "debug"
+DEFMT_LOG = "debug,can_iso_tp=warn"

@@ -1,4 +1,5 @@
-use embassy_executor::{InterruptExecutor, Spawner};
+use embassy_executor::Spawner;
+use embassy_stm32::flash::{Blocking, Flash};
 use embassy_stm32::gpio::{Level, Output, Speed};
 use embassy_stm32::{
     i2c::{I2c, Master},
@@ -6,6 +7,7 @@ use embassy_stm32::{
 };
 use embassy_sync::pubsub::PubSubChannel;
 
+use cancan::{CanCan, CanCanConfig};
 use static_cell::StaticCell;
 use {defmt_rtt as _, panic_probe as _};
 
@@ -39,6 +41,7 @@ pub struct Board {
     #[cfg(feature = "rev3")]
     pub onboard_sens: OnboardSensRev3,
     // can2: embassy_stm32::can::Can<'static>,
+    pub cancan: CanCan<Flash<'static, Blocking>>,
 }
 
 static COM1_I2C: StaticCell<I2c<'static, Async, Master>> = StaticCell::new();
@@ -54,7 +57,8 @@ embassy_stm32::bind_interrupts!(struct Irqs {
 });
 
 pub async fn init_board(spawner: Spawner) -> Board {
-    let mut p = hw::setup();
+    let p = hw::setup();
+
     // TODO: watchdog
     // let mut iwdg = IndependentWatchdog::new(p.IWDG, 512_000); // 512ms timeout
     // iwdg.unleash();
@@ -115,6 +119,19 @@ pub async fn init_board(spawner: Spawner) -> Board {
     )
     .await;
 
+    let cancan_config = CanCanConfig {
+        node_id: crate::NODE_ID,
+        name: crate::NODE_NAME,
+        chip_id: embassy_stm32::pac::DBGMCU.idcode().read().0,
+        chip_uid: embassy_stm32::uid::uid(),
+        flash_kib: (embassy_stm32::flash::FLASH_SIZE / 1024) as u16,
+        build_id: crate::CANCAN_BUILD_ID,
+        build_timestamp: crate::CANCAN_BUILD_TIMESTAMP,
+        ..Default::default()
+    };
+
+    let cancan = CanCan::new(cancan_config, Flash::new_blocking(p.FLASH));
+
     Board {
         hco_controller,
         leds: led_pub_sub.publisher().unwrap(),
@@ -123,6 +140,7 @@ pub async fn init_board(spawner: Spawner) -> Board {
         can1,
         #[cfg(feature = "rev3")]
         onboard_sens,
+        cancan,
     }
 }
 

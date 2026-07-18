@@ -5,6 +5,8 @@ edition = "2024"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [workspace]
+# The bootloader is its own standalone crate/workspace, flashed once via probe-rs.
+exclude = ["bootloader"]
 
 [dependencies]
 defmt = "0.3"
@@ -27,7 +29,7 @@ alloc-cortex-m = "0.4"
 # embassy-futures = { git = "https://github.com/embassy-rs/embassy", rev = "017064138003fa38b52f11dba872a43d4fec8b61", version = "0.1" }
 
 
-embassy-stm32 = { version = "0.6", features = ["stm32f105rc", "unstable-pac", "memory-x", "time-driver-any", "exti"]  }
+embassy-stm32 = { version = "0.6", features = ["stm32f105rc", "unstable-pac", "time-driver-any", "exti"]  }
 embassy-executor = { version = "0.10", features = [ "platform-cortex-m", "executor-thread", "executor-interrupt"] }
 embassy-time = { version = "0.5", features = ["tick-hz-32_768"] }
 embassy-embedded-hal = { version = "0.6" }
@@ -38,16 +40,25 @@ embassy-futures = { version = "0.1" }
 zencan-node = { version = "0.0.4", default-features = false, features = [ "defmt" ] }
 zencan-common = { version = "0.0.4", default-features = false, features = [ "defmt" ] }
 
+cancan = { git = "https://github.com/tudsat-rocket/cancan", features = ["defmt"] }
+
 static_cell = "2"
 crc = "3"
 heapless = "0.9"
 
 [features]
-default = ["rev3"]
+default = ["rev2"]
 rev2 = []
 rev3 = []
 
 [build-dependencies]
 # zencan-build = { git = "https://github.com/mcbridejc/zencan", rev = "4edcf8c9f7d06b51be9e773c511ab7c6360958b2", version = "0.0.1", default-features = false }
 zencan-build = { git = "https://gitlab.olaf.one/tomcruz/zencan", rev = "b662174fc55b43c386991bad63a5546d3bdc03c3", version = "0.0.1", default-features = false }
+cancan-build = { git = "https://github.com/tudsat-rocket/cancan" }
 
+[profile.release]
+opt-level = 3
+debug = 2
+
+[profile.dev]
+opt-level = 3

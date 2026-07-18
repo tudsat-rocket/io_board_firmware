@@ -1,0 +1,17 @@
+[build]
+target = "thumbv7m-none-eabi"
+
+# The bootloader is always flashed via debugger.
+# The triple key takes precedence over the parent's cfg(...) key.
+[target.thumbv7m-none-eabi]
+runner = [
+    "probe-rs",
+    "run",
+    "--chip",
+    "stm32f105rc",
+    "--catch-hardfault",
+    "--always-print-stacktrace",
+    "--connect-under-reset",
+    "--log-format",
+    "{L} {m:white} {s}"
+]
