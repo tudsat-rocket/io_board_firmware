@@ -109,7 +109,6 @@ async fn run_tx(
                 frame
             }
         };
-
         can_tx.write(&frame).await;
     }
 }

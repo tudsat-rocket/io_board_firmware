@@ -101,6 +101,25 @@ impl VoltageSens for OnboardSensRev3 {
         reading_v_to_system_v(self.reading_to_mv(reading))
     }
 }
+// TODO:
+// impl TemperatureSens for OnboardSensRev3 {
+//     async fn temperature_milli_c(&mut self) -> i32 {
+//         let reading = self.adc.read(&mut self.pins.v_temp, self.sample_time).await;
+//         let v_meas_uv = self.reading_to_mv(reading) as u32 * 1000;
+//
+//         const V_REF_UV: u32 = 3_300_000;
+//         const R_UPPER_U_OHM: u32 = 5_100_000;
+//         const BETA: f32 = 3380; // 0 - 50 C
+//         const T0: f32 = 298.15;
+//
+//         // thermistor resistance
+//         let th_resistance = (R_UPPER_U_OHM * v_meas_uv) / (V_REF_UV - v_meas_uv);
+//
+//         let t_kelvin = 1.0 / ((1.0/ T0) + (1.0/BETA) * log(th_resistance /
+//
+//
+//     }
+// }
 
 /// Convert voltage read by adc to actual voltage on the target circuit.
 /// This is just because we use a voltage divider.

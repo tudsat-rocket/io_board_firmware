@@ -6,7 +6,7 @@ use defmt::{Debug2Format, info, warn};
 use crate::board::high_current_outputs::{HighCurrentOutput as Hco, Level, PwmMicros, State};
 use crate::board::{GenericHcoController, HcoControl};
 use crate::can::{CanFrame, CanRxSub, CanTxPub};
-use crate::store::{CanInterfaceStore, NODE_ID, STORE, StoreWriteError, store_idx::*};
+use crate::store::{CanInterfaceStore, STORE, StoreWriteError, store_idx::*};
 use crate::utils::anychannel::{AnyReceiver, AnySender};
 use crate::valves::VALVES;
 
@@ -125,9 +125,9 @@ async fn try_write_to_store(
 }
 
 impl<SC: AnySender<CanFrame>, RC: AnyReceiver<CanFrame>> CanOpenInterface<SC, RC> {
-    pub fn new(can: (SC, RC), hco_controller: GenericHcoController) -> Self {
+    pub fn new(can: (SC, RC), hco_controller: GenericHcoController, node_id: u8) -> Self {
         Self {
-            node_id: NODE_ID,
+            node_id,
             //store_dirty_sig,
             can,
             hco_controller,
@@ -152,7 +152,7 @@ impl<SC: AnySender<CanFrame>, RC: AnyReceiver<CanFrame>> CanOpenInterface<SC, RC
                 ZencanMessage::SdoRequest(sdo_req) => {
                     info!("sdoRequest: {}", Debug2Format(&sdo_req));
                     // unique read or write to an object in the store
-                    if (cob_id - NODE_ID as u16) != 0x600 {
+                    if (cob_id - self.node_id as u16) != 0x600 {
                         // NOTE: this might not cover full canopen spec
                         defmt::debug!("node_id does not match for sdo request");
                         continue;

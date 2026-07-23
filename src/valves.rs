@@ -4,7 +4,7 @@ use embassy_sync::mutex::Mutex;
 use crate::board::high_current_outputs::{GenericHcoController, HcoControl, HighCurrentOutput, Level};
 
 // TODO: gather this somewhere global
-pub static VALVES: Mutex<CriticalSectionRawMutex, Valves> = Mutex::new(Valves([
+pub static VALVES: Mutex<CriticalSectionRawMutex, ValveMapping> = Mutex::new(ValveMapping([
     None,
     None,
     None,
@@ -34,13 +34,13 @@ pub struct ServoValve {
 }
 
 pub struct ValveEntry {
-    kind: Valve,
-    target_state_promille: u16,
+    pub kind: Valve,
+    pub target_state_promille: u16,
 }
 
 pub struct ServoValveCalib {
-    open_us: u16,
-    closed_us: u16,
+    pub open_us: u16,
+    pub closed_us: u16,
 }
 
 impl ServoValveCalib {
@@ -65,9 +65,12 @@ pub enum Valve {
     Servo(ServoValve),
 }
 
-pub struct Valves(pub [Option<ValveEntry>; NUM_SUPPORTED_VALVES]);
+pub struct ValveMapping(pub [Option<ValveEntry>; NUM_SUPPORTED_VALVES]);
 
-impl Valves {
+impl ValveMapping {
+    pub const fn new_empty() -> Self {
+        Self([const { None }; NUM_SUPPORTED_VALVES])
+    }
     /// Valve_num must be within 0..NUM_SUPPORTED_VALVES
     pub fn set_valve(
         &mut self,

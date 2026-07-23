@@ -14,7 +14,6 @@ use embassy_stm32::{
     },
 };
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, mutex::Mutex};
-use embassy_time::Duration;
 
 use super::HcoControl;
 use super::types::*;

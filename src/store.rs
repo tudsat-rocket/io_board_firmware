@@ -5,7 +5,7 @@ use crate::valves::{self, NUM_SUPPORTED_VALVES, VALVES};
 
 pub static STORE: Mutex<CriticalSectionRawMutex, CanInterfaceStore> = Mutex::new(CanInterfaceStore::new_empty());
 
-pub const NODE_ID: u8 = 5;
+// pub const NODE_ID: u8 = 5;
 pub const FC_NODE_ID: u8 = 1;
 
 /// See ./device-conf/can-io.toml , but sadly not autogeneration for now

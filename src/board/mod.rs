@@ -82,8 +82,8 @@ pub async fn init_board(spawner: Spawner) -> Board {
 
     // FIXME: temp
     let mut hco_state_temp = HcoState::default();
-    hco_state_temp.set_high(HighCurrentOutput::_1);
-    hco_state_temp.set_high(HighCurrentOutput::_3);
+    // hco_state_temp.set_high(HighCurrentOutput::_1);
+    // hco_state_temp.set_high(HighCurrentOutput::_3);
 
     #[cfg(feature = "rev3")]
     let hco_controller = GenericHcoController::Rev3(
@@ -120,8 +120,9 @@ pub async fn init_board(spawner: Spawner) -> Board {
     .await;
 
     let cancan_config = CanCanConfig {
-        node_id: crate::NODE_ID,
-        name: crate::NODE_NAME,
+        // FIXME:
+        node_id: 2,          // crate::NODE_ID,
+        name: "I/O generic", // crate::NODE_NAME,
         chip_id: embassy_stm32::pac::DBGMCU.idcode().read().0,
         chip_uid: embassy_stm32::uid::uid(),
         flash_kib: (embassy_stm32::flash::FLASH_SIZE / 1024) as u16,

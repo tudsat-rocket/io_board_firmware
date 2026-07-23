@@ -5,7 +5,7 @@ use embassy_stm32::{
     mode::Async,
 };
 use embassy_sync::pubsub::Subscriber;
-use embassy_time::{Duration, Ticker};
+use embassy_time::{Duration, Ticker, Timer};
 use heapless::Vec;
 
 use crate::can::CanTxPub;
@@ -135,7 +135,7 @@ async fn read_i2c_adc<I2C: embedded_hal_async::i2c::I2c>(
     let alert_flag = (conversion_register >> 15) > 0;
     let conversion_result = (conversion_register >> 2) & 0x3ff;
     let milli: f32 = to_millivolts(conversion_result);
-    defmt::info!("altert: {}, conversion_res: {} => {} mV", alert_flag, conversion_result, milli);
+    //defmt::info!("altert: {}, conversion_res: {} => {} mV", alert_flag, conversion_result, milli);
 
     Ok(ExtAdcReading {
         value: conversion_result,
@@ -150,49 +150,36 @@ fn to_millivolts(sample: u16) -> f32 {
 }
 
 pub struct SensorSettings {
-    pub broadcast_interval: Duration,
+    pub measure_interval: Duration,
 }
 
-#[embassy_executor::task]
-pub async fn run_external_adc(
-    mut com1_i2c: Option<&'static mut I2c<'static, Async, Master>>,
-    mut com2_i2c: Option<&'static mut I2c<'static, Async, Master>>,
-    can_pub: CanTxPub,
-    settings: SensorSettings,
-) {
-    let mut ticker = Ticker::every(settings.broadcast_interval);
-    let enabled: [bool; NUM_ADCS] = [false; NUM_ADCS];
-    let mut adcs = ExtAdcs::new(enabled);
-    adcs.scan_and_enable(com1_i2c, com2_i2c).await;
-}
-
-#[embassy_executor::task]
-pub async fn run_ext_adc_to_can(
-    mut com1_i2c: Option<&'static mut I2c<'static, Async, Master>>,
-    mut com2_i2c: Option<&'static mut I2c<'static, Async, Master>>,
-    can_pub: CanTxPub,
-    settings: SensorSettings,
-) {
-    const CAN_ID0: u16 = 190;
-    const CAN_ID1: u16 = 191;
-    let mut ticker = Ticker::every(settings.broadcast_interval);
-    let enabled: [bool; NUM_ADCS] = [false; NUM_ADCS];
-    let mut adcs = ExtAdcs::new(enabled);
-    adcs.scan_and_enable(com1_i2c.as_deref_mut(), com2_i2c.as_deref_mut()).await;
-
-    loop {
-        let _ = adcs.read_all(com1_i2c.as_deref_mut(), com2_i2c.as_deref_mut()).await;
-        // NOTE: publish only from 2 hardcoded i2c devices
-        // com1_i2c float, float | com2_i2c float, float
-        let reading0: Option<[u8; 2]> = adcs.measurements.0[0].map(|meas| meas.value.to_le_bytes());
-        let reading1: Option<[u8; 2]> = adcs.measurements.0[3].map(|meas| meas.value.to_le_bytes());
-        if let Some(reading) = reading0 {
-            can_pub.publish_immediate((CAN_ID0, Vec::from_slice(&reading).unwrap()));
-        }
-        if let Some(reading) = reading1 {
-            // can_pub.publish_immediate((CAN_ID1, Vec::from_slice(&reading).unwrap()));
-        }
-
-        ticker.next().await;
-    }
-}
+// #[embassy_executor::task]
+// pub async fn run_ext_adc_to_can(
+//     mut com1_i2c: Option<&'static mut I2c<'static, Async, Master>>,
+//     mut com2_i2c: Option<&'static mut I2c<'static, Async, Master>>,
+//     can_pub: CanTxPub,
+//     settings: SensorSettings,
+// ) {
+//     const CAN_ID0: u16 = 190;
+//     const CAN_ID1: u16 = 191;
+//     let mut ticker = Ticker::every(settings.measure_interval);
+//     let enabled: [bool; NUM_ADCS] = [false; NUM_ADCS];
+//     let mut adcs = ExtAdcs::new(enabled);
+//     adcs.scan_and_enable(com1_i2c.as_deref_mut(), com2_i2c.as_deref_mut()).await;
+//
+//     loop {
+//         let _ = adcs.read_all(com1_i2c.as_deref_mut(), com2_i2c.as_deref_mut()).await;
+//         // NOTE: publish only from 2 hardcoded i2c devices
+//         // com1_i2c float, float | com2_i2c float, float
+//         let reading0: Option<[u8; 2]> = adcs.measurements.0[0].map(|meas| meas.value.to_le_bytes());
+//         let reading1: Option<[u8; 2]> = adcs.measurements.0[3].map(|meas| meas.value.to_le_bytes());
+//         if let Some(reading) = reading0 {
+//             can_pub.publish_immediate((CAN_ID0, Vec::from_slice(&reading).unwrap()));
+//         }
+//         if let Some(reading) = reading1 {
+//             // can_pub.publish_immediate((CAN_ID1, Vec::from_slice(&reading).unwrap()));
+//         }
+//A
+//         ticker.next().await;
+//     }
+// }
