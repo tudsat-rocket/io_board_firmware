@@ -8,13 +8,14 @@ use crate::board::{GenericHcoController, HcoControl};
 use crate::can::{CanFrame, CanRxSub, CanTxPub};
 use crate::store::{CanInterfaceStore, STORE, StoreWriteError, store_idx::*};
 use crate::utils::anychannel::{AnyReceiver, AnySender};
-use crate::valves::VALVES;
+use crate::valves::ValveMapping;
 
 pub struct CanOpenInterface<SC: AnySender<CanFrame>, RC: AnyReceiver<CanFrame>> {
     node_id: u8,
     can: (SC, RC),
     // store_dirty_sig: StoreDirtySigType,
     hco_controller: GenericHcoController,
+    valves_mapping: ValveMapping,
 }
 
 /// update store hco to reflect new actual state
@@ -42,8 +43,9 @@ async fn try_write_to_store(
     sub: u8,
     data: &[u8],
     hco_controller: &mut GenericHcoController,
+    valves_mapping: &mut ValveMapping,
 ) -> Result<(), StoreWriteError> {
-    defmt::debug!("fn try_write_to_store: index: {}, sub: {}", index, sub);
+    // defmt::debug!("fn try_write_to_store: index: {}, sub: {}", index, sub);
     let sub = sub as usize;
     match index {
         STORE_IDX_RAW_EXT_ADC_BUS0 | STORE_IDX_RAW_EXT_ADC_BUS1 | STORE_IDX_TEMP_SENS | STORE_IDX_PRESSURE_SENS => {
@@ -61,8 +63,7 @@ async fn try_write_to_store(
             *entry = *entry.clamp(&mut 0, &mut 1000);
 
             // apply valve from store
-            let mut vavles = VALVES.lock().await;
-            vavles.set_valve(sub, *entry, hco_controller).unwrap();
+            valves_mapping.set_valve(sub, *entry, hco_controller).unwrap();
 
             update_store_hco_state(store, hco_controller);
 
@@ -125,12 +126,13 @@ async fn try_write_to_store(
 }
 
 impl<SC: AnySender<CanFrame>, RC: AnyReceiver<CanFrame>> CanOpenInterface<SC, RC> {
-    pub fn new(can: (SC, RC), hco_controller: GenericHcoController, node_id: u8) -> Self {
+    pub fn new(can: (SC, RC), hco_controller: GenericHcoController, node_id: u8, valves_mapping: ValveMapping) -> Self {
         Self {
             node_id,
             //store_dirty_sig,
             can,
             hco_controller,
+            valves_mapping,
         }
     }
     async fn listen_loop(&mut self) {
@@ -152,9 +154,9 @@ impl<SC: AnySender<CanFrame>, RC: AnyReceiver<CanFrame>> CanOpenInterface<SC, RC
                 ZencanMessage::SdoRequest(sdo_req) => {
                     info!("sdoRequest: {}", Debug2Format(&sdo_req));
                     // unique read or write to an object in the store
-                    if (cob_id - self.node_id as u16) != 0x600 {
+                    if cob_id != 0x600 + self.node_id as u16 {
                         // NOTE: this might not cover full canopen spec
-                        defmt::debug!("node_id does not match for sdo request");
+                        // defmt::debug!("node_id does not match for sdo request, cob: 0x{:x}", &cob_id);
                         continue;
                     }
                     match sdo_req {
@@ -184,7 +186,15 @@ impl<SC: AnySender<CanFrame>, RC: AnyReceiver<CanFrame>> CanOpenInterface<SC, RC
 
                             let res = {
                                 let mut store = STORE.lock().await;
-                                try_write_to_store(&mut store, index, sub, data, &mut self.hco_controller).await
+                                try_write_to_store(
+                                    &mut store,
+                                    index,
+                                    sub,
+                                    data,
+                                    &mut self.hco_controller,
+                                    &mut self.valves_mapping,
+                                )
+                                .await
                             };
                             if let Err(e) = res {
                                 warn!("write to store was invalid: {}", Debug2Format(&e));

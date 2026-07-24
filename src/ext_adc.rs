@@ -5,10 +5,12 @@ use embassy_stm32::{
     mode::Async,
 };
 use embassy_sync::pubsub::Subscriber;
-use embassy_time::{Duration, Ticker, Timer};
+use embassy_time::{Duration, Ticker, Timer, with_timeout};
 use heapless::Vec;
 
 use crate::can::CanTxPub;
+// bus timout if there is a hardware fault or unexpected fault
+const I2C_TIMEOUT: Duration = Duration::from_millis(100);
 
 // ADC101C027 addresses in order: ADR floating, GND, VCC
 // const AMPLIFIER_ADDRESSES_OLD: [u8; 3] = [0b1010000, 0b1010001, 0b1010010];
@@ -34,7 +36,7 @@ pub const NUM_I2C_BUSES: usize = 2;
 
 pub const NUM_ADCS: usize = AMPLIFIER_ADDRESSES.len() * NUM_I2C_BUSES;
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug)]
 pub struct ExtAdcReading {
     pub value: u16,
     pub alert_flag: bool,
@@ -82,7 +84,11 @@ impl ExtAdcs {
                 let Some(ref mut i2c) = i2c else {
                     continue;
                 };
-                let success = read_i2c_adc(i2c, *addr).await.is_ok();
+                // let success = read_i2c_adc(i2c, *addr).await.is_ok();
+                let success = match read_i2c_adc(i2c, *addr).await {
+                    Ok(reading) => true,
+                    Err(e) => false,
+                };
                 if success {
                     self.enabled[bus_idx * AMPLIFIER_ADDRESSES.len() + amp_idx] = true;
                     let print_num = bus_idx + 1;
@@ -126,10 +132,13 @@ impl ExtAdcs {
 async fn read_i2c_adc<I2C: embedded_hal_async::i2c::I2c>(
     i2c: &mut I2C,
     i2c_address: u8,
-) -> Result<ExtAdcReading, I2C::Error> {
+) -> Result<ExtAdcReading, embedded_hal_async::i2c::ErrorKind> {
     // https://www.ti.com/lit/ds/symlink/adc101c027.pdf
     let mut buffer: [u8; 2] = [0x00, 0x00];
-    i2c.read(i2c_address, &mut buffer).await?;
+    // NOTE: this function may never return if there is a power issue or other on the i2c bus
+    let _idontknow = with_timeout(I2C_TIMEOUT, i2c.read(i2c_address, &mut buffer))
+        .await
+        .map_err(|_| embedded_hal_async::i2c::ErrorKind::Other)?;
 
     let conversion_register = u16::from_be_bytes(buffer);
     let alert_flag = (conversion_register >> 15) > 0;

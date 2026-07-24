@@ -146,12 +146,13 @@ impl HcoControl for HcoControllerRev2 {
 #[cfg(feature = "rev2")]
 impl HcoControllerRev2 {
     pub async fn new(
-        pin1: Peri<'static, impl gpio::Pin>,
-        pin2: Peri<'static, impl gpio::Pin>,
+        pin1: Peri<'static, p::PC0>,
+        pin2: Peri<'static, p::PC15>,
         pin3: Peri<'static, p::PB0>,
         pin4: Peri<'static, p::PB1>,
         virtual_timer: Peri<'static, p::TIM2>,
         out3_4_timer: Peri<'static, p::TIM3>,
+        init_state: HcoState,
     ) -> Self {
         let out1 = Output::new(pin1, gpio::Level::Low, Speed::Low);
         let out2 = Output::new(pin2, gpio::Level::Low, Speed::Low);
@@ -192,14 +193,16 @@ impl HcoControllerRev2 {
         channels.ch3.enable();
         channels.ch4.enable();
 
-        Self {
+        let mut hco_ctl = Self {
             state_mutex: &HCO_STATE,
             out1: &HCO1_OUT,
             out2: &HCO2_OUT,
             out3: channels.ch3,
             out4: channels.ch4,
             virtual_timer: tim2,
-        }
+        };
+        hco_ctl.set_state(init_state);
+        hco_ctl
     }
 }
 

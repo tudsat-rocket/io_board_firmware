@@ -6,6 +6,8 @@ use crate::sensors::{PressureSensorCalib, Sensor, SensorKind, SensorMapping, Tem
 use crate::tpdo::TpdoIntervals;
 use crate::valves::{ServoValve, ServoValveCalib, Valve, ValveEntry, ValveMapping};
 
+mod sensors;
+
 // nosecose or recovery
 pub const NODE2: NodeSettings = NodeSettings {
     node_id: 2,
@@ -14,7 +16,10 @@ pub const NODE2: NodeSettings = NodeSettings {
         // temperature sensor regulator
         Some(Sensor {
             // TODO: calib
-            kind: SensorKind::SimplePressure(PressureSensorCalib { gain: 0.0, offset: 0.0 }),
+            kind: SensorKind::SimplePressure(PressureSensorCalib {
+                linear_factor: 0.0,
+                offset: 0.0,
+            }),
             bus_idx: 0,
             sensor_idx: 0,
         }),
@@ -50,7 +55,7 @@ pub const NODE4: NodeSettings = NodeSettings {
         None,
         // oxidizer vent valve
         Some(ValveEntry {
-            target_state_promille: 500,
+            init_state_promille: 500,
             kind: Valve::Servo(ServoValve {
                 pwm_con: crate::board::HighCurrentOutput::_2,
                 power_con: Some(crate::board::HighCurrentOutput::_1),
@@ -76,7 +81,7 @@ pub const NODE5: NodeSettings = NodeSettings {
         None,
         // Presurization Valve
         Some(ValveEntry {
-            target_state_promille: 500,
+            init_state_promille: 500,
             kind: Valve::Servo(ServoValve {
                 pwm_con: crate::board::HighCurrentOutput::_2,
                 power_con: Some(crate::board::HighCurrentOutput::_1),
@@ -89,7 +94,7 @@ pub const NODE5: NodeSettings = NodeSettings {
         None,
         // Vent Valve
         Some(ValveEntry {
-            target_state_promille: 500,
+            init_state_promille: 500,
             kind: Valve::Servo(ServoValve {
                 pwm_con: crate::board::HighCurrentOutput::_4,
                 power_con: Some(crate::board::HighCurrentOutput::_3),
@@ -115,7 +120,10 @@ pub const NODE5: NodeSettings = NodeSettings {
         Some(Sensor {
             kind: SensorKind::SimplePressure(
                 // TODO: calib
-                PressureSensorCalib { gain: 0.0, offset: 0.0 },
+                PressureSensorCalib {
+                    linear_factor: 0.0,
+                    offset: 0.0,
+                },
             ),
             bus_idx: 0,
             sensor_idx: 1,
@@ -123,21 +131,30 @@ pub const NODE5: NodeSettings = NodeSettings {
         // pressure sensor regulator lower
         Some(Sensor {
             // TODO: calib
-            kind: SensorKind::SimplePressure(PressureSensorCalib { gain: 0.0, offset: 0.0 }),
+            kind: SensorKind::SimplePressure(PressureSensorCalib {
+                linear_factor: 0.0,
+                offset: 0.0,
+            }),
             bus_idx: 0,
             sensor_idx: 2,
         }),
         // pressure sensor upper oxidizer
         Some(Sensor {
             // TODO: calib
-            kind: SensorKind::SimplePressure(PressureSensorCalib { gain: 0.0, offset: 0.0 }),
+            kind: SensorKind::SimplePressure(PressureSensorCalib {
+                linear_factor: 0.0,
+                offset: 0.0,
+            }),
             bus_idx: 1,
             sensor_idx: 0,
         }),
         // presssure sensor pressurant (N2) tank
         Some(Sensor {
             // TODO: calib
-            kind: SensorKind::SimplePressure(PressureSensorCalib { gain: 0.0, offset: 0.0 }),
+            kind: SensorKind::SimplePressure(PressureSensorCalib {
+                linear_factor: 0.0,
+                offset: 0.0,
+            }),
             bus_idx: 1,
             sensor_idx: 1,
         }),
@@ -158,7 +175,7 @@ pub const NODE6: NodeSettings = NodeSettings {
         None,
         // main valve
         Some(ValveEntry {
-            target_state_promille: 500,
+            init_state_promille: 500,
             kind: Valve::Servo(ServoValve {
                 pwm_con: crate::board::HighCurrentOutput::_2,
                 power_con: Some(crate::board::HighCurrentOutput::_1),
@@ -171,7 +188,7 @@ pub const NODE6: NodeSettings = NodeSettings {
         None,
         // fill and dump valve
         Some(ValveEntry {
-            target_state_promille: 500,
+            init_state_promille: 500,
             kind: Valve::Servo(ServoValve {
                 pwm_con: crate::board::HighCurrentOutput::_4,
                 power_con: Some(crate::board::HighCurrentOutput::_3),
@@ -183,29 +200,31 @@ pub const NODE6: NodeSettings = NodeSettings {
         }),
     ]),
     sensor_mapping: SensorMapping([
+        // FIXME: this is a test
         Some(Sensor {
-            kind: crate::sensors::SensorKind::SimplePressure(PressureSensorCalib {
-                // TODO: calib
-                gain: 0.0,
-                offset: 0.0,
-            }),
+            kind: sensors::PROV_100BAR_H,
             bus_idx: 0,
             sensor_idx: 0,
         }),
-        Some(Sensor {
-            kind: crate::sensors::SensorKind::SimplePressure(
-                // TODO: calib
-                PressureSensorCalib { gain: 0.0, offset: 0.0 },
-            ),
-            bus_idx: 0,
-            sensor_idx: 1,
-        }),
-        Some(Sensor {
-            // TODO: calib
-            kind: crate::sensors::SensorKind::SimpleTemp(TempSensorCalib { gain: 0.0, offset: 0.0 }),
-            bus_idx: 0,
-            sensor_idx: 2,
-        }),
+        // Some(Sensor {
+        //     kind: SensorKind::SimplePressure(
+        //         // TODO: calib
+        //         PressureSensorCalib {
+        //             linear_factor: 0.0,
+        //             offset: 0.0,
+        //         },
+        //     ),
+        //     bus_idx: 0,
+        //     sensor_idx: 1,
+        // }),
+        // Some(Sensor {
+        //     // TODO: calib
+        //     kind: crate::sensors::SensorKind::SimpleTemp(TempSensorCalib { gain: 0.0, offset: 0.0 }),
+        //     bus_idx: 0,
+        //     sensor_idx: 2,
+        // }),
+        None,
+        None,
         None,
         None,
         None,

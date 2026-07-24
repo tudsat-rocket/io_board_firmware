@@ -1,7 +1,7 @@
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::mutex::Mutex;
 
-use crate::valves::{self, NUM_SUPPORTED_VALVES, VALVES};
+use crate::valves::NUM_SUPPORTED_VALVES;
 
 pub static STORE: Mutex<CriticalSectionRawMutex, CanInterfaceStore> = Mutex::new(CanInterfaceStore::new_empty());
 

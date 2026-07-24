@@ -3,24 +3,6 @@ use embassy_sync::mutex::Mutex;
 
 use crate::board::high_current_outputs::{GenericHcoController, HcoControl, HighCurrentOutput, Level};
 
-// TODO: gather this somewhere global
-pub static VALVES: Mutex<CriticalSectionRawMutex, ValveMapping> = Mutex::new(ValveMapping([
-    None,
-    None,
-    None,
-    Some(ValveEntry {
-        target_state_promille: 0,
-        kind: Valve::Servo(ServoValve {
-            power_con: Some(HighCurrentOutput::_3),
-            pwm_con: HighCurrentOutput::_4,
-            calib: ServoValveCalib {
-                open_us: 1000,
-                closed_us: 2000,
-            },
-        }),
-    }),
-]));
-
 pub const NUM_SUPPORTED_VALVES: usize = 4;
 
 pub struct SolenoidVavle {
@@ -35,7 +17,7 @@ pub struct ServoValve {
 
 pub struct ValveEntry {
     pub kind: Valve,
-    pub target_state_promille: u16,
+    pub init_state_promille: u16,
 }
 
 pub struct ServoValveCalib {
@@ -90,7 +72,7 @@ impl ValveMapping {
             defmt::error!("tried to set valve with out of range target");
             return Err(());
         }
-        v.target_state_promille = open_promille;
+        v.init_state_promille = open_promille;
 
         match &v.kind {
             Valve::Solenoid(v_kind) => {

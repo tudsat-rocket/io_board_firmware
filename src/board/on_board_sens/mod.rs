@@ -49,6 +49,7 @@ impl OnboardSensRev3 {
         embassy_time::Timer::after_micros(20).await;
 
         let vref_sample = adc.read(&mut vref, sample_time).await;
+        defmt::error!("vref_sample: {}", vref_sample);
         // guard against division by 0
         let vref_sample = vref_sample.max(1);
 

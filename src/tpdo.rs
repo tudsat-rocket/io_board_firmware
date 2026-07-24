@@ -89,7 +89,7 @@ pub struct ProcessDataCanId {
 }
 impl From<ProcessDataCanId> for u16 {
     fn from(value: ProcessDataCanId) -> Self {
-        (value.node_id as u16 & 0b1111) | (((value.kind as u16) << 4) & 0b111_1111_0000)
+        ((value.node_id as u16 & 0b1111) | (((value.kind as u16) << 4) & 0b1_1111_0000)) | 0x200
     }
 }
 
@@ -97,10 +97,10 @@ impl TryFrom<u16> for ProcessDataCanId {
     type Error = ();
     fn try_from(value: u16) -> Result<Self, ()> {
         // 0d512 = 2^9
-        if !(0x1800..0x1A00).contains(&value) {
+        if !(0x200..(0x200 + 512)).contains(&value) {
             return Err(());
         }
-        let identifier: u16 = (value >> 4) & 0b111_1111;
+        let identifier: u16 = (value >> 4) & 0b1_1111;
         let kind = PdMessageKind::try_from(identifier as u8);
         let Ok(kind) = kind else {
             return Err(());

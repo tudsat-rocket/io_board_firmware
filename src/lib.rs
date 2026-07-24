@@ -40,9 +40,3 @@ pub const NODE_NAME: &str = "I/O [rev3]";
 static CANCAN: CanCanChannels<CriticalSectionRawMutex, Frame> = CanCanChannels::new();
 
 pub static EXECUTOR_HIGH: InterruptExecutor = InterruptExecutor::new();
-
-/// Runs cancan, the firmware updater/bootloader task.
-#[embassy_executor::task]
-pub async fn run_cancan(cancan: CanCan<Flash<'static, embassy_stm32::flash::Blocking>>) {
-    cancan.run(&crate::CANCAN).await
-}

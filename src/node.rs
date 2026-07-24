@@ -1,6 +1,9 @@
 use embassy_executor::{InterruptExecutor, Spawner};
+use embassy_stm32::flash::{Blocking, Flash};
 use embassy_sync::pubsub::PubSubChannel;
 use embassy_time::Duration;
+
+use cancan::{CanCan, CanCanConfig};
 
 #[cfg(feature = "rev3")]
 use crate::board::{CurrentSens, OnboardSensRev3, VoltageSens};
@@ -42,6 +45,21 @@ impl NodeSettings {
 
 pub async fn spawn_node(spawner: Spawner, settings: NodeSettings) {
     let mut board: Board = init_board(spawner).await;
+
+    let cancan_config = CanCanConfig {
+        // FIXME:
+        node_id: settings.node_id, // crate::NODE_ID,
+        name: "I/O generic",       // crate::NODE_NAME,
+        chip_id: embassy_stm32::pac::DBGMCU.idcode().read().0,
+        chip_uid: embassy_stm32::uid::uid(),
+        flash_kib: (embassy_stm32::flash::FLASH_SIZE / 1024) as u16,
+        build_id: crate::CANCAN_BUILD_ID,
+        build_timestamp: crate::CANCAN_BUILD_TIMESTAMP,
+        ..Default::default()
+    };
+
+    let mut cancan = CanCan::new(cancan_config, Flash::new_blocking(board.flash_peri));
+
     // let mut p = hw::setup();
     // let mut iwdg = IndependentWatchdog::new(p.IWDG, 512_000); // 512ms timeout
     // iwdg.unleash();
@@ -49,14 +67,8 @@ pub async fn spawn_node(spawner: Spawner, settings: NodeSettings) {
     let can_in = CAN_IN.init(PubSubChannel::new());
     let can_out = CAN_OUT.init(PubSubChannel::new());
 
-    crate::can::spawn(
-        board.can1,
-        &mut board.cancan,
-        spawner,
-        can_in.publisher().unwrap(),
-        can_out.subscriber().unwrap(),
-    )
-    .await;
+    crate::can::spawn(board.can1, &mut cancan, spawner, can_in.publisher().unwrap(), can_out.subscriber().unwrap())
+        .await;
 
     spawner.spawn(
         sensors::run_sensors(
@@ -74,6 +86,7 @@ pub async fn spawn_node(spawner: Spawner, settings: NodeSettings) {
         (can_out.publisher().unwrap(), can_in.subscriber().unwrap()),
         board.hco_controller,
         settings.node_id,
+        settings.valve_mapping,
     );
     spawner.spawn(run_can_command_listener(can_open_interface).unwrap());
 
@@ -84,7 +97,13 @@ pub async fn spawn_node(spawner: Spawner, settings: NodeSettings) {
     #[cfg(feature = "rev3")]
     spawner.spawn(onboard_sens_debug(board.onboard_sens).unwrap());
 
-    spawner.spawn(crate::run_cancan(board.cancan).unwrap());
+    spawner.spawn(run_cancan(cancan).unwrap());
+}
+
+/// Runs cancan, the firmware updater/bootloader task.
+#[embassy_executor::task]
+pub async fn run_cancan(cancan: CanCan<Flash<'static, embassy_stm32::flash::Blocking>>) {
+    cancan.run(&crate::CANCAN).await
 }
 
 #[embassy_executor::task]

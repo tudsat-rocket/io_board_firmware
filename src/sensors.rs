@@ -10,12 +10,12 @@ use crate::ext_adc::{AMPLIFIER_ADDRESSES, ExtAdcs, NUM_ADCS, SensorSettings};
 use crate::store::STORE;
 
 pub struct PressureSensorCalib {
-    pub gain: f32,
     pub offset: f32,
+    pub linear_factor: f32,
 }
 impl PressureSensorCalib {
-    pub fn apply(&self, diff: f32) -> f32 {
-        self.gain * diff + self.offset
+    pub fn apply(&self, raw: f32) -> f32 {
+        (raw - self.offset) * self.linear_factor + 1.013
     }
 }
 
@@ -57,7 +57,7 @@ pub async fn run_sensors(
     mut com2_i2c: Option<&'static mut I2c<'static, Async, Master>>,
     settings: SensorSettings,
     mapping: SensorMapping,
-) {
+) -> ! {
     let mut ticker = Ticker::every(settings.measure_interval);
     let enabled: [bool; NUM_ADCS] = [false; NUM_ADCS];
     let mut adcs = ExtAdcs::new(enabled);
@@ -100,12 +100,12 @@ pub async fn run_sensors(
                         let raw = adcs.measurements.0[mapping.bus_idx * AMPLIFIER_ADDRESSES.len() + mapping.sensor_idx]
                             .map(|r| r.value);
                         let Some(raw) = raw else {
-                            warn!("amplifier mapped to sensor could not be read");
                             continue;
                         };
+
                         let pressure = calib.apply(raw as f32);
                         // TODO: check unit conversion
-                        let pressure_kilo_pc = pressure as u16;
+                        let pressure_kilo_pc = (pressure * 100.0) as u16;
                         store.selected_sensors[idx] = pressure_kilo_pc;
                     }
                     SensorKind::SimpleTemp(calib) => {

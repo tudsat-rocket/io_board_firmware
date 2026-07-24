@@ -2,6 +2,7 @@ use embassy_executor::Spawner;
 use embassy_stm32::flash::{Blocking, Flash};
 use embassy_stm32::gpio::{Level, Output, Speed};
 use embassy_stm32::{
+    Peri,
     i2c::{I2c, Master},
     mode::Async,
 };
@@ -41,16 +42,17 @@ pub struct Board {
     #[cfg(feature = "rev3")]
     pub onboard_sens: OnboardSensRev3,
     // can2: embassy_stm32::can::Can<'static>,
-    pub cancan: CanCan<Flash<'static, Blocking>>,
+    // pub cancan: CanCan<Flash<'static, Blocking>>,
+    pub flash_peri: Peri<'static, peripherals::FLASH>,
 }
 
 static COM1_I2C: StaticCell<I2c<'static, Async, Master>> = StaticCell::new();
 static COM2_I2C: StaticCell<I2c<'static, Async, Master>> = StaticCell::new();
 
 // current sensing
-use embassy_stm32::adc;
 use embassy_stm32::dma;
 use embassy_stm32::peripherals::{ADC1, DMA1_CH1};
+use embassy_stm32::{adc, peripherals};
 embassy_stm32::bind_interrupts!(struct Irqs {
     ADC1_2 => adc::InterruptHandler<ADC1>;
     DMA1_CHANNEL1 => dma::InterruptHandler<DMA1_CH1>;
@@ -76,14 +78,21 @@ pub async fn init_board(spawner: Spawner) -> Board {
     let com1_i2c = COM1_I2C.init(I2c::new(p.I2C1, p.PB6, p.PB7, p.DMA1_CH6, p.DMA1_CH7, hw::Irqs, i2c_config));
     let com2_i2c = COM2_I2C.init(I2c::new(p.I2C2, p.PB10, p.PB11, p.DMA1_CH4, p.DMA1_CH5, hw::Irqs, i2c_config));
 
-    #[cfg(feature = "rev2")]
-    let hco_controller =
-        GenericHcoController::Rev2(HcoControllerRev2::new(p.PC0, p.PC15, p.PB0, p.PB1, p.TIM2, p.TIM3).await);
-
     // FIXME: temp
     let mut hco_state_temp = HcoState::default();
+    // rev3
     // hco_state_temp.set_high(HighCurrentOutput::_1);
+    // hco_state_temp.set_pwm_micros(HighCurrentOutput::_2, 1500);
     // hco_state_temp.set_high(HighCurrentOutput::_3);
+    // hco_state_temp.set_pwm_micros(HighCurrentOutput::_4, 1500);
+    // rev2
+    // hco_state_temp.set_high(HighCurrentOutput::_3);
+    // hco_state_temp.set_pwm_micros(HighCurrentOutput::_4, 1500);
+
+    #[cfg(feature = "rev2")]
+    let hco_controller = GenericHcoController::Rev2(
+        HcoControllerRev2::new(p.PC0, p.PC15, p.PB0, p.PB1, p.TIM2, p.TIM3, hco_state_temp).await,
+    );
 
     #[cfg(feature = "rev3")]
     let hco_controller = GenericHcoController::Rev3(
@@ -119,20 +128,6 @@ pub async fn init_board(spawner: Spawner) -> Board {
     )
     .await;
 
-    let cancan_config = CanCanConfig {
-        // FIXME:
-        node_id: 2,          // crate::NODE_ID,
-        name: "I/O generic", // crate::NODE_NAME,
-        chip_id: embassy_stm32::pac::DBGMCU.idcode().read().0,
-        chip_uid: embassy_stm32::uid::uid(),
-        flash_kib: (embassy_stm32::flash::FLASH_SIZE / 1024) as u16,
-        build_id: crate::CANCAN_BUILD_ID,
-        build_timestamp: crate::CANCAN_BUILD_TIMESTAMP,
-        ..Default::default()
-    };
-
-    let cancan = CanCan::new(cancan_config, Flash::new_blocking(p.FLASH));
-
     Board {
         hco_controller,
         leds: led_pub_sub.publisher().unwrap(),
@@ -141,7 +136,9 @@ pub async fn init_board(spawner: Spawner) -> Board {
         can1,
         #[cfg(feature = "rev3")]
         onboard_sens,
-        cancan,
+        // cancan,
+        // for cancan
+        flash_peri: p.FLASH,
     }
 }
 
@@ -233,8 +230,8 @@ pub mod pins_rev2 {
 
     pub type I_SENSE_1 = PA0;
     pub type I_SENSE_2 = PA1;
-    pub type COM_3_1 = PA2;
-    pub type COM_3_2 = PA3;
+    pub type COM3_1 = PA2;
+    pub type COM3_2 = PA3;
     pub type TH_SENSE = PA4;
     pub type IO_2 = PA5;
     pub type A_IN_1 = PA6;
@@ -251,17 +248,17 @@ pub mod pins_rev2 {
     pub type HC_OUT_3 = PB0;
     pub type HC_OUT_4 = PB1;
     pub type SPI_CS_FLASH = PB2;
-    pub type SPI_1_SCK = PB3;
-    pub type SPI_1_MISO = PB4;
-    pub type SPI_1_MOSI = PB5;
-    pub type COM_1_1 = PB6;
-    pub type COM_1_2 = PB7;
-    pub type CAN_1_RX = PB8;
-    pub type CAN_1_TX = PB9;
-    pub type COM_2_1 = PB10;
-    pub type COM_2_2 = PB11;
-    pub type CAN_2_RX = PB12;
-    pub type CAN_2_TX = PB13;
+    pub type SPI1_SCK = PB3;
+    pub type SPI1_MISO = PB4;
+    pub type SPI1_MOSI = PB5;
+    pub type COM1_1 = PB6;
+    pub type COM1_2 = PB7;
+    pub type CAN1_RX = PB8;
+    pub type CAN1_TX = PB9;
+    pub type COM2_1 = PB10;
+    pub type COM2_2 = PB11;
+    pub type CAN2_RX = PB12;
+    pub type CAN2_TX = PB13;
     pub type IO_4 = PB14;
     pub type IO_5 = PB15;
 }

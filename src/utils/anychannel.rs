@@ -2,7 +2,7 @@ use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 
 /// Anything we can (asynchronously for now) send a value to.
 pub trait AnySender<T> {
-    async fn anysend(&mut self, value: T);
+    fn anysend(&mut self, value: T) -> impl Future<Output = ()>;
 }
 
 impl<T, const N: usize> AnySender<T> for embassy_sync::channel::Sender<'_, CriticalSectionRawMutex, T, N> {
@@ -27,7 +27,7 @@ impl<T: Clone, const N: usize> AnySender<T> for embassy_sync::watch::Sender<'_, 
 
 /// Anything we can asynchronously receive a value from.
 pub trait AnyReceiver<T> {
-    async fn anyreceive(&mut self) -> T;
+    fn anyreceive(&mut self) -> impl Future<Output = T>;
 }
 
 impl<T, const N: usize> AnyReceiver<T> for embassy_sync::channel::Receiver<'_, CriticalSectionRawMutex, T, N> {

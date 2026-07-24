@@ -129,8 +129,6 @@ async fn run_rx(
                     continue;
                 }
 
-                info!("received can msg");
-
                 // let Some(data) = frame.data() else {
                 //     continue;
                 // };
@@ -151,7 +149,7 @@ async fn run_rx(
                 publisher.publish_immediate((id_raw, data_array));
             }
             Err(e) => {
-                error!("can_rx: Failed to read envelope: {:?}", Debug2Format(&e))
+                // error!("can_rx: Failed to read envelope: {:?}", Debug2Format(&e))
             }
         }
     }
