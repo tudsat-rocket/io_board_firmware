@@ -139,20 +139,20 @@ impl<SC: AnySender<CanFrame>, RC: AnyReceiver<CanFrame>> CanOpenInterface<SC, RC
         defmt::info!("started CanOpenInterface listen loop");
         loop {
             let (cob_id, body) = self.can.1.anyreceive().await;
-            defmt::info!("cob_id: {}, body: {}", cob_id, Debug2Format(&body));
+            defmt::debug!("cob_id: {}, body: {}", cob_id, Debug2Format(&body));
             let can_msg = CanMessage::new(CanId::Std(cob_id), body.as_slice());
 
             let zencan_msg = match ZencanMessage::try_from(can_msg) {
                 Ok(msg) => msg,
                 Err(e) => {
-                    warn!("could not parse message on bus as canopen: {}", Debug2Format(&e));
+                    defmt::debug!("could not parse message on bus as canopen: {}", Debug2Format(&e));
                     continue;
                 }
             };
 
             match zencan_msg {
                 ZencanMessage::SdoRequest(sdo_req) => {
-                    info!("sdoRequest: {}", Debug2Format(&sdo_req));
+                    defmt::debug!("sdoRequest: {}", Debug2Format(&sdo_req));
                     // unique read or write to an object in the store
                     if cob_id != 0x600 + self.node_id as u16 {
                         // NOTE: this might not cover full canopen spec

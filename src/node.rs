@@ -94,8 +94,8 @@ pub async fn spawn_node(spawner: Spawner, settings: NodeSettings) {
         spawn_tpdo_task(spawner, settings.tpdo_intervals, can_out.publisher().unwrap(), settings.node_id).unwrap(),
     );
 
-    #[cfg(feature = "rev3")]
-    spawner.spawn(onboard_sens_debug(board.onboard_sens).unwrap());
+    // #[cfg(feature = "rev3")]
+    // spawner.spawn(onboard_sens_debug(board.onboard_sens).unwrap());
 
     spawner.spawn(run_cancan(cancan).unwrap());
 }

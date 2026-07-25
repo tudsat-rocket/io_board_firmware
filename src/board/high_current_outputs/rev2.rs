@@ -89,6 +89,7 @@ impl HcoControl for HcoControllerRev2 {
     fn set_state(&mut self, target_state: HcoState) {
         match target_state._1 {
             State::Digital(ref level) => {
+                defmt::info!("hco1: digital level: {}", Debug2Format(&level));
                 self.virtual_timer.enable_input_interrupt(Channel::Ch1, false);
                 match target_state._2 {
                     State::Digital(_) => self.virtual_timer.enable_update_interrupt(false),
@@ -97,6 +98,7 @@ impl HcoControl for HcoControllerRev2 {
                 self.out1.try_lock().unwrap().as_mut().map(|o| o.set_level(gpio::Level::from(*level)));
             }
             State::Pwm(duty) => {
+                defmt::info!("hco1: pwm duty: {}", Debug2Format(&duty));
                 self.virtual_timer.enable_update_interrupt(true);
                 self.virtual_timer.enable_input_interrupt(Channel::Ch1, true);
                 PULSE_US_PWM1.store(duty.into(), Ordering::Relaxed);
@@ -219,28 +221,46 @@ impl interrupt::typelevel::Handler<interrupt::typelevel::TIM2> for Tim2Handler {
     unsafe fn on_interrupt() {
         let timer = embassy_stm32::pac::TIM2;
         let status_regs = timer.sr().read();
+
+        let (hco1_is_pwm, hco2_is_pwm) = {
+            let Ok(guard) = HCO_STATE.try_lock() else {
+                error!("mutex bug");
+                return;
+            };
+
+            (matches!(guard._1, State::Pwm(_)), matches!(guard._2, State::Pwm(_)))
+        };
+
         if status_regs.uif() {
+            // update interrupt flag is set, meaning timer event has occured
             timer.sr().modify(|w| w.set_uif(false));
-            let pulse_width_ch1 = PULSE_US_PWM1.load(Ordering::Relaxed);
-            let pulse_width_ch2 = PULSE_US_PWM2.load(Ordering::Relaxed);
-            timer.ccr(0).write(|w| w.set_ccr(pulse_width_ch1));
-            timer.ccr(1).write(|w| w.set_ccr(pulse_width_ch2));
-            if let Ok(mut guard) = HCO1_OUT.try_lock()
-                && let Some(output) = guard.as_mut()
-            {
-                output.set_high();
-            } else {
-                error!("mutex bug");
+
+            if hco1_is_pwm {
+                let pulse_width_ch1 = PULSE_US_PWM1.load(Ordering::Relaxed);
+                timer.ccr(0).write(|w| w.set_ccr(pulse_width_ch1));
+                if let Ok(mut guard) = HCO1_OUT.try_lock()
+                    && let Some(output) = guard.as_mut()
+                {
+                    output.set_high();
+                } else {
+                    error!("mutex bug");
+                }
             }
-            if let Ok(mut guard) = HCO2_OUT.try_lock()
-                && let Some(output) = guard.as_mut()
-            {
-                output.set_high();
-            } else {
-                error!("mutex bug");
+
+            if hco2_is_pwm {
+                let pulse_width_ch2 = PULSE_US_PWM2.load(Ordering::Relaxed);
+                timer.ccr(1).write(|w| w.set_ccr(pulse_width_ch2));
+                if let Ok(mut guard) = HCO2_OUT.try_lock()
+                    && let Some(output) = guard.as_mut()
+                {
+                    output.set_high();
+                } else {
+                    error!("mutex bug");
+                }
             }
         }
-        if status_regs.ccif(0) {
+        if status_regs.ccif(0) && hco1_is_pwm {
+            // ccif flag is set, meaing capture has occured on channel -> reset ccif flag
             timer.sr().modify(|w| w.set_ccif(0, false));
             if let Ok(mut guard) = HCO1_OUT.try_lock()
                 && let Some(output) = guard.as_mut()
@@ -250,7 +270,8 @@ impl interrupt::typelevel::Handler<interrupt::typelevel::TIM2> for Tim2Handler {
                 error!("mutex bug");
             }
         }
-        if status_regs.ccif(1) {
+        if status_regs.ccif(1) && hco2_is_pwm {
+            // ccif flag is set, meaing capture has occured on channel -> reset ccif flag
             timer.sr().modify(|w| w.set_ccif(1, false));
             if let Ok(mut guard) = HCO2_OUT.try_lock()
                 && let Some(output) = guard.as_mut()

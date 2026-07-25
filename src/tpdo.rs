@@ -11,15 +11,15 @@ use crate::{
 };
 
 pub struct TpdoIntervals {
-    valves: Option<Duration>,
-    binary_outpus: Option<Duration>,
-    pwm_us: Option<Duration>,
-    raw_bus0a: Option<Duration>,
-    raw_bus0b: Option<Duration>,
-    raw_bus1a: Option<Duration>,
-    raw_bus1b: Option<Duration>,
-    sensor0: Option<Duration>,
-    sensor1: Option<Duration>,
+    pub valves: Option<Duration>,
+    pub binary_outpus: Option<Duration>,
+    pub pwm_us: Option<Duration>,
+    pub raw_bus0a: Option<Duration>,
+    pub raw_bus0b: Option<Duration>,
+    pub raw_bus1a: Option<Duration>,
+    pub raw_bus1b: Option<Duration>,
+    pub sensor0: Option<Duration>,
+    pub sensor1: Option<Duration>,
 }
 
 impl TpdoIntervals {

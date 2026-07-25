@@ -4,8 +4,12 @@
 use embassy_executor::Spawner;
 use embassy_time::Duration;
 use io_board::{
-    ext_adc::SensorSettings, node::NodeSettings, sensors::SensorMapping, tpdo::TpdoIntervals, valves::ValveMapping,
-    zenith_mapping,
+    ext_adc::SensorSettings,
+    node::NodeSettings,
+    sensors::SensorMapping,
+    tpdo::TpdoIntervals,
+    valves::ValveMapping,
+    zenith_mapping::{self, NODE6REV2TEST},
 };
 
 use {defmt_rtt as _, panic_probe as _};
@@ -25,5 +29,33 @@ pub const EMPTY: NodeSettings = NodeSettings {
     sensor_settings: SensorSettings {
         measure_interval: Duration::from_millis(10),
     },
-    tpdo_intervals: TpdoIntervals::default(),
+    tpdo_intervals: no_tpdo(),
 };
+
+const fn no_tpdo() -> TpdoIntervals {
+    TpdoIntervals {
+        valves: Some(Duration::from_millis(1000)),
+        binary_outpus: None,
+        pwm_us: None,
+        raw_bus0a: None,
+        raw_bus0b: None,
+        raw_bus1a: None,
+        raw_bus1b: None,
+        sensor0: None,
+        sensor1: None,
+    }
+}
+
+const fn slow() -> TpdoIntervals {
+    TpdoIntervals {
+        valves: Some(Duration::from_millis(1000)),
+        binary_outpus: Some(Duration::from_millis(1000)),
+        pwm_us: Some(Duration::from_millis(1000)),
+        raw_bus0a: Some(Duration::from_millis(1000)),
+        raw_bus0b: None,
+        raw_bus1a: Some(Duration::from_millis(1000)),
+        raw_bus1b: None,
+        sensor0: Some(Duration::from_millis(1000)),
+        sensor1: None,
+    }
+}

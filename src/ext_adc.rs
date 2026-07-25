@@ -84,11 +84,7 @@ impl ExtAdcs {
                 let Some(ref mut i2c) = i2c else {
                     continue;
                 };
-                // let success = read_i2c_adc(i2c, *addr).await.is_ok();
-                let success = match read_i2c_adc(i2c, *addr).await {
-                    Ok(reading) => true,
-                    Err(e) => false,
-                };
+                let success = read_i2c_adc(i2c, *addr).await.is_ok();
                 if success {
                     self.enabled[bus_idx * AMPLIFIER_ADDRESSES.len() + amp_idx] = true;
                     let print_num = bus_idx + 1;
