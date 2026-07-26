@@ -34,7 +34,10 @@ compile_error!("rev2 and rev3 are mutually exclusive");
 compile_error!("must enable exactly one of: rev2, rev3");
 
 pub struct Board {
-    pub hco_controller: GenericHcoController,
+    #[cfg(feature = "rev2")]
+    pub hco_controller: HcoControllerRev2,
+    #[cfg(feature = "rev3")]
+    pub hco_controller: HcoControllerRev3,
     pub leds: StateLedPub,
     pub com1_i2c: &'static mut I2c<'static, Async, Master>,
     pub com2_i2c: &'static mut I2c<'static, Async, Master>,
@@ -93,14 +96,10 @@ pub async fn init_board(spawner: Spawner) -> Board {
     // hco_state_temp.set_pwm_micros(HighCurrentOutput::_4, 1500);
 
     #[cfg(feature = "rev2")]
-    let hco_controller = GenericHcoController::Rev2(
-        HcoControllerRev2::new(p.PC0, p.PC15, p.PB0, p.PB1, p.TIM2, p.TIM3, hco_state_temp).await,
-    );
+    let hco_controller = HcoControllerRev2::new(p.PC0, p.PC15, p.PB0, p.PB1, p.TIM2, p.TIM3, hco_state_temp).await;
 
     #[cfg(feature = "rev3")]
-    let hco_controller = GenericHcoController::Rev3(
-        HcoControllerRev3::new(p.PA7, p.PA8, p.PB0, p.PB1, p.TIM1, p.TIM3, hco_state_temp).await,
-    );
+    let hco_controller = HcoControllerRev3::new(p.PA7, p.PA8, p.PB0, p.PB1, p.TIM1, p.TIM3, hco_state_temp).await;
 
     // let can_open_interface =
     //     CanOpenInterface::new((can_out.publisher().unwrap(), can_in.subscriber().unwrap()), hco_controller);

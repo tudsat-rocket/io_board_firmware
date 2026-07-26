@@ -3,8 +3,8 @@ use zencan_common::{CanMessage, messages::CanId, sdo::SdoRequest};
 
 use defmt::{Debug2Format, info, warn};
 
+use crate::board::HcoControl;
 use crate::board::high_current_outputs::{HighCurrentOutput as Hco, Level, PwmMicros, State};
-use crate::board::{GenericHcoController, HcoControl};
 use crate::can::{CanFrame, CanRxSub, CanTxPub};
 use crate::store::{CanInterfaceStore, STORE, StoreWriteError, store_idx::*};
 use crate::utils::anychannel::{AnyReceiver, AnySender};
@@ -14,12 +14,12 @@ pub struct CanOpenInterface<SC: AnySender<CanFrame>, RC: AnyReceiver<CanFrame>> 
     node_id: u8,
     can: (SC, RC),
     // store_dirty_sig: StoreDirtySigType,
-    hco_controller: GenericHcoController,
+    hco_controller: &'static mut dyn HcoControl,
     valves_mapping: ValveMapping,
 }
 
 /// update store hco to reflect new actual state
-pub fn update_store_hco_state(store: &mut CanInterfaceStore, hco_controller: &mut GenericHcoController) {
+pub fn update_store_hco_state(store: &mut CanInterfaceStore, hco_controller: &mut dyn HcoControl) {
     let state = hco_controller.get_state();
     for (i, hco_binary_state) in store.hco_binary.iter_mut().enumerate() {
         *hco_binary_state = match state.get_state_0_indexed(i) {
@@ -42,7 +42,7 @@ async fn try_write_to_store(
     index: u16,
     sub: u8,
     data: &[u8],
-    hco_controller: &mut GenericHcoController,
+    hco_controller: &mut dyn HcoControl,
     valves_mapping: &mut ValveMapping,
 ) -> Result<(), StoreWriteError> {
     // defmt::debug!("fn try_write_to_store: index: {}, sub: {}", index, sub);
@@ -126,7 +126,12 @@ async fn try_write_to_store(
 }
 
 impl<SC: AnySender<CanFrame>, RC: AnyReceiver<CanFrame>> CanOpenInterface<SC, RC> {
-    pub fn new(can: (SC, RC), hco_controller: GenericHcoController, node_id: u8, valves_mapping: ValveMapping) -> Self {
+    pub fn new(
+        can: (SC, RC),
+        hco_controller: &'static mut dyn HcoControl,
+        node_id: u8,
+        valves_mapping: ValveMapping,
+    ) -> Self {
         Self {
             node_id,
             //store_dirty_sig,
@@ -191,7 +196,7 @@ impl<SC: AnySender<CanFrame>, RC: AnyReceiver<CanFrame>> CanOpenInterface<SC, RC
                                     index,
                                     sub,
                                     data,
-                                    &mut self.hco_controller,
+                                    &mut *self.hco_controller,
                                     &mut self.valves_mapping,
                                 )
                                 .await

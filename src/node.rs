@@ -4,9 +4,15 @@ use embassy_sync::pubsub::PubSubChannel;
 use embassy_time::Duration;
 
 use cancan::{CanCan, CanCanConfig};
+use static_cell::StaticCell;
 
 #[cfg(feature = "rev3")]
 use crate::board::{CurrentSens, OnboardSensRev3, VoltageSens};
+
+#[cfg(feature = "rev2")]
+use crate::board::HceControllerRev2;
+#[cfg(feature = "rev3")]
+use crate::board::HcoControllerRev3;
 
 use crate::board::{Board, init_board};
 use crate::can::{CAN_IN, CAN_OUT};
@@ -21,6 +27,11 @@ use crate::{
     tpdo::{TpdoIntervals, spawn_tpdo_task},
     valves::ValveMapping,
 };
+
+#[cfg(feature = "rev2")]
+static HCO_CONTROLER: StaticCell<HcoControllerRev2> = StaticCell::new();
+#[cfg(feature = "rev3")]
+static HCO_CONTROLER: StaticCell<HcoControllerRev3> = StaticCell::new();
 
 pub struct NodeSettings {
     pub node_id: u8,
@@ -82,9 +93,11 @@ pub async fn spawn_node(spawner: Spawner, settings: NodeSettings) {
 
     // spawner.spawn(run_ereg(hco_contoler).unwrap());
 
+    let hco_controler = HCO_CONTROLER.init(board.hco_controller);
+
     let can_open_interface = CanOpenInterface::new(
         (can_out.publisher().unwrap(), can_in.subscriber().unwrap()),
-        board.hco_controller,
+        hco_controler,
         settings.node_id,
         settings.valve_mapping,
     );

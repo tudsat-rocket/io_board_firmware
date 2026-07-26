@@ -1,19 +1,14 @@
-use core::sync::atomic::{AtomicU16, Ordering};
-use defmt::{Debug2Format, error};
-
 use embassy_stm32::{
     Peri,
-    gpio::{self, AfioRemap, Output, OutputType, Speed},
-    interrupt::{self, InterruptExt},
+    gpio::{AfioRemap, OutputType},
     peripherals as p,
     time::Hertz,
     timer::{
-        Ch1, Ch2, Ch3, Ch4, Channel, TimerPin,
-        low_level::{CountingMode, OutputCompareMode, Timer},
+        Ch1, Ch2, Ch3, Ch4, TimerPin,
+        low_level::CountingMode,
         simple_pwm::{PwmPin, SimplePwm, SimplePwmChannel},
     },
 };
-use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, mutex::Mutex};
 
 use super::HcoControl;
 use super::types::*;
@@ -36,7 +31,6 @@ impl HcoControl for HcoControllerRev3 {
     }
 
     fn set_pwm_micros(&mut self, output: HighCurrentOutput, micros: u16) {
-        defmt::info!("{} set pwm us: {}", Debug2Format(&output), micros);
         let mut new_state = self.get_state();
         new_state.set_pwm_micros(output, micros);
         self.set_state(new_state);
@@ -45,9 +39,6 @@ impl HcoControl for HcoControllerRev3 {
         self.state.clone()
     }
     fn set_state(&mut self, target_state: HcoState) {
-        // if self.state == target_state {
-        //     return;
-        // }
         self.state = target_state;
         match self.state._1 {
             State::Digital(Level::High) => self.out1.set_duty_cycle_fully_on(),

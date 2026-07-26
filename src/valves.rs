@@ -1,7 +1,4 @@
-use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-use embassy_sync::mutex::Mutex;
-
-use crate::board::high_current_outputs::{GenericHcoController, HcoControl, HighCurrentOutput, Level};
+use crate::board::high_current_outputs::{HcoControl, HighCurrentOutput, Level};
 
 pub const NUM_SUPPORTED_VALVES: usize = 4;
 
@@ -58,7 +55,7 @@ impl ValveMapping {
         &mut self,
         valve_num: usize,
         open_promille: u16,
-        hco_controler: &mut GenericHcoController,
+        hco_controler: &mut dyn HcoControl,
     ) -> Result<(), ()> {
         if valve_num >= self.0.len() {
             defmt::error!("bug: set_valve was called with valve out of range");
