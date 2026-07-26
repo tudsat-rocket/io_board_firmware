@@ -1,10 +1,8 @@
-use crate::ext_adc::SensorSettings;
-use crate::node::NodeSettings;
-use crate::sensors::{PressureSensorCalib, Sensor, SensorKind, SensorMapping, TempSensorCalib};
-use crate::tpdo::TpdoIntervals;
-use crate::valves::{ServoValve, ServoValveCalib, Valve, ValveEntry, ValveMapping};
+use crate::sensors::{PressureSensorCalib, SensorKind, TempSensorCalib};
 
 pub const PROV_100BAR_H: SensorKind = SensorKind::SimplePressure(PressureSensorCalib {
     offset: 76.0,
     linear_factor: 0.232,
 });
+pub const PLACEHOLDER_T: SensorKind = SensorKind::SimpleTemp(TempSensorCalib { gain: 0.0, offset: 0.0 });
+pub const PLACEHOLDER_P: SensorKind = SensorKind::SimpleTemp(TempSensorCalib { gain: 0.0, offset: 0.0 });

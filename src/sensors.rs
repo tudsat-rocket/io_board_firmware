@@ -36,6 +36,25 @@ impl SensorMapping {
     pub const fn new_empty() -> Self {
         Self([const { None }; 8])
     }
+    pub const fn add_consecutive(mut self, kind: SensorKind, bus_idx: usize, adc_idx: usize) -> Option<Self> {
+        let mut first_empty = None;
+        let mut i = 0;
+        // for loops are not const compatiple here
+        while i < self.0.len() {
+            if matches!(self.0[i], None) {
+                first_empty = Some(i);
+                break;
+            }
+            i += 1;
+        }
+
+        let Some(first_empty) = first_empty else {
+            return None;
+        };
+
+        self.0[first_empty] = Some(Sensor { kind, bus_idx, adc_idx });
+        Some(self)
+    }
 }
 
 pub struct Sensor {
@@ -43,7 +62,7 @@ pub struct Sensor {
     /// 0 or 1
     pub bus_idx: usize,
     /// 0..9
-    pub sensor_idx: usize,
+    pub adc_idx: usize,
 }
 
 pub enum SensorKind {
@@ -97,7 +116,7 @@ pub async fn run_sensors(
                 };
                 match &mapping.kind {
                     SensorKind::SimplePressure(calib) => {
-                        let raw = adcs.measurements.0[mapping.bus_idx * AMPLIFIER_ADDRESSES.len() + mapping.sensor_idx]
+                        let raw = adcs.measurements.0[mapping.bus_idx * AMPLIFIER_ADDRESSES.len() + mapping.adc_idx]
                             .map(|r| r.value);
                         let Some(raw) = raw else {
                             continue;
@@ -109,7 +128,7 @@ pub async fn run_sensors(
                         store.selected_sensors[idx] = pressure_kilo_pc;
                     }
                     SensorKind::SimpleTemp(calib) => {
-                        let raw = adcs.measurements.0[mapping.bus_idx * AMPLIFIER_ADDRESSES.len() + mapping.sensor_idx]
+                        let raw = adcs.measurements.0[mapping.bus_idx * AMPLIFIER_ADDRESSES.len() + mapping.adc_idx]
                             .map(|r| r.value);
                         let Some(raw) = raw else {
                             warn!("amplifier mapped to sensor could not be read");

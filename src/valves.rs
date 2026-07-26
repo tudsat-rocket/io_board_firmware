@@ -50,7 +50,39 @@ impl ValveMapping {
     pub const fn new_empty() -> Self {
         Self([const { None }; NUM_SUPPORTED_VALVES])
     }
+    // builder for servo valve at connector 1 (hco1,2) with pinout as used in vehicle
+    pub const fn add_std_servo_hco12(mut self, servo_calib: ServoValveCalib, init_state_promille: u16) -> Option<Self> {
+        if matches!(self.0[1], Some(_)) {
+            return None;
+        }
+        self.0[1] = Some(ValveEntry {
+            kind: Valve::Servo(ServoValve {
+                power_con: Some(HighCurrentOutput::_1),
+                pwm_con: HighCurrentOutput::_2,
+                calib: servo_calib,
+            }),
+            init_state_promille,
+        });
+        Some(self)
+    }
+    // builder for servo valve at connector 2 (hco3,4) with pinout as used in vehicle
+    pub const fn add_std_servo_hco34(mut self, servo_calib: ServoValveCalib, init_state_promille: u16) -> Option<Self> {
+        if matches!(self.0[3], Some(_)) {
+            return None;
+        }
+        self.0[3] = Some(ValveEntry {
+            kind: Valve::Servo(ServoValve {
+                power_con: Some(HighCurrentOutput::_3),
+                pwm_con: HighCurrentOutput::_4,
+                calib: servo_calib,
+            }),
+            init_state_promille,
+        });
+        Some(self)
+    }
+
     /// Valve_num must be within 0..NUM_SUPPORTED_VALVES
+    /// idiomatically this should be a free function
     pub fn set_valve(
         &mut self,
         valve_num: usize,

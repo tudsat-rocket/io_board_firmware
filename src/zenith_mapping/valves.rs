@@ -14,3 +14,8 @@ pub const VENT: ServoValveCalib = ServoValveCalib {
     open_us: 950,
     closed_us: 2050,
 };
+
+pub const PLACEHOLDER_S: ServoValveCalib = ServoValveCalib {
+    open_us: 1000,
+    closed_us: 2000,
+};

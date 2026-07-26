@@ -4,12 +4,7 @@
 use embassy_executor::Spawner;
 use embassy_time::Duration;
 use io_board::{
-    ext_adc::SensorSettings,
-    node::NodeSettings,
-    sensors::SensorMapping,
-    tpdo::TpdoIntervals,
-    valves::ValveMapping,
-    zenith_mapping::{self, NODE6REV2TEST},
+    ext_adc::SensorSettings, node::NodeSettings, sensors::SensorMapping, tpdo::TpdoIntervals, valves::ValveMapping,
 };
 
 use {defmt_rtt as _, panic_probe as _};

@@ -10,7 +10,7 @@ use static_cell::StaticCell;
 use crate::board::{CurrentSens, OnboardSensRev3, VoltageSens};
 
 #[cfg(feature = "rev2")]
-use crate::board::HceControllerRev2;
+use crate::board::HcoControllerRev2;
 #[cfg(feature = "rev3")]
 use crate::board::HcoControllerRev3;
 
