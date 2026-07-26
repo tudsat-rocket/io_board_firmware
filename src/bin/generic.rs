@@ -41,6 +41,7 @@ const fn no_tpdo() -> TpdoIntervals {
     }
 }
 
+#[allow(dead_code)]
 const fn slow() -> TpdoIntervals {
     TpdoIntervals {
         valves: Some(Duration::from_millis(1000)),

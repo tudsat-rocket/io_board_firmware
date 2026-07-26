@@ -1,6 +1,5 @@
 use embassy_executor::Spawner;
-use embassy_stm32::flash::{Blocking, Flash};
-use embassy_stm32::gpio::{Level, Output, Speed};
+use embassy_stm32::gpio::{Level as GpioLevel, Output, Speed};
 use embassy_stm32::{
     Peri,
     i2c::{I2c, Master},
@@ -8,7 +7,6 @@ use embassy_stm32::{
 };
 use embassy_sync::pubsub::PubSubChannel;
 
-use cancan::{CanCan, CanCanConfig};
 use static_cell::StaticCell;
 use {defmt_rtt as _, panic_probe as _};
 
@@ -22,8 +20,6 @@ mod hw;
 #[cfg(feature = "rev3")]
 mod on_board_sens;
 
-#[cfg(feature = "rev3")]
-use crate::board::on_board_sens::OnboardSens3Peri;
 #[cfg(feature = "rev3")]
 pub use crate::board::on_board_sens::*;
 
@@ -106,9 +102,9 @@ pub async fn init_board(spawner: Spawner) -> Board {
     // spawner.spawn(run_can_command_listener(can_open_interface).unwrap());
 
     // status leds
-    let led_red = Output::new(p.PC7, Level::Low, Speed::Low);
-    let led_yellow = Output::new(p.PC8, Level::Low, Speed::Low);
-    let led_white = Output::new(p.PC9, Level::Low, Speed::Low);
+    let led_red = Output::new(p.PC7, GpioLevel::Low, Speed::Low);
+    let led_yellow = Output::new(p.PC8, GpioLevel::Low, Speed::Low);
+    let led_white = Output::new(p.PC9, GpioLevel::Low, Speed::Low);
     let leds = (led_red, led_yellow, led_white);
     let led_pub_sub = leds::STATE_LED_PUB_SUB.init(PubSubChannel::new());
     // spawner.spawn(pdo_watcher(led_pub_sub.publisher().unwrap()).unwrap());

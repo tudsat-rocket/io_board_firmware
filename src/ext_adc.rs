@@ -4,11 +4,9 @@ use embassy_stm32::{
     i2c::{I2c, Master},
     mode::Async,
 };
-use embassy_sync::pubsub::Subscriber;
-use embassy_time::{Duration, Ticker, Timer, with_timeout};
-use heapless::Vec;
+use embassy_time::{Duration, with_timeout};
+use embedded_hal::i2c::Error;
 
-use crate::can::CanTxPub;
 // bus timout if there is a hardware fault or unexpected fault
 const I2C_TIMEOUT: Duration = Duration::from_millis(100);
 
@@ -26,12 +24,6 @@ pub const AMPLIFIER_ADDRESSES: [u8; 9] = [
     0b1011010, // vcc, vcc
 ];
 
-pub enum AmpBoardAddrSetting {
-    Floating,
-    GND,
-    Vcc,
-}
-
 pub const NUM_I2C_BUSES: usize = 2;
 
 pub const NUM_ADCS: usize = AMPLIFIER_ADDRESSES.len() * NUM_I2C_BUSES;
@@ -46,14 +38,10 @@ impl AdcMeasurements {
     pub const fn default() -> Self {
         AdcMeasurements([None; NUM_ADCS])
     }
-    /// bus ids counted from 0
-    pub fn get_measurement_via_addr(&self, bus_id: usize, i2c_address: u8) {
-        todo!()
-    }
-    /// bus ids counted from 0
-    pub fn get_measurement(&self, bus_id: usize, addr0: AmpBoardAddrSetting, addr1: AmpBoardAddrSetting) {
-        todo!()
-    }
+}
+
+pub struct SensorSettings {
+    pub measure_interval: Duration,
 }
 
 pub struct ExtAdcs {
@@ -132,59 +120,17 @@ async fn read_i2c_adc<I2C: embedded_hal_async::i2c::I2c>(
     // https://www.ti.com/lit/ds/symlink/adc101c027.pdf
     let mut buffer: [u8; 2] = [0x00, 0x00];
     // NOTE: this function may never return if there is a power issue or other on the i2c bus
-    let _idontknow = with_timeout(I2C_TIMEOUT, i2c.read(i2c_address, &mut buffer))
+    with_timeout(I2C_TIMEOUT, i2c.read(i2c_address, &mut buffer))
         .await
-        .map_err(|_| embedded_hal_async::i2c::ErrorKind::Other)?;
+        .map_err(|_| embedded_hal_async::i2c::ErrorKind::Other)?
+        .map_err(|i2c_e| i2c_e.kind())?;
 
     let conversion_register = u16::from_be_bytes(buffer);
     let alert_flag = (conversion_register >> 15) > 0;
     let conversion_result = (conversion_register >> 2) & 0x3ff;
-    let milli: f32 = to_millivolts(conversion_result);
-    //defmt::info!("altert: {}, conversion_res: {} => {} mV", alert_flag, conversion_result, milli);
 
     Ok(ExtAdcReading {
         value: conversion_result,
         alert_flag,
     })
 }
-
-fn to_millivolts(sample: u16) -> f32 {
-    let u = 3_300f32 / 1024f32;
-    let milli_v = u * sample as f32;
-    milli_v
-}
-
-pub struct SensorSettings {
-    pub measure_interval: Duration,
-}
-
-// #[embassy_executor::task]
-// pub async fn run_ext_adc_to_can(
-//     mut com1_i2c: Option<&'static mut I2c<'static, Async, Master>>,
-//     mut com2_i2c: Option<&'static mut I2c<'static, Async, Master>>,
-//     can_pub: CanTxPub,
-//     settings: SensorSettings,
-// ) {
-//     const CAN_ID0: u16 = 190;
-//     const CAN_ID1: u16 = 191;
-//     let mut ticker = Ticker::every(settings.measure_interval);
-//     let enabled: [bool; NUM_ADCS] = [false; NUM_ADCS];
-//     let mut adcs = ExtAdcs::new(enabled);
-//     adcs.scan_and_enable(com1_i2c.as_deref_mut(), com2_i2c.as_deref_mut()).await;
-//
-//     loop {
-//         let _ = adcs.read_all(com1_i2c.as_deref_mut(), com2_i2c.as_deref_mut()).await;
-//         // NOTE: publish only from 2 hardcoded i2c devices
-//         // com1_i2c float, float | com2_i2c float, float
-//         let reading0: Option<[u8; 2]> = adcs.measurements.0[0].map(|meas| meas.value.to_le_bytes());
-//         let reading1: Option<[u8; 2]> = adcs.measurements.0[3].map(|meas| meas.value.to_le_bytes());
-//         if let Some(reading) = reading0 {
-//             can_pub.publish_immediate((CAN_ID0, Vec::from_slice(&reading).unwrap()));
-//         }
-//         if let Some(reading) = reading1 {
-//             // can_pub.publish_immediate((CAN_ID1, Vec::from_slice(&reading).unwrap()));
-//         }
-//A
-//         ticker.next().await;
-//     }
-// }

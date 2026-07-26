@@ -1,7 +1,7 @@
 use zencan_common::messages::ZencanMessage;
 use zencan_common::{CanMessage, messages::CanId, sdo::SdoRequest};
 
-use defmt::{Debug2Format, info, warn};
+use defmt::{Debug2Format, warn};
 
 use crate::board::HcoControl;
 use crate::board::high_current_outputs::{HighCurrentOutput as Hco, Level, PwmMicros, State};

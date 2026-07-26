@@ -1,4 +1,4 @@
-use defmt::{Debug2Format, error, info};
+use defmt::info;
 use embassy_executor::Spawner;
 use embassy_futures::select::{Either, select};
 use embassy_stm32::can::{Can, CanRx, CanTx, Fifo, Frame, Id, StandardId, filter};
@@ -148,24 +148,10 @@ async fn run_rx(
 
                 publisher.publish_immediate((id_raw, data_array));
             }
-            Err(e) => {
+            Err(_e) => {
+                // TODO: ratelimiting
                 // error!("can_rx: Failed to read envelope: {:?}", Debug2Format(&e))
             }
         }
     }
 }
-
-// pub fn configure(can: &mut Can, role: IoBoardRole) {
-//     let command_prefix = CanBusMessageId::IoBoardCommand(role, 0).into();
-//     let command_filter =
-//         filter::Mask32::frames_with_std_id(StandardId::new(command_prefix).unwrap(), StandardId::new(0x7f0).unwrap());
-//
-//     let telemetry_filter = filter::Mask32::frames_with_std_id(
-//         StandardId::new(CanBusMessageId::TelemetryBroadcast(0).into()).unwrap(),
-//         StandardId::new(0x700).unwrap(),
-//     );
-//
-//     can.modify_filters()
-//         .enable_bank(0, Fifo::Fifo0, command_filter)
-//         .enable_bank(1, Fifo::Fifo1, telemetry_filter);
-// }

@@ -8,15 +8,18 @@ use embassy_stm32::{
 use {defmt_rtt as _, panic_probe as _};
 
 // pub trait OnboardAnalouge {
+#[allow(async_fn_in_trait)]
 pub trait CurrentSens {
     async fn hco12_current_ma(&mut self) -> u16;
     async fn hco34_current_ma(&mut self) -> u16;
     async fn logic_supply_current_ma(&mut self) -> Option<u16>;
 }
 
+#[allow(async_fn_in_trait)]
 pub trait TemperatureSens {
     async fn temperature_milli_c(&mut self) -> i32;
 }
+#[allow(async_fn_in_trait)]
 pub trait VoltageSens {
     async fn logic_supply_voltage_milli_v(&mut self) -> u16;
     async fn hco12_supply_voltage_milli_v(&mut self) -> u16;
@@ -65,10 +68,10 @@ impl OnboardSensRev3 {
         const VREFINT_MV: u32 = 1200;
         ((raw as u32 * VREFINT_MV) / (self.vref_sample as u32)) as u16
     }
-    fn reading_to_uv(&self, raw: u16) -> u32 {
-        const VREFINT_MV: u32 = 1200;
-        (raw as u32 * VREFINT_MV * 1000) / (self.vref_sample as u32)
-    }
+    // fn reading_to_uv(&self, raw: u16) -> u32 {
+    //     const VREFINT_MV: u32 = 1200;
+    //     (raw as u32 * VREFINT_MV * 1000) / (self.vref_sample as u32)
+    // }
 }
 impl CurrentSens for OnboardSensRev3 {
     async fn hco12_current_ma(&mut self) -> u16 {

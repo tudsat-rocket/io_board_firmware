@@ -5,10 +5,7 @@ use embassy_executor::Spawner;
 use embassy_futures::select::select_array;
 use heapless::Vec;
 
-use crate::{
-    can::{CanFrame, CanTxPub},
-    store::STORE,
-};
+use crate::{can::CanTxPub, store::STORE};
 
 pub struct TpdoIntervals {
     pub valves: Option<Duration>,

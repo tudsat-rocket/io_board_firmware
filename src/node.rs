@@ -1,5 +1,5 @@
-use embassy_executor::{InterruptExecutor, Spawner};
-use embassy_stm32::flash::{Blocking, Flash};
+use embassy_executor::Spawner;
+use embassy_stm32::flash::Flash;
 use embassy_sync::pubsub::PubSubChannel;
 use embassy_time::Duration;
 
@@ -14,24 +14,27 @@ use crate::board::HcoControllerRev2;
 #[cfg(feature = "rev3")]
 use crate::board::HcoControllerRev3;
 
-use crate::board::{Board, init_board};
-use crate::can::{CAN_IN, CAN_OUT};
-use crate::canopen_interface::{CanOpenInterface, run_can_command_listener};
-use crate::sensors;
-
-use {defmt_rtt as _, panic_probe as _};
-
 use crate::{
+    board::{Board, init_board},
+    can::{CAN_IN, CAN_OUT},
+    canopen_interface::{CanOpenInterface, run_can_command_listener},
     ext_adc::SensorSettings,
-    sensors::SensorMapping,
+    sensors::{self, SensorMapping},
     tpdo::{TpdoIntervals, spawn_tpdo_task},
     valves::ValveMapping,
 };
+
+use {defmt_rtt as _, panic_probe as _};
 
 #[cfg(feature = "rev2")]
 static HCO_CONTROLER: StaticCell<HcoControllerRev2> = StaticCell::new();
 #[cfg(feature = "rev3")]
 static HCO_CONTROLER: StaticCell<HcoControllerRev3> = StaticCell::new();
+
+#[cfg(feature = "rev2")]
+pub const NODE_NAME: &str = "I/O [rev2]";
+#[cfg(feature = "rev3")]
+pub const NODE_NAME: &str = "I/O [rev3]";
 
 pub struct NodeSettings {
     pub node_id: u8,
@@ -55,12 +58,12 @@ impl NodeSettings {
 }
 
 pub async fn spawn_node(spawner: Spawner, settings: NodeSettings) {
-    let mut board: Board = init_board(spawner).await;
+    let board: Board = init_board(spawner).await;
 
     let cancan_config = CanCanConfig {
         // FIXME:
-        node_id: settings.node_id, // crate::NODE_ID,
-        name: "I/O generic",       // crate::NODE_NAME,
+        node_id: settings.node_id,
+        name: NODE_NAME,
         chip_id: embassy_stm32::pac::DBGMCU.idcode().read().0,
         chip_uid: embassy_stm32::uid::uid(),
         flash_kib: (embassy_stm32::flash::FLASH_SIZE / 1024) as u16,
