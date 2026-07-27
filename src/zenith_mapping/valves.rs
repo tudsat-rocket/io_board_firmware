@@ -10,7 +10,7 @@ pub const FILL_AND_DUMP: ServoValveCalib = ServoValveCalib {
     closed_us: 1980,
 };
 
-pub const VENT: ServoValveCalib = ServoValveCalib {
+pub const PRESSURANT_VENT: ServoValveCalib = ServoValveCalib {
     open_us: 950,
     closed_us: 2050,
 };

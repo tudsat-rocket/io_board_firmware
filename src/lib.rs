@@ -10,6 +10,7 @@ use {defmt_rtt as _, panic_probe as _};
 
 pub mod board;
 pub mod can;
+pub mod can_do_id;
 pub mod canopen_interface;
 pub mod ereg;
 pub mod ext_adc;

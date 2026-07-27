@@ -74,8 +74,16 @@ zencan-build = { git = "https://gitlab.olaf.one/tomcruz/zencan", rev = "b662174f
 cancan-build = { git = "https://github.com/tudsat-rocket/cancan" }
 
 [profile.release]
-opt-level = 3
-debug = 2
+opt-level = "z"        # Optimize for size
+lto = true             # Link-time optimization
+codegen-units = 1      # Better optimization, slower build
+panic = "abort"        # No unwinding
+# strip = true           # Remove symbols
+debug = 0              # No debug info
+
+# [profile.release]
+# opt-level = 3
+# debug = 2
 
 [profile.dev]
 opt-level = 3

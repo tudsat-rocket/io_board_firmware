@@ -1,4 +1,3 @@
-use defmt::warn;
 /// For reading values from the external adc. "Amplifier boards"
 use embassy_stm32::{
     i2c::{I2c, Master},
@@ -9,6 +8,7 @@ use embassy_time::Ticker;
 use crate::ext_adc::{AMPLIFIER_ADDRESSES, ExtAdcs, NUM_ADCS, SensorSettings};
 use crate::store::STORE;
 
+#[derive(Clone, Debug)]
 pub struct PressureSensorCalib {
     pub offset: f32,
     pub linear_factor: f32,
@@ -19,14 +19,30 @@ impl PressureSensorCalib {
     }
 }
 
-pub struct TempSensorCalib {
-    pub gain: f32,
-    pub offset: f32,
-}
-impl TempSensorCalib {
-    pub fn apply(&self, diff: f32) -> f32 {
-        self.gain * diff + self.offset
-    }
+/// Convert raw ADC value to temperature in °C
+pub const fn pt1000_conversion(raw_adc: u16) -> f32 {
+    const ADC_REF: f32 = 3.3;
+    const ADC_MAX: f32 = 1024.0;
+    const OFFSET: f32 = 1.65;
+    const GAIN: f32 = 10.69;
+    const BRIDGE_VOLTAGE: f32 = 3.3;
+    const BRIDGE_RESISTOR: f32 = 1000.0;
+    // ADC counts -> amplifier output voltage
+    let v_out = (raw_adc as f32) * ADC_REF / ADC_MAX;
+
+    // Remove amplifier offset and gain
+    let v_diff = (v_out - OFFSET) / GAIN;
+
+    // Normalize bridge differential voltage
+    let x = v_diff / BRIDGE_VOLTAGE;
+
+    // Wheatstone bridge -> Pt1000 resistance
+    let resistance = BRIDGE_RESISTOR * (x + 0.5) / (0.5 - x);
+
+    // Pt1000 approximation:
+    // T = (R - 1000) / 3.85
+    (resistance - 1000.0) / 3.85
+    //defmt::info!("temp: {}C", temp_c);
 }
 
 /// how raw i2c bus values are mapped to sensor pdo message
@@ -41,7 +57,7 @@ impl SensorMapping {
         let mut i = 0;
         // for loops are not const compatiple here
         while i < self.0.len() {
-            if matches!(self.0[i], None) {
+            if self.0[i].is_none() {
                 first_empty = Some(i);
                 break;
             }
@@ -56,7 +72,7 @@ impl SensorMapping {
         Some(self)
     }
 }
-
+#[derive(Clone, Debug)]
 pub struct Sensor {
     pub kind: SensorKind,
     /// 0 or 1
@@ -65,9 +81,10 @@ pub struct Sensor {
     pub adc_idx: usize,
 }
 
+#[derive(Clone, Debug)]
 pub enum SensorKind {
     SimplePressure(PressureSensorCalib),
-    SimpleTemp(TempSensorCalib),
+    TempPt1000,
 }
 
 #[embassy_executor::task]
@@ -112,6 +129,7 @@ pub async fn run_sensors(
 
             for (idx, mapping) in mapping.0.iter().enumerate() {
                 let Some(mapping) = mapping else {
+                    store.selected_sensors[idx] = u16::MAX;
                     continue;
                 };
                 match &mapping.kind {
@@ -119,23 +137,24 @@ pub async fn run_sensors(
                         let raw = adcs.measurements.0[mapping.bus_idx * AMPLIFIER_ADDRESSES.len() + mapping.adc_idx]
                             .map(|r| r.value);
                         let Some(raw) = raw else {
+                            store.selected_sensors[idx] = u16::MAX;
                             continue;
                         };
 
                         let pressure = calib.apply(raw as f32);
-                        // TODO: check unit conversion
-                        let pressure_kilo_pc = (pressure * 100.0) as u16;
+                        let pressure_kilo_pc = (pressure * 100.0) as u16; // kilo ps = centi bar
                         store.selected_sensors[idx] = pressure_kilo_pc;
                     }
-                    SensorKind::SimpleTemp(calib) => {
+                    SensorKind::TempPt1000 => {
                         let raw = adcs.measurements.0[mapping.bus_idx * AMPLIFIER_ADDRESSES.len() + mapping.adc_idx]
                             .map(|r| r.value);
                         let Some(raw) = raw else {
-                            warn!("amplifier mapped to sensor could not be read");
+                            // warn!("amplifier mapped to sensor could not be read");
+                            store.selected_sensors[idx] = u16::MAX;
                             continue;
                         };
-                        let temp = calib.apply(raw as f32);
-                        let temp_centi_celsius = temp as i16;
+                        let temp = pt1000_conversion(raw);
+                        let temp_centi_celsius = (temp * 100.0) as i16;
                         // FIXME: check conversion here
                         store.selected_sensors[idx] = temp_centi_celsius as u16;
                     }

@@ -5,11 +5,11 @@ use crate::node::NodeSettings;
 use crate::sensors::SensorMapping;
 use crate::tpdo::TpdoIntervals;
 use crate::valves::ValveMapping;
-use crate::zenith_mapping::sensors::{PLACEHOLDER_P, PLACEHOLDER_T};
+use crate::zenith_mapping::sensors::{PLACEHOLDER_P, PLACEHOLDER_T, PT_1000};
 use crate::zenith_mapping::valves::PLACEHOLDER_S;
 
-mod sensors;
-mod valves;
+pub mod sensors;
+pub mod valves;
 
 // nosecose or recovery
 pub const NODE2: NodeSettings = NodeSettings {
@@ -36,7 +36,7 @@ pub const NODE3: NodeSettings = NodeSettings {
 // upper propulsion
 pub const NODE4: NodeSettings = NodeSettings {
     node_id: 4,
-    valve_mapping: ValveMapping::new_empty().add_std_servo_hco12(valves::VENT, 0).unwrap(),
+    valve_mapping: ValveMapping::new_empty().add_std_servo_hco12(valves::PRESSURANT_VENT, 0).unwrap(),
     sensor_mapping: SensorMapping::new_empty(),
     sensor_settings: SensorSettings {
         measure_interval: Duration::from_millis(10),
@@ -53,7 +53,7 @@ pub const NODE5: NodeSettings = NodeSettings {
         .unwrap(),
     sensor_mapping: SensorMapping::new_empty()
         // temperature sensor regulator
-        .add_consecutive(PLACEHOLDER_T, 0, 0)
+        .add_consecutive(PT_1000, 0, 0)
         .unwrap()
         // pressure sensor regulator upper
         .add_consecutive(PLACEHOLDER_P, 0, 1)
@@ -87,7 +87,7 @@ pub const NODE6: NodeSettings = NodeSettings {
         .unwrap()
         .add_consecutive(PLACEHOLDER_P, 0, 1)
         .unwrap()
-        .add_consecutive(PLACEHOLDER_T, 0, 2)
+        .add_consecutive(PT_1000, 0, 2)
         .unwrap(),
 
     sensor_settings: SensorSettings {

@@ -141,7 +141,6 @@ impl<SC: AnySender<CanFrame>, RC: AnyReceiver<CanFrame>> CanOpenInterface<SC, RC
         }
     }
     async fn listen_loop(&mut self) {
-        defmt::info!("started CanOpenInterface listen loop");
         loop {
             let (cob_id, body) = self.can.1.anyreceive().await;
             defmt::debug!("cob_id: {}, body: {}", cob_id, Debug2Format(&body));
@@ -150,7 +149,7 @@ impl<SC: AnySender<CanFrame>, RC: AnyReceiver<CanFrame>> CanOpenInterface<SC, RC
             let zencan_msg = match ZencanMessage::try_from(can_msg) {
                 Ok(msg) => msg,
                 Err(e) => {
-                    defmt::debug!("could not parse message on bus as canopen: {}", Debug2Format(&e));
+                    // defmt::debug!("could not parse message on bus as canopen(id=0x{:x}): {}", cob_id, Debug2Format(&e));
                     continue;
                 }
             };

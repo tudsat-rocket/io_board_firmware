@@ -80,10 +80,10 @@ pub async fn init_board(spawner: Spawner) -> Board {
     // FIXME: temp
     let mut hco_state_temp = HcoState::default();
     // rev3
-    hco_state_temp.set_high(HighCurrentOutput::_1);
-    hco_state_temp.set_pwm_micros(HighCurrentOutput::_2, 1500);
-    hco_state_temp.set_high(HighCurrentOutput::_3);
-    hco_state_temp.set_pwm_micros(HighCurrentOutput::_4, 1500);
+    // hco_state_temp.set_high(HighCurrentOutput::_1);
+    // hco_state_temp.set_pwm_micros(HighCurrentOutput::_2, 1500);
+    // hco_state_temp.set_high(HighCurrentOutput::_3);
+    // hco_state_temp.set_pwm_micros(HighCurrentOutput::_4, 1500);
     //
     // rev2
     // hco_state_temp.set_high(HighCurrentOutput::_1);

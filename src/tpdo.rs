@@ -1,10 +1,11 @@
-///! Transfer process data object - broadcast data regularly
+//! Transfer process data object - broadcast data regularly
 use embassy_time::{Duration, Ticker};
 
 use embassy_executor::Spawner;
 use embassy_futures::select::select_array;
 use heapless::Vec;
 
+use crate::can_do_id::{PdMessageKind, ProcessDataCanId};
 use crate::{can::CanTxPub, store::STORE};
 
 pub struct TpdoIntervals {
@@ -17,6 +18,7 @@ pub struct TpdoIntervals {
     pub raw_bus1b: Option<Duration>,
     pub sensor0: Option<Duration>,
     pub sensor1: Option<Duration>,
+    pub sensor2: Option<Duration>,
 }
 
 impl TpdoIntervals {
@@ -31,87 +33,14 @@ impl TpdoIntervals {
             raw_bus1b: None,
             sensor0: Some(Duration::from_millis(50)),
             sensor1: None,
+            sensor2: None,
         }
     }
 }
 
-#[derive(Copy, Clone, PartialEq, Eq, Debug)]
-#[repr(u8)]
-pub enum PdMessageKind {
-    // NOTE: maybe have a look at num_enum: TryFromPrimitive
-    /// holds 4 ValveStates (promille open) as le u16
-    Valves,
-    /// holds 4 bools as le u16
-    BinaryOutputs,
-    /// holds 4 pwm microseconds entries as le u16
-    PwmUs,
-    /// holds fist 4 raw adc measurements of i2c bus 0
-    RawBus0a,
-    /// holds second 4 raw adc measurements of i2c bus 0
-    RawBus0b,
-    /// holds first 4 raw adc measurements of i2c bus 1
-    RawBus1a,
-    /// holds second 4 raw adc measurements of i2c bus 1
-    RawBus1b,
-    /// holds first 4 preprocessed sensor values as u16 or i16
-    /// temp(i16): centi celcius, pressure(u16): kilo pascal
-    Sensor0,
-    /// holds second 4 preprocessed sensor values as u16 or i16
-    /// temp(i16): centi celcius, pressure(u16): kilo pascal
-    Sensor1,
-}
-impl TryFrom<u8> for PdMessageKind {
-    type Error = ();
-    fn try_from(value: u8) -> Result<Self, ()> {
-        use PdMessageKind as K;
-        match value {
-            0 => Ok(K::Valves),
-            1 => Ok(K::BinaryOutputs),
-            2 => Ok(K::PwmUs),
-            3 => Ok(K::RawBus0a),
-            4 => Ok(K::RawBus0b),
-            5 => Ok(K::RawBus1a),
-            6 => Ok(K::RawBus1b),
-            7 => Ok(K::Sensor0),
-            8 => Ok(K::Sensor1),
-            _ => Err(()),
-        }
-    }
-}
-
-#[derive(Copy, Clone, PartialEq, Eq)]
-pub struct ProcessDataCanId {
-    pub node_id: u8,
-    pub kind: PdMessageKind,
-}
-impl From<ProcessDataCanId> for u16 {
-    fn from(value: ProcessDataCanId) -> Self {
-        ((value.node_id as u16 & 0b1111) | (((value.kind as u16) << 4) & 0b1_1111_0000)) | 0x200
-    }
-}
-
-impl TryFrom<u16> for ProcessDataCanId {
-    type Error = ();
-    fn try_from(value: u16) -> Result<Self, ()> {
-        // 0d512 = 2^9
-        if !(0x200..(0x200 + 512)).contains(&value) {
-            return Err(());
-        }
-        let identifier: u16 = (value >> 4) & 0b1_1111;
-        let kind = PdMessageKind::try_from(identifier as u8);
-        let Ok(kind) = kind else {
-            return Err(());
-        };
-
-        Ok(Self {
-            node_id: (value & 0b1111) as u8,
-            kind,
-        })
-    }
-}
-// /// Fixed ordering - index into this array must match the order the
+// /// Fixed ordering - index into this array must match the order the.com/
 // /// tickers are placed into `select_array` below.
-const PD_MSGS: [PdMessageKind; 9] = [
+const PD_MSGS: [PdMessageKind; 10] = [
     PdMessageKind::Valves,
     PdMessageKind::BinaryOutputs,
     PdMessageKind::PwmUs,
@@ -121,6 +50,7 @@ const PD_MSGS: [PdMessageKind; 9] = [
     PdMessageKind::RawBus1b,
     PdMessageKind::Sensor0,
     PdMessageKind::Sensor1,
+    PdMessageKind::Sensor2,
 ];
 
 fn cob_id_from(pd_msg_kind: PdMessageKind, node_id: u8) -> u16 {
@@ -142,6 +72,7 @@ struct Tickers {
     raw_bus1b: Option<Ticker>,
     sensor0: Option<Ticker>,
     sensor1: Option<Ticker>,
+    sensor2: Option<Ticker>,
 }
 
 impl Tickers {
@@ -156,6 +87,7 @@ impl Tickers {
             raw_bus1b: settings.raw_bus1b.map(Ticker::every),
             sensor0: settings.sensor0.map(Ticker::every),
             sensor1: settings.sensor1.map(Ticker::every),
+            sensor2: settings.sensor2.map(Ticker::every),
         }
     }
 }
@@ -174,7 +106,7 @@ async fn tick_or_pending(ticker: &mut Option<Ticker>) {
 }
 
 fn to_u8_vec(data: &[u16]) -> Option<heapless::Vec<u8, 8>> {
-    // TODO: this hurts
+    // TODO:
     if data.len() != 4 {
         return None;
     };
@@ -202,6 +134,7 @@ async fn tpdo_broadcast_task(settings: TpdoIntervals, can_pub: CanTxPub, node_id
             tick_or_pending(&mut tickers.raw_bus1b),
             tick_or_pending(&mut tickers.sensor0),
             tick_or_pending(&mut tickers.sensor1),
+            tick_or_pending(&mut tickers.sensor2),
         ])
         .await;
 
@@ -214,6 +147,7 @@ async fn tpdo_broadcast_task(settings: TpdoIntervals, can_pub: CanTxPub, node_id
                 K::Valves => to_u8_vec(&store.valves).unwrap(),
                 K::Sensor0 => to_u8_vec(&store.selected_sensors[0..4]).unwrap(),
                 K::Sensor1 => to_u8_vec(&store.selected_sensors[4..8]).unwrap(),
+                K::Sensor2 => Vec::from_array([0; 8]), // Not needed for this board
                 K::RawBus0a => to_u8_vec(&store.raw_ext_adc_bus0[0..4]).unwrap(),
                 K::RawBus0b => to_u8_vec(&store.raw_ext_adc_bus0[4..8]).unwrap(),
                 K::RawBus1a => to_u8_vec(&store.raw_ext_adc_bus1[0..4]).unwrap(),

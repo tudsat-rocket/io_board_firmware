@@ -112,7 +112,6 @@ impl ValveMapping {
                 hco_controler.set_level(v_kind.con, binary_level);
             }
             Valve::Servo(v_kind) => {
-                // defmt::info!("setting servo valve");
                 if let Some(power_con) = v_kind.power_con {
                     hco_controler.set_level(power_con, Level::High);
                 }
