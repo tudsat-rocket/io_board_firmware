@@ -1,12 +1,13 @@
+#![allow(unused_imports, reason = "imports change because this shall represent real hardware")]
 use embassy_time::Duration;
 
+use crate::board::HighCurrentOutput;
 use crate::ext_adc::SensorSettings;
 use crate::node::NodeSettings;
 use crate::sensors::SensorMapping;
 use crate::tpdo::TpdoIntervals;
-use crate::valves::ValveMapping;
+use crate::valves::{ServoValve, SolenoidVavle, Valve, ValveEntry, ValveMapping};
 use crate::zenith_mapping::sensors::{PLACEHOLDER_P, PLACEHOLDER_T, PT_1000};
-use crate::zenith_mapping::valves::PLACEHOLDER_S;
 
 pub mod sensors;
 pub mod valves;
@@ -36,7 +37,18 @@ pub const NODE3: NodeSettings = NodeSettings {
 // upper propulsion
 pub const NODE4: NodeSettings = NodeSettings {
     node_id: 4,
-    valve_mapping: ValveMapping::new_empty().add_std_servo_hco12(valves::PRESSURANT_VENT, 0).unwrap(),
+    // Oxidizer vent solenoid valve
+    valve_mapping: ValveMapping([
+        None,
+        Some(crate::valves::ValveEntry {
+            kind: Valve::Solenoid(SolenoidVavle {
+                con: HighCurrentOutput::_2,
+            }),
+            init_state_promille: 0,
+        }),
+        None,
+        None,
+    ]),
     sensor_mapping: SensorMapping::new_empty(),
     sensor_settings: SensorSettings {
         measure_interval: Duration::from_millis(10),
@@ -49,23 +61,23 @@ pub const NODE5: NodeSettings = NodeSettings {
     valve_mapping: ValveMapping::new_empty()
         .add_std_servo_hco12(valves::PRESSURIZATION, 0)
         .unwrap()
-        .add_std_servo_hco34(valves::PLACEHOLDER_S, 500)
+        .add_std_servo_hco34(valves::PRESSURANT_VENT, 0)
         .unwrap(),
     sensor_mapping: SensorMapping::new_empty()
         // temperature sensor regulator
         .add_consecutive(PT_1000, 0, 0)
         .unwrap()
         // pressure sensor regulator upper
-        .add_consecutive(PLACEHOLDER_P, 0, 1)
+        .add_consecutive(sensors::REG_2_P, 0, 1)
         .unwrap()
         // pressure sensor regulator lower
-        .add_consecutive(PLACEHOLDER_P, 0, 2)
+        .add_consecutive(sensors::REG_1_P, 0, 2)
         .unwrap()
         // pressure sensor upper oxidizer
-        .add_consecutive(PLACEHOLDER_P, 1, 0)
+        .add_consecutive(sensors::OX_TANK_UPPER_P, 1, 0)
         .unwrap()
         // presssure sensor pressurant (N2) tank
-        .add_consecutive(PLACEHOLDER_P, 1, 1)
+        .add_consecutive(sensors::PRESSURANT_TANK_P, 1, 1)
         .unwrap(),
     sensor_settings: SensorSettings {
         measure_interval: Duration::from_millis(10),
@@ -78,16 +90,18 @@ pub const NODE6: NodeSettings = NodeSettings {
     node_id: 6,
     valve_mapping: ValveMapping::new_empty()
         // main valve
-        .add_std_servo_hco12(PLACEHOLDER_S, 0)
+        .add_std_servo_hco12(valves::MAIN, 0)
         .unwrap()
-        .add_std_servo_hco34(valves::FILL_AND_DUMP, 0)
+        .add_std_servo_hco34(valves::OX_FILL_AND_DUMP, 0)
         .unwrap(),
     sensor_mapping: SensorMapping::new_empty()
-        .add_consecutive(sensors::PROV_100BAR_H, 0, 0)
+        .add_consecutive(sensors::OX_TANK_LOWER_P, 0, 0)
         .unwrap()
-        .add_consecutive(PLACEHOLDER_P, 0, 1)
+        .add_consecutive(sensors::COMB_CHAMBER_1_P, 0, 1)
         .unwrap()
         .add_consecutive(PT_1000, 0, 2)
+        .unwrap()
+        .add_consecutive(sensors::COMB_CHAMBER_1_P, 0, 1)
         .unwrap(),
 
     sensor_settings: SensorSettings {

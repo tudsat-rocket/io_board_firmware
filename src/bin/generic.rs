@@ -1,6 +1,6 @@
 #![no_std]
 #![no_main]
-
+#![allow(unused_imports, reason = "imports change because this is a testing and debug node")]
 use embassy_executor::Spawner;
 use embassy_time::Duration;
 
@@ -20,7 +20,7 @@ include!(concat!(env!("OUT_DIR"), "/cancan_metadata.rs"));
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
-    io_board::node::spawn_node(spawner, EMPTY).await;
+    io_board::node::spawn_node(spawner, NODE6_DEBUG).await;
 }
 
 pub const EMPTY: NodeSettings = NodeSettings {
@@ -39,7 +39,7 @@ pub const NODE6_DEBUG: NodeSettings = NodeSettings {
         // main valve
         .add_std_servo_hco12(PLACEHOLDER_S, 0)
         .unwrap()
-        .add_std_servo_hco34(valves::FILL_AND_DUMP, 0)
+        .add_std_servo_hco34(valves::OX_FILL_AND_DUMP, 0)
         .unwrap(),
     sensor_mapping: SensorMapping::new_empty().add_consecutive(PLACEHOLDER_T, 0, 0).unwrap(),
 

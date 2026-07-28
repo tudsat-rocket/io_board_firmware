@@ -137,7 +137,7 @@ impl PwmMicros {
 impl TryFrom<u16> for PwmMicros {
     type Error = ();
     fn try_from(value: u16) -> Result<Self, Self::Error> {
-        if 500 <= value && value <= 2500 {
+        if (500..=2500).contains(&value) {
             Ok(Self(value))
         } else {
             Err(())

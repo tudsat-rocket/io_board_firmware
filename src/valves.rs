@@ -52,7 +52,7 @@ impl ValveMapping {
     }
     // builder for servo valve at connector 1 (hco1,2) with pinout as used in vehicle
     pub const fn add_std_servo_hco12(mut self, servo_calib: ServoValveCalib, init_state_promille: u16) -> Option<Self> {
-        if matches!(self.0[1], Some(_)) {
+        if self.0[1].is_some() {
             return None;
         }
         self.0[1] = Some(ValveEntry {
@@ -67,7 +67,22 @@ impl ValveMapping {
     }
     // builder for servo valve at connector 2 (hco3,4) with pinout as used in vehicle
     pub const fn add_std_servo_hco34(mut self, servo_calib: ServoValveCalib, init_state_promille: u16) -> Option<Self> {
-        if matches!(self.0[3], Some(_)) {
+        if self.0[3].is_some() {
+            return None;
+        }
+        self.0[3] = Some(ValveEntry {
+            kind: Valve::Servo(ServoValve {
+                power_con: Some(HighCurrentOutput::_3),
+                pwm_con: HighCurrentOutput::_4,
+                calib: servo_calib,
+            }),
+            init_state_promille,
+        });
+        Some(self)
+    }
+    // builder for solenoid valve
+    pub const fn add_solenoid(mut self, servo_calib: ServoValveCalib, init_state_promille: u16) -> Option<Self> {
+        if self.0[3].is_some() {
             return None;
         }
         self.0[3] = Some(ValveEntry {
