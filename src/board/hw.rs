@@ -40,7 +40,6 @@ pub fn setup() -> Peripherals {
         mode: embassy_stm32::rcc::HseMode::Oscillator,
         freq: Hertz::mhz(8), // our high-speed external oscillator speed
     });
-    config.rcc.sys = embassy_stm32::rcc::Sysclk::HSE;
 
     // 72 MHz
     config.rcc.pll = Some(embassy_stm32::rcc::Pll {
@@ -48,6 +47,8 @@ pub fn setup() -> Peripherals {
         prediv: PllPreDiv::DIV1,
         mul: embassy_stm32::rcc::PllMul::MUL9,
     });
+
+    config.rcc.sys = embassy_stm32::rcc::Sysclk::PLL1_P;
 
     // advanced high performace bus: 72 MHz
     config.rcc.ahb_pre = AHBPrescaler::DIV1;

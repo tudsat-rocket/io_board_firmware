@@ -1,17 +1,17 @@
 use defmt::info;
 use embassy_executor::Spawner;
 use embassy_futures::select::{Either, select};
-use embassy_stm32::can::{Can, CanRx, CanTx, Fifo, Frame, Id, StandardId, filter};
 use embassy_stm32::flash::{Blocking, Flash};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_time::{Duration, with_timeout};
+
+use embassy_stm32::can::{BufferedCanRx, Can, CanTx, Fifo, Frame, Id, RxBuf, StandardId, filter};
+use embassy_sync::channel::Channel;
 
 use cancan::{CHANNEL_DEPTH, CanCan, CanCanRx, CanCanTx};
 use embassy_sync::pubsub::{PubSubChannel, Publisher, Subscriber};
 use heapless::Vec;
 use static_cell::StaticCell;
-
-// pub mod canopen;
 
 const CAN_QUEUE_SIZE: usize = 5;
 const NUM_CAN_SUB: usize = 2;
@@ -32,7 +32,9 @@ pub static CAN_OUT: StaticCell<CanOutChannel> = StaticCell::new();
 
 static CAN: StaticCell<Can<'static>> = StaticCell::new();
 static CAN_TX: StaticCell<CanTx<'static>> = StaticCell::new();
-static CAN_RX: StaticCell<CanRx<'static>> = StaticCell::new();
+
+const CAN_RX_BUF_SIZE: usize = 32;
+static CAN_RX_BUF: StaticCell<RxBuf<CAN_RX_BUF_SIZE>> = StaticCell::new();
 
 pub async fn spawn(
     mut can: Can<'static>,
@@ -76,7 +78,7 @@ pub async fn spawn(
     let can = CAN.init(can);
     let (can_tx, can_rx) = can.split();
     let can_tx = CAN_TX.init(can_tx);
-    let can_rx = CAN_RX.init(can_rx);
+    let can_rx = can_rx.buffered(CAN_RX_BUF.init(Channel::new()));
 
     let (cancan_rx, cancan_tx) = crate::CANCAN.split();
 
@@ -120,12 +122,17 @@ async fn run_tx(
 
 #[embassy_executor::task]
 async fn run_rx(
-    can_rx: &'static mut CanRx<'static>,
+    mut can_rx: BufferedCanRx<'static, CAN_RX_BUF_SIZE>,
     cancan_rx: CanCanRx<'static, CriticalSectionRawMutex, Frame, CHANNEL_DEPTH>,
     publisher: CanRxPub,
 ) -> ! {
     info!("Can rx task started");
     loop {
+        use embassy_stm32::pac::CAN1;
+        if CAN1.rfr(0).read().fovr() {
+            defmt::error!("bxCAN RX FIFO0 overrun");
+            CAN1.rfr(0).modify(|v| v.set_fovr(true));
+        }
         match can_rx.read().await {
             Ok(envelope) => {
                 let frame = envelope.frame;
@@ -153,9 +160,10 @@ async fn run_rx(
 
                 publisher.publish_immediate((id_raw, data_array));
             }
-            Err(_e) => {
-                // TODO: ratelimiting
-                // error!("can_rx: Failed to read envelope: {:?}", Debug2Format(&e))
+
+            Err(e) => {
+                //TODO: ratelimiting
+                defmt::error!("can_rx: Failed to read envelope: {:?}", defmt::Debug2Format(&e))
             }
         }
     }
