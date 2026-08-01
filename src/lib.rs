@@ -5,7 +5,7 @@ use embassy_stm32::can::Frame;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 
 use cancan::CanCanChannels;
-
+// FIXME: disable-blocking-mode for flight
 use {defmt_rtt as _, panic_probe as _};
 
 pub mod board;

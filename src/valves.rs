@@ -80,21 +80,6 @@ impl ValveMapping {
         });
         Some(self)
     }
-    // builder for solenoid valve
-    pub const fn add_solenoid(mut self, servo_calib: ServoValveCalib, init_state_promille: u16) -> Option<Self> {
-        if self.0[3].is_some() {
-            return None;
-        }
-        self.0[3] = Some(ValveEntry {
-            kind: Valve::Servo(ServoValve {
-                power_con: Some(HighCurrentOutput::_3),
-                pwm_con: HighCurrentOutput::_4,
-                calib: servo_calib,
-            }),
-            init_state_promille,
-        });
-        Some(self)
-    }
 
     /// Valve_num must be within 0..NUM_SUPPORTED_VALVES
     /// idiomatically this should be a free function

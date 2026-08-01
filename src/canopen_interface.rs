@@ -63,7 +63,9 @@ async fn try_write_to_store(
             *entry = *entry.clamp(&mut 0, &mut 1000);
 
             // apply valve from store
-            valves_mapping.set_valve(sub, *entry, hco_controller).unwrap();
+            if valves_mapping.set_valve(sub, *entry, hco_controller).is_err() {
+                defmt::warn!("tried to set valve {}, but it is not mapped", sub);
+            };
 
             update_store_hco_state(store, hco_controller);
 
@@ -210,7 +212,10 @@ impl<SC: AnySender<CanFrame>, RC: AnyReceiver<CanFrame>> CanOpenInterface<SC, RC
                     };
                 }
                 // TODO: heartbeat monitor
-                ZencanMessage::Heartbeat(_heartbeat) => todo!(),
+                ZencanMessage::Heartbeat(_heartbeat) => {
+                    // FIXME: impl heartbeat
+                    defmt::warn!("heartbeat not implemented yet");
+                }
                 // sync not used yet
                 ZencanMessage::Sync(_) => {
                     defmt::warn!("canopen sync not implemented");

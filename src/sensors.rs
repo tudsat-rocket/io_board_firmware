@@ -5,7 +5,7 @@ use embassy_stm32::{
 };
 use embassy_time::Ticker;
 
-use crate::ext_adc::{AMPLIFIER_ADDRESSES, ExtAdcs, NUM_ADCS, SensorSettings};
+use crate::ext_adc::{AMPLIFIER_ADDRESSES, ExtAdcs, NUM_ADCS, NUM_I2C_BUSES, SensorSettings};
 use crate::store::STORE;
 
 #[derive(Clone, Debug)]
@@ -53,6 +53,13 @@ impl SensorMapping {
         Self([const { None }; 8])
     }
     pub const fn add_consecutive(mut self, kind: SensorKind, bus_idx: usize, adc_idx: usize) -> Option<Self> {
+        if bus_idx >= NUM_I2C_BUSES {
+            return None;
+        }
+        if adc_idx >= AMPLIFIER_ADDRESSES.len() {
+            return None;
+        }
+
         let mut first_empty = None;
         let mut i = 0;
         // for loops are not const compatiple here

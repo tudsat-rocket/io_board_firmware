@@ -42,7 +42,7 @@ pub const NODE4: NodeSettings = NodeSettings {
         None,
         Some(crate::valves::ValveEntry {
             kind: Valve::Solenoid(SolenoidVavle {
-                con: HighCurrentOutput::_2,
+                con: HighCurrentOutput::_1,
             }),
             init_state_promille: 0,
         }),
