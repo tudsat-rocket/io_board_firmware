@@ -1,5 +1,6 @@
 use embassy_executor::Spawner;
 use embassy_stm32::gpio::{Level as GpioLevel, Output, Speed};
+use embassy_stm32::wdg::IndependentWatchdog;
 use embassy_stm32::{
     Peri,
     i2c::{I2c, Master},
@@ -7,8 +8,8 @@ use embassy_stm32::{
 };
 use embassy_sync::pubsub::PubSubChannel;
 
+use defmt_rtt as _;
 use static_cell::StaticCell;
-use {defmt_rtt as _, panic_probe as _};
 
 pub mod high_current_outputs;
 pub use high_current_outputs::*;
@@ -48,6 +49,21 @@ pub struct Board {
 static COM1_I2C: StaticCell<I2c<'static, Async, Master>> = StaticCell::new();
 static COM2_I2C: StaticCell<I2c<'static, Async, Master>> = StaticCell::new();
 
+/// Independent watchdog timeout. Must stay comfortably above the longest blocking
+/// operation in any task - the slowest is a cancan flash page erase during a firmware
+/// update (~40ms on this part).
+const WATCHDOG_TIMEOUT_US: u32 = 512_000;
+const WATCHDOG_PET_INTERVAL: embassy_time::Duration = embassy_time::Duration::from_millis(100);
+
+#[embassy_executor::task]
+async fn run_watchdog(mut iwdg: IndependentWatchdog<'static, embassy_stm32::peripherals::IWDG>) -> ! {
+    let mut ticker = embassy_time::Ticker::every(WATCHDOG_PET_INTERVAL);
+    loop {
+        iwdg.pet();
+        ticker.next().await;
+    }
+}
+
 // current sensing
 use embassy_stm32::dma;
 use embassy_stm32::peripherals::{ADC1, DMA1_CH1};
@@ -60,9 +76,13 @@ embassy_stm32::bind_interrupts!(struct Irqs {
 pub async fn init_board(spawner: Spawner) -> Board {
     let p = hw::setup();
 
-    // TODO: watchdog
-    // let mut iwdg = IndependentWatchdog::new(p.IWDG, 512_000); // 512ms timeout
-    // iwdg.unleash();
+    // Started before anything else, so a hang during the rest of init resets us too.
+    // The executor is cooperative, so any task that blocks without awaiting (a held
+    // STORE lock, a wedged I2C transfer, a blocking log write) starves `run_watchdog`
+    // and trips this, not just an outright crash.
+    let mut iwdg = IndependentWatchdog::new(p.IWDG, WATCHDOG_TIMEOUT_US);
+    iwdg.unleash();
+    spawner.spawn(run_watchdog(iwdg).unwrap());
 
     // NOTE: not used
     // let mut adc = Adc::new(p.ADC1);

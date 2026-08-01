@@ -5,7 +5,7 @@ use embassy_stm32::{
     peripherals::ADC1,
 };
 
-use {defmt_rtt as _, panic_probe as _};
+use defmt_rtt as _;
 
 // pub trait OnboardAnalouge {
 #[allow(async_fn_in_trait)]

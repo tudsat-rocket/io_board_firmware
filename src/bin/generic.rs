@@ -13,7 +13,7 @@ use io_board::{
     ext_adc::SensorSettings, node::NodeSettings, sensors::SensorMapping, tpdo::TpdoIntervals, valves::ValveMapping,
 };
 
-use {defmt_rtt as _, panic_probe as _};
+use defmt_rtt as _;
 
 // Firmware metadata generated using `cancan-build`
 include!(concat!(env!("OUT_DIR"), "/cancan_metadata.rs"));

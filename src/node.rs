@@ -24,7 +24,7 @@ use crate::{
     valves::ValveMapping,
 };
 
-use {defmt_rtt as _, panic_probe as _};
+use defmt_rtt as _;
 
 #[cfg(feature = "rev2")]
 static HCO_CONTROLER: StaticCell<HcoControllerRev2> = StaticCell::new();
@@ -73,10 +73,6 @@ pub async fn spawn_node(spawner: Spawner, settings: NodeSettings) {
     };
 
     let mut cancan = CanCan::new(cancan_config, Flash::new_blocking(board.flash_peri));
-
-    // let mut p = hw::setup();
-    // let mut iwdg = IndependentWatchdog::new(p.IWDG, 512_000); // 512ms timeout
-    // iwdg.unleash();
 
     let can_in = CAN_IN.init(PubSubChannel::new());
     let can_out = CAN_OUT.init(PubSubChannel::new());

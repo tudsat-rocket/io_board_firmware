@@ -4,7 +4,7 @@
 use embassy_executor::Spawner;
 use io_board::zenith_mapping;
 
-use {defmt_rtt as _, panic_probe as _};
+use defmt_rtt as _;
 
 // Firmware metadata generated using `cancan-build`
 include!(concat!(env!("OUT_DIR"), "/cancan_metadata.rs"));

@@ -35,9 +35,12 @@ path = "src/bin/node7.rs"
 
 [dependencies]
 defmt = "0.3"
-defmt-rtt = "0.4"
-#panic-probe = "0.3" # print-defmt is really useful for debugging, but dramatically increases binary size
-panic-probe = { version = "0.3", features = ["print-defmt"] }
+# `disable-blocking-mode`: without it, defmt-rtt blocks forever once the 1KiB RTT buffer
+# fills if probe-rs was attached and then unplugged, hanging the firmware in a critical
+# section. Losing log lines is always preferable to that.
+defmt-rtt = { version = "0.4", features = ["disable-blocking-mode"] }
+# NOTE: no panic-probe. Its handler ends in `udf` -> HardFault -> infinite loop, which
+# leaves the HCO timers driving the valves. See src/panic.rs.
 
 embedded-hal = "1.0"
 embedded-hal-async = "1.0"

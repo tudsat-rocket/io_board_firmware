@@ -904,7 +904,6 @@ dependencies = [
  "embedded-hal 1.0.0",
  "embedded-hal-async",
  "heapless",
- "panic-probe",
  "static_cell",
  "zencan-build 0.0.1 (git+https://gitlab.olaf.one/tomcruz/zencan?rev=b662174fc55b43c386991bad63a5546d3bdc03c3)",
  "zencan-common 0.0.4",
@@ -1007,16 +1006,6 @@ name = "once_cell"
 version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
-
-[[package]]
-name = "panic-probe"
-version = "0.3.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4047d9235d1423d66cc97da7d07eddb54d4f154d6c13805c6d0793956f4f25b0"
-dependencies = [
- "cortex-m",
- "defmt 0.3.100",
-]
 
 [[package]]
 name = "pin-project-lite"
