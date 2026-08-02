@@ -15,7 +15,7 @@ use crate::board::HcoControllerRev2;
 use crate::board::HcoControllerRev3;
 
 use crate::{
-    board::{Board, init_board},
+    board::{Board, LedsState, StateLedPub, init_board},
     can::{CAN_IN, CAN_OUT},
     canopen_interface::{CanOpenInterface, run_can_command_listener},
     ext_adc::SensorSettings,
@@ -109,6 +109,7 @@ pub async fn spawn_node(spawner: Spawner, settings: NodeSettings) {
     // #[cfg(feature = "rev3")]
     // spawner.spawn(onboard_sens_debug(board.onboard_sens).unwrap());
 
+    spawner.spawn(led_blink(board.leds).unwrap());
     spawner.spawn(run_cancan(cancan).unwrap());
 }
 
@@ -116,6 +117,27 @@ pub async fn spawn_node(spawner: Spawner, settings: NodeSettings) {
 #[embassy_executor::task]
 pub async fn run_cancan(cancan: CanCan<Flash<'static, embassy_stm32::flash::Blocking>>) {
     cancan.run(&crate::CANCAN).await
+}
+
+#[embassy_executor::task]
+pub async fn led_blink(led_pub: StateLedPub) {
+    const ON: LedsState = LedsState {
+        red: false,
+        white: true,
+        yellow: false,
+    };
+    const OFF: LedsState = LedsState {
+        red: false,
+        white: false,
+        yellow: false,
+    };
+    let mut ticker = embassy_time::Ticker::every(Duration::from_millis(500));
+    loop {
+        led_pub.publish(ON).await;
+        ticker.next().await;
+        led_pub.publish(OFF).await;
+        ticker.next().await;
+    }
 }
 
 #[embassy_executor::task]

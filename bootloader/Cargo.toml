@@ -11,7 +11,10 @@ cortex-m = { version = "0.7", features = ["inline-asm", "critical-section-single
 cortex-m-rt = "0.7"
 
 defmt = "0.3"
-defmt-rtt = "0.4"
+# `disable-blocking-mode`, as in the application: blocking mode spins forever once the RTT
+# buffer fills with no host draining it. Here that hang is inside the swap, where only the
+# watchdog can end it - a reset loop that survives NRST and needs a power cycle.
+defmt-rtt = { version = "0.4", features = ["disable-blocking-mode"] }
 
 embassy-stm32 = { version = "0.6", features = ["stm32f105rc", "defmt"] }
 

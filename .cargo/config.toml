@@ -8,7 +8,8 @@ runner = [
     "--always-print-stacktrace",
     "--connect-under-reset",
     "--log-format",
-    "{L} {m:white} {s}"
+    # `{t}` prints the `defmt::timestamp!`
+    "{t} {L} {m:white} {s}"
 ]
 
 # Once flashed at least once, and assuming you have a working socketcan interface on the

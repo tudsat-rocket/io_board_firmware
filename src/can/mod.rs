@@ -13,7 +13,7 @@ use embassy_sync::pubsub::{PubSubChannel, Publisher, Subscriber};
 use heapless::Vec;
 use static_cell::StaticCell;
 
-const CAN_QUEUE_SIZE: usize = 5;
+const CAN_QUEUE_SIZE: usize = 20;
 const NUM_CAN_SUB: usize = 2;
 const NUM_CAN_PUBS: usize = 2;
 
@@ -56,29 +56,55 @@ pub async fn spawn(
         info!("Was was set up and is awake");
     }
 
-    // After a CAN-based flash, we use the polling of the flashing CLI as a health
-    // check for the CAN connection, and rollback if that doesn't work.
-    if cancan.is_unconfirmed().unwrap_or(false) {
-        let mut linked = false;
-        for _ in 0..20 {
-            // TODO: enable once watchdog is up
-            // watchdog.pet();
-            if with_timeout(Duration::from_millis(250), can.read()).await.is_ok() {
-                linked = true;
-                break;
-            }
-        }
-
-        assert!(linked, "cancan: no CAN traffic in the confirm window");
-        // watchdog.pet();
-
-        cancan.confirm().unwrap();
-    }
-
     let can = CAN.init(can);
     let (can_tx, can_rx) = can.split();
     let can_tx = CAN_TX.init(can_tx);
-    let can_rx = can_rx.buffered(CAN_RX_BUF.init(Channel::new()));
+    let mut can_rx = can_rx.buffered(CAN_RX_BUF.init(Channel::new()));
+
+    // After a CAN-based flash, we use traffic on the bus as a health check for the CAN
+    // connection, and rollback if that doesn't work.
+    //
+    // This has to run on the *buffered* receiver, after the split above. In non-buffered
+    // mode the RX interrupt disables FMPIE for the FIFO it just filled and relies on a
+    // completing `try_read` to switch it back on, and `BufferedCanRx::setup` never touches
+    // FMPIE. A `Can::read` dropped by `with_timeout` just after a frame arrived therefore
+    // leaves that FIFO's interrupt off permanently - and since the filters spread traffic
+    // over FIFO0 and FIFO1, the node goes deaf to part of the bus for the rest of the boot.
+    match cancan.is_unconfirmed() {
+        Ok(true) => {
+            let mut linked = false;
+            for _ in 0..20 {
+                crate::board::pet_watchdog();
+                // A bus error is not a healthy link, so require an actual frame.
+                if let Ok(Ok(_)) = with_timeout(Duration::from_millis(250), can_rx.read()).await {
+                    linked = true;
+                    break;
+                }
+            }
+
+            if linked {
+                // `confirm` erases and writes a flash page without awaiting.
+                crate::board::pet_watchdog();
+                match cancan.confirm() {
+                    Ok(prior) => info!("cancan: image confirmed, prior state {}", defmt::Debug2Format(&prior)),
+                    Err(e) => defmt::error!("cancan: confirm failed: {}", defmt::Debug2Format(&e)),
+                }
+            } else {
+                // Deliberately keep running: the image stays unconfirmed, so the bootloader
+                // reverts on the next reset, but until then the node is still commandable and
+                // this line is visible. Resetting here instead would revert before anyone can
+                // see why, and loops if the bus is quiet for an unrelated reason (bench work
+                // over SWD, every other node still booting).
+                defmt::error!(
+                    "cancan: no CAN traffic in the confirm window, leaving image unconfirmed - \
+                     the bootloader will revert to the previous image on the next reset"
+                );
+            }
+        }
+        Ok(false) => {}
+        // Don't silently treat a flash error as "already confirmed".
+        Err(e) => defmt::error!("cancan: could not read boot state: {}", defmt::Debug2Format(&e)),
+    }
 
     let (cancan_rx, cancan_tx) = crate::CANCAN.split();
 

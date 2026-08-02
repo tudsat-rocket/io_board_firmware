@@ -66,6 +66,11 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
         // Safe to log: defmt-rtt is built with `disable-blocking-mode`, so this cannot
         // hang waiting for a host that is no longer attached.
         defmt::error!("PANIC: {}", defmt::Display2Format(info));
+
+        // Give an attached probe time to drain RTT before the reset wipes the buffer.
+        // Outputs are already safe at this point, so the delay costs nothing. The IWDG
+        // caps it regardless, since interrupts are off and nothing is petting.
+        cortex_m::asm::delay(7_200_000);
     }
 
     cortex_m::peripheral::SCB::sys_reset()
@@ -77,7 +82,26 @@ fn defmt_panic() -> ! {
     safe_and_reset()
 }
 
+/// Note: `probe-rs run --catch-hardfault` halts the core *before* this runs, so under a
+/// probe with that flag set none of this is ever reached. Drop the flag to see the log.
 #[cortex_m_rt::exception]
-unsafe fn HardFault(_frame: &cortex_m_rt::ExceptionFrame) -> ! {
-    safe_and_reset()
+unsafe fn HardFault(frame: &cortex_m_rt::ExceptionFrame) -> ! {
+    cortex_m::interrupt::disable();
+    unsafe { safe_outputs() };
+
+    // `pc` is the faulting instruction; look it up in the ELF that was actually running
+    // (the application links at 0x08006800, the bootloader at 0x08000000).
+    let scb = unsafe { &*cortex_m::peripheral::SCB::PTR };
+    defmt::error!(
+        "HARDFAULT pc={=u32:#010x} lr={=u32:#010x} hfsr={=u32:#010x} cfsr={=u32:#010x} bfar={=u32:#010x}",
+        frame.pc(),
+        frame.lr(),
+        scb.hfsr.read(),
+        scb.cfsr.read(),
+        scb.bfar.read()
+    );
+
+    // Let an attached probe drain RTT before the reset wipes it.
+    cortex_m::asm::delay(7_200_000);
+    cortex_m::peripheral::SCB::sys_reset()
 }

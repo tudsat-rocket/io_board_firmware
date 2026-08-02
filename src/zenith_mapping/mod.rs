@@ -39,13 +39,13 @@ pub const NODE4: NodeSettings = NodeSettings {
     node_id: 4,
     // Oxidizer vent solenoid valve
     valve_mapping: ValveMapping([
-        None,
         Some(crate::valves::ValveEntry {
             kind: Valve::Solenoid(SolenoidVavle {
                 con: HighCurrentOutput::_1,
             }),
             init_state_promille: 0,
         }),
+        None,
         None,
         None,
     ]),
@@ -101,7 +101,7 @@ pub const NODE6: NodeSettings = NodeSettings {
         .unwrap()
         .add_consecutive(PT_1000, 0, 2)
         .unwrap()
-        .add_consecutive(sensors::COMB_CHAMBER_1_P, 0, 1)
+        .add_consecutive(sensors::COMB_CHAMBER_2_P, 1, 1)
         .unwrap(),
 
     sensor_settings: SensorSettings {

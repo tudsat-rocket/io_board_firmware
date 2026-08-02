@@ -49,19 +49,31 @@ pub struct Board {
 static COM1_I2C: StaticCell<I2c<'static, Async, Master>> = StaticCell::new();
 static COM2_I2C: StaticCell<I2c<'static, Async, Master>> = StaticCell::new();
 
-/// Independent watchdog timeout. Must stay comfortably above the longest blocking
-/// operation in any task - the slowest is a cancan flash page erase during a firmware
-/// update (~40ms on this part).
-const WATCHDOG_TIMEOUT_US: u32 = 512_000;
-const WATCHDOG_PET_INTERVAL: embassy_time::Duration = embassy_time::Duration::from_millis(100);
+const WATCHDOG_TIMEOUT_US: u32 = 250_000;
+const WATCHDOG_PET_INTERVAL: embassy_time::Duration = embassy_time::Duration::from_millis(50);
 
 #[embassy_executor::task]
 async fn run_watchdog(mut iwdg: IndependentWatchdog<'static, embassy_stm32::peripherals::IWDG>) -> ! {
     let mut ticker = embassy_time::Ticker::every(WATCHDOG_PET_INTERVAL);
+    let mut last = embassy_time::Instant::now();
     loop {
         iwdg.pet();
+
+        // Report near-misses.
+        let now = embassy_time::Instant::now();
+        let late = (now - last).as_millis().saturating_sub(WATCHDOG_PET_INTERVAL.as_millis());
+        if late > 20 {
+            defmt::warn!("watchdog: pet {} ms late, executor stalled", late);
+        }
+        last = now;
+
         ticker.next().await;
     }
+}
+
+pub fn pet_watchdog() {
+    use embassy_stm32::pac::iwdg::vals::Key;
+    embassy_stm32::pac::IWDG.kr().write(|w| w.set_key(Key::RESET));
 }
 
 // current sensing
@@ -76,10 +88,6 @@ embassy_stm32::bind_interrupts!(struct Irqs {
 pub async fn init_board(spawner: Spawner) -> Board {
     let p = hw::setup();
 
-    // Started before anything else, so a hang during the rest of init resets us too.
-    // The executor is cooperative, so any task that blocks without awaiting (a held
-    // STORE lock, a wedged I2C transfer, a blocking log write) starves `run_watchdog`
-    // and trips this, not just an outright crash.
     let mut iwdg = IndependentWatchdog::new(p.IWDG, WATCHDOG_TIMEOUT_US);
     iwdg.unleash();
     spawner.spawn(run_watchdog(iwdg).unwrap());

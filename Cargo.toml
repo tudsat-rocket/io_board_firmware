@@ -82,7 +82,9 @@ lto = true             # Link-time optimization
 codegen-units = 1      # Better optimization, slower build
 panic = "abort"        # No unwinding
 # strip = true           # Remove symbols
-debug = 0              # No debug info
+# DWARF stays in the host-side ELF and is never flashed, so this costs no flash. Without it
+# probe-rs cannot symbolicate stack traces or RTT locations ("Insufficient DWARF info").
+debug = 2
 
 # [profile.release]
 # opt-level = 3
