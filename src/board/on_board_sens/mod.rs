@@ -44,15 +44,24 @@ pub struct OnboardSens3Peri {
 }
 
 impl OnboardSensRev3 {
+    /// Sample time for the internal reference, independent of the caller's `sample_time`.
+    ///
+    /// VREFINT is not a pin: it is driven through a high internal impedance, and the F105
+    /// datasheet gives it a minimum sampling time of 17.1 us (the same figure as the temperature
+    /// sensor). The ADC runs at PCLK2/6 = 12 MHz, so 239.5 cycles is 19.96 us — the only sample
+    /// time on this part that clears the requirement. Anything shorter leaves the sample capacitor
+    /// short of the reference and reads low, and since [`Self::reading_to_mv`] divides *by* this
+    /// number, that error scales every voltage and current the board reports.
+    const VREF_SAMPLE_TIME: SampleTime = SampleTime::CYCLES239_5;
+
     pub async fn new(adc: Peri<'static, ADC1>, pins: OnboardSens3Peri, sample_time: SampleTime) -> Self {
         let mut adc = Adc::new(adc);
         let mut vref = adc.enable_vref();
 
-        // NOTE: this is very guessed
+        // t_START for the internal reference; the datasheet allows up to 10 us.
         embassy_time::Timer::after_micros(20).await;
 
-        let vref_sample = adc.read(&mut vref, sample_time).await;
-        defmt::error!("vref_sample: {}", vref_sample);
+        let vref_sample = adc.read(&mut vref, Self::VREF_SAMPLE_TIME).await;
         // guard against division by 0
         let vref_sample = vref_sample.max(1);
 
@@ -105,6 +114,24 @@ impl VoltageSens for OnboardSensRev3 {
         reading_v_to_system_v(self.reading_to_mv(reading))
     }
 }
+impl crate::rail_sense::RailSensing for OnboardSensRev3 {
+    async fn read(&mut self) -> Option<crate::rail_sense::Rails> {
+        // Both arrays are in `RailId` order: Logic, Hco12, Hco34.
+        Some(crate::rail_sense::Rails {
+            current_ma: crate::index::PerRail::new([
+                self.logic_supply_current_ma().await.unwrap_or(0),
+                self.hco12_current_ma().await,
+                self.hco34_current_ma().await,
+            ]),
+            voltage_mv: crate::index::PerRail::new([
+                self.logic_supply_voltage_milli_v().await,
+                self.hco12_supply_voltage_milli_v().await,
+                self.hco34_supply_voltage_milli_v().await,
+            ]),
+        })
+    }
+}
+
 // TODO:
 // impl TemperatureSens for OnboardSensRev3 {
 //     async fn temperature_milli_c(&mut self) -> i32 {
@@ -135,9 +162,31 @@ fn reading_v_to_system_v(v_mv: u16) -> u16 {
 
 /// Convert voltage read by adc to current on the target circuit.
 /// By knowing the shunt resistance and the amplification gain.
+///
+/// These are the *nominal* part values, and the board reports almost exactly half the real
+/// current. The cause is almost certainly hardware, not this function — see below — so the math
+/// here stays nominal rather than absorbing a fudge factor that a board rework would invalidate.
+///
+/// The chain is short enough to enumerate completely: a single 15 mR shunt (`R2`/`R32`/`R33`, one
+/// per instance of `io_board_current_sensing.kicad_sch`), then `R69`/`R70` — **1k in series with
+/// the INA181's IN+ and IN-**, with `C36`/`C37` 10n to ground as an input filter — then `U7`
+/// INA181A1 at 20 V/V, then straight to the MCU pin. There is no divider on the amplifier output:
+/// it goes to the `I_sense_N` global label and nowhere else.
+///
+/// That leaves the input filter as the only gain-error element in the path. Series resistance at
+/// a current-shunt monitor's inputs divides against the amplifier's internal input resistance,
+/// which is why TI's guidance for this family is to keep it near zero; the observed factor of 2
+/// implies an internal input resistance of ~1k, the right order for the part.
+///
+/// One probe settles it: drive a known current and measure `U7` pin 5 (OUT) directly.
+/// - ~0.30 V/A -> the amplifier is fine and the error is downstream of it (ADC reference or
+///   sample time), in which case fix it here.
+/// - ~0.15 V/A -> the input filter, as above. The fix is a rework: `R69`/`R70` to 0R links (or
+///   <=10R), keeping `C36`/`C37` for the filter.
+///
+/// Until that measurement exists, `stall_ma` is calibrated against what the board reports rather
+/// than against amps, which is the reason it is runtime-configurable in the first place.
 fn reading_v_to_current_ma(v_mv: u16) -> u16 {
-    // FIXME: tests show that we report almost exactly half of the real current
-    // where is this factor coming from?
     const AMP_GAIN: u32 = 20;
     const RESISTOR_VALUE_MOHM: u32 = 15;
     (v_mv as u32 * 1000 / (RESISTOR_VALUE_MOHM * AMP_GAIN)) as u16

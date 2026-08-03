@@ -1,190 +1,783 @@
-device_name = "can-io"
+# ============================================================================
+# ioCan I/O board — object dictionary and CAN protocol
+# ============================================================================
+#
+# This file is the SINGLE SOURCE OF TRUTH for the wire protocol. The firmware's
+# hand-rolled store (`src/store.rs`) and SDO server (`src/can/sdo.rs`) implement
+# exactly what is described here — keep them in sync by hand.
+#
+# `zencan-build` parses this file at build time so the schema stays honest and
+# typos are caught, but the generated node is NOT linked: we implement a small
+# subset of CANopen by hand instead of using `zencan_node::Node`. See
+# "Why not full CANopen" below.
+#
+# ---------------------------------------------------------------------------
+# Wire protocol at a glance
+# ---------------------------------------------------------------------------
+#
+# The bus carries at most 16 nodes, one of which (default id 1) is the master
+# that makes every decision. Node ids are 4 bits everywhere.
+#
+# CONFIG PLANE — expedited SDO, one object per frame, always acknowledged
+#
+#   0x600 + node_id   request   [cmd][idx_lo][idx_hi][sub][data0..3]
+#   0x580 + node_id   response  same layout; cmd 0x80 = abort, data = AbortCode
+#
+#   Supported: InitiateDownload (write) and InitiateUpload (read), expedited
+#   only, 1/2/4-byte payloads. Segmented and block transfers are rejected with
+#   AbortCode::UnsupportedAccess — no object here exceeds 4 bytes.
+#
+# HEARTBEAT
+#
+#   0x700 + master_node_id   IN   — resets the fallback timers (see 0x3001/2)
+#   0x700 + node_id          OUT  — our own liveness, period at 0x1017
+#
+# DATA PLANE — fixed TPDOs, no runtime PDO mapping, no RPDOs
+#
+#   COB-ID = 0x200 | (kind << 4) | node_id      (11-bit, kind is 5 bits)
+#
+#   Broadcast period per kind is configured at 0x3040 sub (kind+1); 0 disables.
+#   Every payload is little-endian and exactly 8 bytes.
+#
+#   kind  name            payload
+#   ----  --------------  --------------------------------------------------
+#     0   ValveCommanded  u16 x4   commanded_state, position word     (0x2010)
+#     1   ValveTarget     u16 x4   target_state, position word        (0x2011)
+#     2   ValveMeasured   u16 x4   measured_state, position word      (0x2012)
+#     3   ValveStatus     u8 x4 status (0x2013), u8 x4 hco owner (0x2022)
+#     4   HcoDigital      u8 x4 level (0x2020), u8 x4 reserved
+#     5   HcoPwmUs        u16 x4   pulse width, microseconds          (0x2021)
+#     6   RawBus0A        u16 x4   bus 0 raw adc, addr idx 0..3       (0x2000)
+#     7   RawBus0B        u16 x4   bus 0 raw adc, addr idx 4..7
+#     8   RawBus1A        u16 x4   bus 1 raw adc, addr idx 0..3       (0x2001)
+#     9   RawBus1B        u16 x4   bus 1 raw adc, addr idx 4..7
+#    10   RawTail         u16 x4   bus0 idx 8, bus1 idx 8, 0, 0
+#    11   Sensor0         i16 x4   calibrated slots 0..3              (0x2004)
+#    12   Sensor1         i16 x4   calibrated slots 4..7
+#    13   SensorUnits     u8 x8    unit code per slot                 (0x2005)
+#    14   I2cScan         u16 present0, u16 present1, u16 sweeps, u16 rsvd
+#    15   Rails           u16 x4   i_logic, i_hco12, i_hco34 (mA), v_logic (mV)
+#    16   Status          u8 link_state, u8 raw_debug, u8 stalled_bits,
+#                         u8 relief_state, u32 ms_since_master_heartbeat
+#    17   ValveCurrent    u16 x4   per-valve rail current, mA        (0x2014)
+#
+#   I2cScan (kind 14) is the assembly-verification channel: bit n of present0
+#   is set when AMPLIFIER_ADDRESSES[n] answered on I2C bus 0 during the last
+#   sweep. `sweeps` increments once per completed sweep, so a stale bitmap is
+#   visible as a frozen counter.
+#
+# ---------------------------------------------------------------------------
+# The valve position word
+# ---------------------------------------------------------------------------
+#
+# All three valve state layers (0x2010, 0x2011, 0x2012) use one 16-bit layout:
+#
+#     bit 15    bits 14..0
+#     +------+--------------+
+#     | !pwr | promille     |   0..=1000
+#     +------+--------------+
+#
+# Bit 15 set means the drive is released: for a servo with a power output, the
+# signal is no longer being maintained and the valve holds (or does not hold)
+# mechanically. A solenoid has nothing to release, so for one the flag simply
+# reads as de-energised, i.e. closed.
+#
+# The flag and the position are independent on purpose, which is what makes
+# `measured` useful while unpowered: it reports the last position estimate AND
+# the fact that nothing is holding the valve there. Mask with 0x7FFF for the
+# number; test bit 15 to decide whether to trust it.
+#
+# The promille field is range-checked on every write, flag or no flag, so
+# 0xFFFF is rejected with AbortCode::ValueTooHigh. That is deliberate: 0xFFFF
+# means "invalid" or "not connected" elsewhere on this vehicle, and it must
+# never be mistaken for a valve command here.
+#
+# The 0x3000 configuration objects that hold positions (fallback positions, the
+# input clamp) take a plain promille and reject the flag — whether a fallback
+# releases its valve is the separate 0x3005/0x3006 field.
+#
+# ---------------------------------------------------------------------------
+# Overpressure relief: the one decision a node makes for itself
+# ---------------------------------------------------------------------------
+#
+# A closed volume being heated keeps rising in pressure with nobody commanding
+# anything, and waiting for the master to notice is the wrong dependency for
+# that failure. A node configured with a relief loop (0x3050..0x3056) watches
+# one sensor slot and, when it goes above the threshold, pulses one valve open
+# for a fixed time, then closes it and lets the reading settle before deciding
+# again.
+#
+# Relief OUTRANKS EVERYTHING: the commanded position, the input clamp, and both
+# heartbeat fallback stages. There is no link state in which the right answer to
+# "this vessel is over pressure" is to leave the valve where it was, and in
+# particular it stays active through fallback stage A — a brief comms dropout is
+# exactly when nobody else is watching the tank. It is not tied to the fallback
+# machinery at all: the state machine has no notion of the link.
+#
+# The threshold (0x3053) is in the WATCHED SLOT'S OWN UNIT, the same number that
+# goes out at 0x2004, so no conversion sits between the sensor and the decision.
+# A 100 bar transducer reporting centibar takes 6000 for 60 bar.
+#
+# A slot with no valid reading INHIBITS relief rather than triggering it —
+# venting a vehicle because a sensor cable fell off would be its own incident.
+# That state is visible at 0x2015 and in byte 3 of the status TPDO.
+#
+# Note the pulse has to be long enough for the valve to actually open: a servo
+# needs its full travel time (0x3015) first, which is why a relief valve is
+# normally a solenoid. The firmware warns at boot if that looks wrong.
+#
+# ---------------------------------------------------------------------------
+# Persistence
+# ---------------------------------------------------------------------------
+#
+# Everything in the 0x3000 block is runtime-writable AND persisted, to the
+# on-board W25Q128 NOR flash on SPI1 (see src/config/persist.rs). Two 4 KiB
+# sectors are written alternately with a sequence number and a CRC32; the
+# highest valid sequence wins at boot. Nothing in 0x1000/0x2000 is persisted.
+#
+#   write "save" (0x65766173) to 0x1010 sub 1  -> commit 0x3000 block to NOR
+#   write "load" (0x64616F6C) to 0x1011 sub 1  -> erase NOR, revert to the
+#                                                 compile-time defaults from
+#                                                 src/zenith_mapping/
+#
+# The compile-time per-node constants are FACTORY DEFAULTS only. A board with a
+# valid NOR config ignores them.
+# ============================================================================
 
-# The device identity includes the vendor, product, revision and a serial
-# number. The serial number should be unique among all device instances, so it
-# is provided by the application at run-time -- e.g. from a value stored in
-# flash, or a MCU UID register.
+device_name = "can-io"
+hardware_version = "rev3"
+heartbeat_period = 1000
+
 [identity]
 vendor_id = 0xCAFE
 product_code = 32
-revision_number = 1
+revision_number = 3
 
-# PDOs are used for sending "process data". Values which are transferred
-# frequency on the bus, such as control commands or sensor readings, are
-# typically sent and received using Transmit PDOs (TPDOs) and Receive PDOs
-# (RPDOS). These are configured at run-time by writing to the appropriate PDO
-# configuration objects, but the number of PDOs which can be configured must be
-# defined here, at compile time.
+# We do not use zencan's PDO machinery; the data plane is the fixed table above.
 [pdos]
-num_tpdos = 6
-num_rpdos = 4
+num_tpdos = 0
+num_rpdos = 0
 
+# ============================================================================
+# 0x1000 — identity and housekeeping
+# ============================================================================
+
+# 0x1010 (store parameters, write 'save' = 0x65766173) and 0x1011 (restore
+# defaults, write 'load' = 0x64616F6C) are generated from `support_storage`
+# rather than declared here. Both are uint32, sub 1, read/write. See
+# "Persistence" above for what they do on this board.
+#
+# 0x1017 (producer heartbeat period, milliseconds, 0 = off) is generated from
+# the `heartbeat_period` key above rather than declared here.
+
+# ============================================================================
+# 0x2000 — process data. Read-only unless noted; never persisted.
+# ============================================================================
+
+# Raw ADC101C027 conversion results, indexed by position in AMPLIFIER_ADDRESSES
+# (src/sensors/ext_adc.rs), NOT by I2C address. An address that did not answer
+# during the last sweep reads 0xFFFF.
 [[objects]]
 index = 0x2000
-parameter_name = "raw external adc reading - i2c bus0"
+parameter_name = "raw external adc reading - i2c bus 0"
 object_type = "array"
 data_type = "uint16"
 access_type = "ro"
-array_size = 16 
-default_value = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
-pdo_mapping = "tpdo"
+array_size = 9
+default_value = [65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535]
 
 [[objects]]
 index = 0x2001
-parameter_name = "raw external adc reading - i2c bus1"
+parameter_name = "raw external adc reading - i2c bus 1"
 object_type = "array"
 data_type = "uint16"
 access_type = "ro"
-array_size = 16 
-default_value = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
-pdo_mapping = "tpdo"
+array_size = 9
+default_value = [65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535]
 
+# Bit n set = AMPLIFIER_ADDRESSES[n] acknowledged during the last sweep.
+# This is the assembly-verification view: a board wired to the wrong address
+# strap shows up here as a bit in the wrong position.
 [[objects]]
 index = 0x2002
-parameter_name = "temperature sensor readings in centi Celcius"
+parameter_name = "i2c amplifier presence bitmap, per bus"
 object_type = "array"
 data_type = "uint16"
 access_type = "ro"
-array_size = 32
-default_value = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
-pdo_mapping = "tpdo"
+array_size = 2
+default_value = [0, 0]
 
 [[objects]]
 index = 0x2003
-parameter_name = "pressure sensor readings kilo Pascal"
-object_type = "array"
-data_type = "uint16"
+parameter_name = "completed i2c presence sweeps"
+object_type = "var"
+data_type = "uint32"
 access_type = "ro"
-array_size = 32
-default_value = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
-pdo_mapping = "tpdo"
+default_value = 0
 
-
+# Calibrated sensor slots. Value is a signed 16-bit count of the unit named by
+# the matching entry in 0x2005. i16::MIN (-32768) means "no reading".
 [[objects]]
 index = 0x2004
-parameter_name = "selected sensor readings"
+parameter_name = "calibrated sensor values"
 object_type = "array"
-data_type = "uint16"
+data_type = "int16"
+access_type = "ro"
+array_size = 8
+default_value = [-32768, -32768, -32768, -32768, -32768, -32768, -32768, -32768]
+
+# 0 = centibar, 1 = decibar, 2 = centi degrees celsius, 3 = raw adc counts.
+# Mirrors 0x3025 so a master can decode 0x2004 without reading the config
+# block. Decibar exists because a 400 bar sensor overflows i16 centibar.
+[[objects]]
+index = 0x2005
+parameter_name = "unit code per sensor slot"
+object_type = "array"
+data_type = "uint8"
 access_type = "ro"
 array_size = 8
 default_value = [0, 0, 0, 0, 0, 0, 0, 0]
-pdo_mapping = "tpdo"
 
+# --- valves: the three-layer state ---------------------------------------
 
+# What the master asked for. The only writable process object.
 [[objects]]
-index = 0x2005
-parameter_name = "valve open promille"
+index = 0x2010
+parameter_name = "valve commanded state, position word"
 object_type = "array"
 data_type = "uint16"
 access_type = "rw"
 array_size = 4
 default_value = [0, 0, 0, 0]
 
-
-
-
-# High Current Outputs binary on/off
+# What we actually aim for: commanded, clamped to 0x3019/0x301A, or overridden
+# by a fallback stage or by an operator-driven emergency shutdown.
 [[objects]]
-index = 0x2006
-parameter_name = "high current outputs binary"
+index = 0x2011
+parameter_name = "valve target state, position word"
+object_type = "array"
+data_type = "uint16"
+access_type = "ro"
+array_size = 4
+default_value = [0, 0, 0, 0]
+
+# Where we believe the valve actually is: integrated from target, elapsed time
+# and the configured full-travel time (0x3015), or read directly once a
+# position sensor is fitted. The estimate is frozen while unpowered or stalled,
+# and bit 15 is set while unpowered to say the valve is not being held there.
+[[objects]]
+index = 0x2012
+parameter_name = "valve measured state, position word"
+object_type = "array"
+data_type = "uint16"
+access_type = "ro"
+array_size = 4
+default_value = [0, 0, 0, 0]
+
+# 0 unmapped, 1 unpowered, 2 moving, 3 holding, 4 stalled.
+[[objects]]
+index = 0x2013
+parameter_name = "valve status code"
+object_type = "array"
+data_type = "uint8"
+access_type = "ro"
+array_size = 4
+default_value = [0, 0, 0, 0]
+
+# Rail current attributed to this valve, used for stall detection. HCO1+2 share
+# one shunt and HCO3+4 share another, so this is only unambiguous when a valve
+# owns a whole HCO pair — which is how the servo wiring is laid out.
+[[objects]]
+index = 0x2014
+parameter_name = "valve current, milliamps"
+object_type = "array"
+data_type = "uint16"
+access_type = "ro"
+array_size = 4
+default_value = [0, 0, 0, 0]
+
+# 0 idle (watching), 1 relieving (valve forced open), 2 cooldown (letting the
+# reading settle before re-arming), 3 inhibited (no valid reading from the
+# watched slot, so it cannot act), 4 disabled (not configured on this node).
+[[objects]]
+index = 0x2015
+parameter_name = "overpressure relief state"
+object_type = "var"
+data_type = "uint8"
+access_type = "ro"
+default_value = 4
+
+# --- direct high current output control ----------------------------------
+
+# Writes are rejected with AbortCode::CantStoreLocalControl when the output is
+# owned by a valve (0x2022), unless raw debug mode (0x2031) is active.
+[[objects]]
+index = 0x2020
+parameter_name = "high current outputs, digital level"
 object_type = "array"
 data_type = "uint8"
 access_type = "rw"
 array_size = 4
 default_value = [0, 0, 0, 0]
 
-# High Current Outputs microseconds duty 
 [[objects]]
-index = 0x2007
-parameter_name = "high current outputs pwm"
+index = 0x2021
+parameter_name = "high current outputs, pwm pulse width in microseconds"
 object_type = "array"
 data_type = "uint16"
 access_type = "rw"
 array_size = 4
 default_value = [0, 0, 0, 0]
 
-
-
-
-# onboard leds
+# 0 = free for direct control, n = driven by valve n-1.
 [[objects]]
-index = 0x2100
-parameter_name = "red debug led"
+index = 0x2022
+parameter_name = "high current output owner"
+object_type = "array"
+data_type = "uint8"
+access_type = "ro"
+array_size = 4
+default_value = [0, 0, 0, 0]
+
+# --- board state ----------------------------------------------------------
+
+[[objects]]
+index = 0x2030
+parameter_name = "debug leds bitmask (bit0 red, bit1 yellow, bit2 white)"
 object_type = "var"
 data_type = "uint8"
 access_type = "rw"
-default_value = 0 
+default_value = 0
 
+# Bench mode. NOT persisted and cleared by any reset. While set:
+#   - HCO arbitration becomes last-writer-wins, so a valve-owned output can be
+#     driven directly for servo testing,
+#   - the heartbeat fallback state machine is suspended, so an unattended board
+#     on the assembly bench does not drive its valves open after five minutes,
+#   - the red LED is held on.
+# Entered by writing 1 here, or by pressing the on-board button (PC6).
 [[objects]]
-index = 0x2101
-parameter_name = "yellow debug led"
+index = 0x2031
+parameter_name = "raw debug mode (volatile, this boot only)"
 object_type = "var"
 data_type = "uint8"
 access_type = "rw"
-default_value = 0 
+default_value = 0
+
+# 0 never seen a master, 1 alive, 2 fallback stage A, 3 fallback stage B,
+# 4 suspended because raw debug mode is active.
+[[objects]]
+index = 0x2032
+parameter_name = "master link state"
+object_type = "var"
+data_type = "uint8"
+access_type = "ro"
+default_value = 0
 
 [[objects]]
-index = 0x2102
-parameter_name = "white debug led"
+index = 0x2033
+parameter_name = "milliseconds since last master heartbeat"
+object_type = "var"
+data_type = "uint32"
+access_type = "ro"
+default_value = 0
+
+# rev3 only; reads 0 on rev2, which has no on-board sensing.
+[[objects]]
+index = 0x2040
+parameter_name = "rail currents in milliamps (logic, hco12, hco34)"
+object_type = "array"
+data_type = "uint16"
+access_type = "ro"
+array_size = 3
+default_value = [0, 0, 0]
+
+[[objects]]
+index = 0x2041
+parameter_name = "rail voltages in millivolts (logic, hco12, hco34)"
+object_type = "array"
+data_type = "uint16"
+access_type = "ro"
+array_size = 3
+default_value = [0, 0, 0]
+
+# ============================================================================
+# 0x3000 — runtime configuration. Read/write, persisted to NOR on 0x1010.
+# Defaults below are the generic ones; per-node factory defaults live in
+# src/zenith_mapping/ and are what a board with no stored config comes up with.
+# ============================================================================
+
+[[objects]]
+index = 0x3000
+parameter_name = "master node id"
 object_type = "var"
 data_type = "uint8"
 access_type = "rw"
-default_value = 0 
+default_value = 1
 
-# # Create an array object to store the four u16 raw analog readings
-# # It is read-only, so it can only be updated by the application
-# # It can be mapped to transmit PDOs for sending data to the bus
-# [[objects]]
-# index = 0x2000
-# parameter_name = "Raw Analog Input"
-# object_type = "array"
-# data_type = "uint16"
-# access_type = "ro"
-# array_size = 4
-# default_value = [0, 0, 0, 0]
-# pdo_mapping = "tpdo"
+[[objects]]
+index = 0x3001
+parameter_name = "fallback stage A timeout, milliseconds"
+object_type = "var"
+data_type = "uint32"
+access_type = "rw"
+default_value = 3000
+
+[[objects]]
+index = 0x3002
+parameter_name = "fallback stage B timeout, milliseconds"
+object_type = "var"
+data_type = "uint32"
+access_type = "rw"
+default_value = 300000
+
+# Stage A is the "lost the master, make the vehicle safe" state.
+[[objects]]
+index = 0x3003
+parameter_name = "fallback stage A valve positions, promille"
+object_type = "array"
+data_type = "uint16"
+access_type = "rw"
+array_size = 4
+default_value = [0, 0, 0, 0]
+
+# Stage B is the "the master is not coming back, vent" state.
+[[objects]]
+index = 0x3004
+parameter_name = "fallback stage B valve positions, promille"
+object_type = "array"
+data_type = "uint16"
+access_type = "rw"
+array_size = 4
+default_value = [1000, 1000, 1000, 1000]
+
+# Drop the servo's power output once it has reached the fallback position and
+# the settle time (0x3018) has elapsed. Saves the battery over a long outage;
+# a ball valve holds its position mechanically.
+[[objects]]
+index = 0x3005
+parameter_name = "unpower servo after reaching fallback stage A"
+object_type = "array"
+data_type = "uint8"
+access_type = "rw"
+array_size = 4
+default_value = [1, 1, 1, 1]
+
+[[objects]]
+index = 0x3006
+parameter_name = "unpower servo after reaching fallback stage B"
+object_type = "array"
+data_type = "uint8"
+access_type = "rw"
+array_size = 4
+default_value = [1, 1, 1, 1]
+
+[[objects]]
+index = 0x3007
+parameter_name = "heartbeat fallback enabled"
+object_type = "var"
+data_type = "uint8"
+access_type = "rw"
+default_value = 1
+
+# --- valve mapping and calibration ---------------------------------------
+
+# 0 = not fitted, 1 = solenoid, 2 = servo.
+[[objects]]
+index = 0x3010
+parameter_name = "valve kind"
+object_type = "array"
+data_type = "uint8"
+access_type = "rw"
+array_size = 4
+default_value = [0, 0, 0, 0]
+
+# 0 = none (solenoid, or a permanently powered servo), 1..4 = HCO number.
+[[objects]]
+index = 0x3011
+parameter_name = "valve power output (hco number, 0 = none)"
+object_type = "array"
+data_type = "uint8"
+access_type = "rw"
+array_size = 4
+default_value = [0, 0, 0, 0]
+
+# The output that carries the signal: PWM for a servo, the coil for a solenoid.
+[[objects]]
+index = 0x3012
+parameter_name = "valve signal output (hco number, 0 = none)"
+object_type = "array"
+data_type = "uint8"
+access_type = "rw"
+array_size = 4
+default_value = [0, 0, 0, 0]
+
+[[objects]]
+index = 0x3013
+parameter_name = "servo pulse width at fully closed, microseconds"
+object_type = "array"
+data_type = "uint16"
+access_type = "rw"
+array_size = 4
+default_value = [2000, 2000, 2000, 2000]
+
+[[objects]]
+index = 0x3014
+parameter_name = "servo pulse width at fully open, microseconds"
+object_type = "array"
+data_type = "uint16"
+access_type = "rw"
+array_size = 4
+default_value = [1000, 1000, 1000, 1000]
+
+# Time for a full 0 -> 1000 promille sweep. Drives the measured-state estimate
+# and the settle deadline. Measure it once per valve type on the bench.
+[[objects]]
+index = 0x3015
+parameter_name = "servo full travel time, milliseconds"
+object_type = "array"
+data_type = "uint16"
+access_type = "rw"
+array_size = 4
+default_value = [1000, 1000, 1000, 1000]
+
+# Rail current above which a moving valve is considered stalled. 0 disables
+# stall detection for that valve — which is also what rev2 boards must use,
+# having no on-board current sensing.
+[[objects]]
+index = 0x3016
+parameter_name = "valve stall current threshold, milliamps (0 = off)"
+object_type = "array"
+data_type = "uint16"
+access_type = "rw"
+array_size = 4
+default_value = [0, 0, 0, 0]
+
+[[objects]]
+index = 0x3017
+parameter_name = "valve stall detect debounce, milliseconds"
+object_type = "array"
+data_type = "uint16"
+access_type = "rw"
+array_size = 4
+default_value = [500, 500, 500, 500]
+
+[[objects]]
+index = 0x3018
+parameter_name = "valve settle time after arriving, milliseconds"
+object_type = "array"
+data_type = "uint16"
+access_type = "rw"
+array_size = 4
+default_value = [500, 500, 500, 500]
+
+# Input clamp. This is the difference between commanded_state and target_state
+# in normal operation: a valve that must never fully close gets a floor here.
+[[objects]]
+index = 0x3019
+parameter_name = "valve minimum commandable position, promille"
+object_type = "array"
+data_type = "uint16"
+access_type = "rw"
+array_size = 4
+default_value = [0, 0, 0, 0]
+
+[[objects]]
+index = 0x301A
+parameter_name = "valve maximum commandable position, promille"
+object_type = "array"
+data_type = "uint16"
+access_type = "rw"
+array_size = 4
+default_value = [1000, 1000, 1000, 1000]
+
+# --- sensor mapping and calibration --------------------------------------
+
+# Which I2C bus this slot reads from: 0, 1, or 0xFF for an unused slot.
+[[objects]]
+index = 0x3020
+parameter_name = "sensor slot source bus (0xFF = unused)"
+object_type = "array"
+data_type = "uint8"
+access_type = "rw"
+array_size = 8
+default_value = [255, 255, 255, 255, 255, 255, 255, 255]
+
+# Index into AMPLIFIER_ADDRESSES, 0..8 — not the raw I2C address.
+[[objects]]
+index = 0x3021
+parameter_name = "sensor slot source amplifier index"
+object_type = "array"
+data_type = "uint8"
+access_type = "rw"
+array_size = 8
+default_value = [0, 0, 0, 0, 0, 0, 0, 0]
+
+# 0 = unused, 1 = pressure (linear), 2 = Pt1000 temperature.
+[[objects]]
+index = 0x3022
+parameter_name = "sensor slot kind"
+object_type = "array"
+data_type = "uint8"
+access_type = "rw"
+array_size = 8
+default_value = [0, 0, 0, 0, 0, 0, 0, 0]
+
+# Linear pressure calibration. The bench calibration for these transducers is
+# defined as
 #
-# # An object for storing the scaled analog values
-# [[objects]]
-# index = 0x2001
-# parameter_name = "Scaled Analog Input"
-# object_type = "array"
-# data_type = "uint16"
-# access_type = "ro"
-# array_size = 4
-# default_value = [0, 0, 0, 0]
-# pdo_mapping = "tpdo"
+#   pressure_bar = (adc_reading - offset) * linear_factor
 #
-# # A configuration object for controlling the frequency of analog readings
-# # [[objects]]
-# # index = 0x2100
-# # parameter_name = "Analog Read Period (ms)"
-# # object_type = "var"
-# # data_type = "uint32"
-# # access_type = "rw"
-# # default_value = 10
+# which in the fixed point this board uses is
 #
-# # A configuration object which can be used to adjust the linear offset and scale transform used to
-# # calculate the value in 0x2001
-# [[objects]]
-# index = 0x2101
-# parameter_name = "Analog Scale Config"
-# object_type = "record"
-# [[objects.subs]]
-# sub_index = 1
-# parameter_name = "Scale Numerator"
-# data_type = "uint16"
-# access_type = "rw"
-# default_value = 1
-# [[objects.subs]]
-# sub_index = 2
-# parameter_name = "Scale Denominator"
-# data_type = "uint16"
-# access_type = "rw"
-# default_value = 1
-# [[objects.subs]]
-# sub_index = 3
-# parameter_name = "Offset"
-# data_type = "uint16"
-# access_type = "rw"
-# default_value = 0
+#   millibar = (raw_counts * 1000 - offset) * factor / 1e9 + constant
+#
+# so 0x3023 is the zero offset in MILLI-COUNTS, 0x3024 the slope in NANOBAR PER
+# COUNT, and 0x3026 a constant term in MILLIBAR which is zero for the plain
+# form above. Set the constant to 1013 for a transducer characterised against
+# ambient that should report absolute rather than gauge pressure. Which
+# convention a slot uses is therefore visible in its own calibration instead of
+# being implied by the firmware version.
+[[objects]]
+index = 0x3023
+parameter_name = "sensor calibration offset, milli adc counts"
+object_type = "array"
+data_type = "int32"
+access_type = "rw"
+array_size = 8
+default_value = [0, 0, 0, 0, 0, 0, 0, 0]
+
+[[objects]]
+index = 0x3024
+parameter_name = "sensor calibration slope, nanobar per adc count"
+object_type = "array"
+data_type = "int32"
+access_type = "rw"
+array_size = 8
+default_value = [0, 0, 0, 0, 0, 0, 0, 0]
+
+# Zero for the plain (reading - offset) * factor form; 1013 to report absolute
+# pressure from a transducer calibrated against ambient.
+[[objects]]
+index = 0x3026
+parameter_name = "sensor calibration constant term, millibar"
+object_type = "array"
+data_type = "int32"
+access_type = "rw"
+array_size = 8
+default_value = [0, 0, 0, 0, 0, 0, 0, 0]
+
+# Mirrored read-only into 0x2005. See the note there about decibar.
+[[objects]]
+index = 0x3025
+parameter_name = "sensor slot unit code"
+object_type = "array"
+data_type = "uint8"
+access_type = "rw"
+array_size = 8
+default_value = [0, 0, 0, 0, 0, 0, 0, 0]
+
+[[objects]]
+index = 0x3030
+parameter_name = "sensor sample interval, milliseconds"
+object_type = "var"
+data_type = "uint16"
+access_type = "rw"
+default_value = 10
+
+# One I2C address is probed per interval, so a full sweep of both buses takes
+# 18 intervals. Probing is interleaved with normal reads specifically so that
+# hunting for newly plugged-in amplifier boards does not disturb the sensor
+# sample rate during assembly.
+[[objects]]
+index = 0x3031
+parameter_name = "i2c presence probe interval, milliseconds"
+object_type = "var"
+data_type = "uint16"
+access_type = "rw"
+default_value = 500
+
+# Sub-index n+1 is the period for TPDO kind n; 0 disables that kind.
+[[objects]]
+index = 0x3040
+parameter_name = "tpdo broadcast period per kind, milliseconds"
+object_type = "array"
+data_type = "uint16"
+access_type = "rw"
+array_size = 18
+default_value = [500, 500, 200, 500, 500, 500, 100, 0, 100, 0, 0, 50, 0, 5000, 1000, 1000, 1000, 0]
+
+# ============================================================================
+# 0x3050 — overpressure relief. See the section at the top of this file.
+#
+# At most one valve per node is configured.
+# ============================================================================
+
+[[objects]]
+index = 0x3050
+parameter_name = "overpressure relief enabled"
+object_type = "var"
+data_type = "uint8"
+access_type = "rw"
+default_value = 0
+
+# Index of the valve to open, or 0xFF for none. An armed loop pointing at a
+# valve that is not fitted is rejected on save, rather than looking configured
+# while quietly doing nothing.
+[[objects]]
+index = 0x3051
+parameter_name = "overpressure relief valve index (0xFF = none)"
+object_type = "var"
+data_type = "uint8"
+access_type = "rw"
+default_value = 255
+
+[[objects]]
+index = 0x3052
+parameter_name = "overpressure relief sensor slot index"
+object_type = "var"
+data_type = "uint8"
+access_type = "rw"
+default_value = 0
+
+# Open when the watched slot reads strictly above this, IN THAT SLOT'S OWN UNIT
+# (0x2005) — 6000 is 60 bar for a slot reporting centibar. The default of 32767
+# is unreachable, so a node that has never been configured for relief cannot
+# start venting because some unrelated slot reads high.
+[[objects]]
+index = 0x3053
+parameter_name = "overpressure relief threshold, in the slot's own unit"
+object_type = "var"
+data_type = "int16"
+access_type = "rw"
+default_value = 32767
+
+[[objects]]
+index = 0x3054
+parameter_name = "overpressure relief valve position, promille"
+object_type = "var"
+data_type = "uint16"
+access_type = "rw"
+default_value = 1000
+
+# Must be long enough for the valve to actually reach the relief position: a
+# servo needs its full travel time (0x3015) first, which is why a relief valve
+# is normally a solenoid.
+[[objects]]
+index = 0x3055
+parameter_name = "overpressure relief pulse length, milliseconds"
+object_type = "var"
+data_type = "uint16"
+access_type = "rw"
+default_value = 500
+
+# Settling time after a pulse before the threshold is looked at again. Without
+# it the lag between valve and sensor would make a single decision dump the
+# whole vessel.
+[[objects]]
+index = 0x3056
+parameter_name = "overpressure relief cooldown, milliseconds"
+object_type = "var"
+data_type = "uint16"
+access_type = "rw"
+default_value = 500

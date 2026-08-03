@@ -15,7 +15,7 @@ use embassy_stm32::{
 use embassy_time::Duration;
 
 use super::HcoControl;
-use super::types::*;
+use crate::hco::*;
 
 /// A duty of u16::MAX means PWM disabled
 static PULSE_US_PWM1: AtomicU16 = AtomicU16::new(u16::MAX);
@@ -35,22 +35,14 @@ pub struct HcoControllerRev2 {
 }
 
 impl HcoControl for HcoControllerRev2 {
-    fn set_level(&mut self, output: HighCurrentOutput, level: Level) {
-        let mut new_state = self.get_state();
-        new_state.set_level(output, level);
-        self.set_state(new_state);
+    fn get_state(&self) -> HcoState {
+        self.state
     }
 
-    fn set_pwm_micros(&mut self, output: HighCurrentOutput, micros: u16) {
-        let mut new_state = self.get_state();
-        new_state.set_pwm_micros(output, micros);
-        self.set_state(new_state);
-    }
-    fn get_state(&self) -> HcoState {
-        self.state.clone()
-    }
     fn set_state(&mut self, target_state: HcoState) {
-        match target_state._1 {
+        // Unlike rev3 these four are not interchangeable: HCO1/HCO2 are plain GPIO driven by the
+        // TIM2 software-PWM ISR, HCO3/HCO4 are real timer channels. So they stay written out.
+        match target_state[HcoId::Hco0] {
             State::Digital(level) => {
                 PULSE_US_PWM1.store(u16::MAX, Ordering::Relaxed);
                 self.out1.set_level(level.into());
@@ -59,7 +51,7 @@ impl HcoControl for HcoControllerRev2 {
                 PULSE_US_PWM1.store(u16::from(duty), Ordering::Relaxed);
             }
         }
-        match target_state._2 {
+        match target_state[HcoId::Hco1] {
             State::Digital(level) => {
                 PULSE_US_PWM2.store(u16::MAX, Ordering::Relaxed);
                 self.out2.set_level(level.into());
@@ -68,7 +60,7 @@ impl HcoControl for HcoControllerRev2 {
                 PULSE_US_PWM2.store(u16::from(duty), Ordering::Relaxed);
             }
         }
-        match target_state._3 {
+        match target_state[HcoId::Hco2] {
             State::Digital(level) => match level {
                 Level::High => self.out3.set_duty_cycle_fully_on(),
                 Level::Low => self.out3.set_duty_cycle_fully_off(),
@@ -79,7 +71,7 @@ impl HcoControl for HcoControllerRev2 {
                 self.out3.set_duty_cycle_fraction(num, 10_000);
             }
         }
-        match target_state._4 {
+        match target_state[HcoId::Hco3] {
             State::Digital(level) => match level {
                 Level::High => self.out4.set_duty_cycle_fully_on(),
                 Level::Low => self.out4.set_duty_cycle_fully_off(),
@@ -91,8 +83,8 @@ impl HcoControl for HcoControllerRev2 {
             }
         }
 
-        let hco1_is_pwm = matches!(target_state._1, State::Pwm(_));
-        let hco2_is_pwm = matches!(target_state._2, State::Pwm(_));
+        let hco1_is_pwm = matches!(target_state[HcoId::Hco0], State::Pwm(_));
+        let hco2_is_pwm = matches!(target_state[HcoId::Hco1], State::Pwm(_));
 
         self.virtual_timer.enable_update_interrupt(hco1_is_pwm || hco2_is_pwm);
         self.virtual_timer.enable_input_interrupt(Channel::Ch1, hco1_is_pwm);
@@ -154,7 +146,7 @@ impl HcoControllerRev2 {
         channels.ch4.enable();
 
         let mut hco_ctl = Self {
-            state: init_state.clone(),
+            state: init_state,
             out1,
             out2,
             out3: channels.ch3,
@@ -180,7 +172,6 @@ impl interrupt::typelevel::Handler<interrupt::typelevel::TIM2> for Tim2Handler {
         if status_regs.uif() {
             // update interrupt flag is set, meaning timer event has occured
 
-            use core::u16;
             timer.sr().modify(|w| w.set_uif(false));
 
             let pulse_width_ch1 = PULSE_US_PWM1.load(Ordering::Relaxed);

@@ -1,11 +1,16 @@
 use embassy_executor::Spawner;
-use embassy_stm32::gpio::{Level as GpioLevel, Output, Speed};
+use embassy_stm32::exti::ExtiInput;
+use embassy_stm32::gpio::{Level as GpioLevel, Output, Pull, Speed};
+use embassy_stm32::spi::{self, Spi};
+use embassy_stm32::time::Hertz;
 use embassy_stm32::wdg::IndependentWatchdog;
 use embassy_stm32::{
     Peri,
     i2c::{I2c, Master},
     mode::Async,
 };
+use embassy_sync::blocking_mutex::raw::NoopRawMutex;
+use embassy_sync::mutex::Mutex;
 use embassy_sync::pubsub::PubSubChannel;
 
 use defmt_rtt as _;
@@ -14,9 +19,12 @@ use static_cell::StaticCell;
 pub mod high_current_outputs;
 pub use high_current_outputs::*;
 
+pub mod ext_flash;
 pub mod leds;
 pub use leds::{LedsState, StateLedPub};
 mod hw;
+
+use crate::config::persist::NorConfigStore;
 
 #[cfg(feature = "rev3")]
 mod on_board_sens;
@@ -30,6 +38,16 @@ compile_error!("rev2 and rev3 are mutually exclusive");
 #[cfg(not(any(feature = "rev2", feature = "rev3")))]
 compile_error!("must enable exactly one of: rev2, rev3");
 
+/// SPI device wrapping the one chip on SPI1. A shared-bus device rather than an exclusive one
+/// only because that is what `embassy-embedded-hal` offers; the mutex is uncontended.
+pub type ExtFlashBus = Spi<'static, Async, spi::mode::Master>;
+pub type ExtFlashSpi =
+    embassy_embedded_hal::shared_bus::asynch::spi::SpiDevice<'static, NoopRawMutex, ExtFlashBus, Output<'static>>;
+pub type ExtFlash = ext_flash::W25Q<ExtFlashSpi>;
+/// The persisted-configuration store, monomorphised so it can cross an `#[embassy_executor::task]`
+/// boundary (tasks cannot be generic).
+pub type ConfigStore = NorConfigStore<ExtFlash>;
+
 pub struct Board {
     #[cfg(feature = "rev2")]
     pub hco_controller: HcoControllerRev2,
@@ -41,13 +59,16 @@ pub struct Board {
     pub can1: embassy_stm32::can::Can<'static>,
     #[cfg(feature = "rev3")]
     pub onboard_sens: OnboardSensRev3,
-    // can2: embassy_stm32::can::Can<'static>,
-    // pub cancan: CanCan<Flash<'static, Blocking>>,
+    /// `None` when the NOR flash did not identify itself, in which case the node runs on its
+    /// compile-time factory defaults and refuses to persist. Both revisions populate the chip.
+    pub config_store: Option<ConfigStore>,
+    // can2 is populated in hardware but unused; see `can/mod.rs`.
     pub flash_peri: Peri<'static, peripherals::FLASH>,
 }
 
 static COM1_I2C: StaticCell<I2c<'static, Async, Master>> = StaticCell::new();
 static COM2_I2C: StaticCell<I2c<'static, Async, Master>> = StaticCell::new();
+static EXT_FLASH_BUS: StaticCell<Mutex<NoopRawMutex, ExtFlashBus>> = StaticCell::new();
 
 const WATCHDOG_TIMEOUT_US: u32 = 250_000;
 const WATCHDOG_PET_INTERVAL: embassy_time::Duration = embassy_time::Duration::from_millis(50);
@@ -105,25 +126,41 @@ pub async fn init_board(spawner: Spawner) -> Board {
     let com1_i2c = COM1_I2C.init(I2c::new(p.I2C1, p.PB6, p.PB7, p.DMA1_CH6, p.DMA1_CH7, hw::Irqs, i2c_config));
     let com2_i2c = COM2_I2C.init(I2c::new(p.I2C2, p.PB10, p.PB11, p.DMA1_CH4, p.DMA1_CH5, hw::Irqs, i2c_config));
 
-    // FIXME: temp
-    let mut hco_state_temp = HcoState::default();
-    // rev3
-    // hco_state_temp.set_high(HighCurrentOutput::_1);
-    // hco_state_temp.set_pwm_micros(HighCurrentOutput::_2, 1500);
-    // hco_state_temp.set_high(HighCurrentOutput::_3);
-    // hco_state_temp.set_pwm_micros(HighCurrentOutput::_4, 1500);
-    //
-    // rev2
-    // hco_state_temp.set_high(HighCurrentOutput::_1);
-    // hco_state_temp.set_pwm_micros(HighCurrentOutput::_2, 1500);
-    // hco_state_temp.set_high(HighCurrentOutput::_3);
-    // hco_state_temp.set_pwm_micros(HighCurrentOutput::_4, 1500);
+    // DMA1 channels 2 and 3 are SPI1's; channel 1 belongs to ADC1 and 4..7 to the two I2C buses.
+    let mut spi_config = spi::Config::default();
+    // The W25Q128 is good for 104 MHz; 72/8 = 9 MHz is well inside spec and keeps the config
+    // record's few hundred bytes far below a millisecond.
+    spi_config.frequency = Hertz::mhz(9);
+    let spi = Spi::new(p.SPI1, p.PB3, p.PB5, p.PB4, p.DMA1_CH3, p.DMA1_CH2, hw::Irqs, spi_config);
+    let spi_bus = EXT_FLASH_BUS.init(Mutex::new(spi));
+    let flash_cs = Output::new(p.PB2, GpioLevel::High, Speed::VeryHigh);
+    let mut nor =
+        ext_flash::W25Q::new(embassy_embedded_hal::shared_bus::asynch::spi::SpiDevice::new(spi_bus, flash_cs));
+
+    let config_store = match nor.probe().await {
+        Ok(()) => Some(NorConfigStore::new(nor)),
+        Err(e) => {
+            // use compile-time defaults
+            defmt::error!("no usable config flash ({}), running on compile-time defaults", e);
+            None
+        }
+    };
+
+    // The on-board button is the physical way into raw debug mode, for a bench where nobody has a
+    // CAN adapter to hand. Active low: the schematic pulls it to ground when pressed.
+    let debug_button = ExtiInput::new(p.PC6, p.EXTI6, Pull::Up, hw::Irqs);
+    spawner.spawn(watch_debug_button(debug_button).unwrap());
+
+    // Every output starts de-energised, which is also what the hardware does on its own: the gate
+    // drives have 12k pulldowns, so power-on, reset and a panic all land on "off" before this line
+    // runs. The control task takes over from here and is the only thing that moves them after.
+    let hco_initial = HcoState::default();
 
     #[cfg(feature = "rev2")]
-    let hco_controller = HcoControllerRev2::new(p.PC0, p.PC15, p.PB0, p.PB1, p.TIM2, p.TIM3, hco_state_temp).await;
+    let hco_controller = HcoControllerRev2::new(p.PC0, p.PC15, p.PB0, p.PB1, p.TIM2, p.TIM3, hco_initial).await;
 
     #[cfg(feature = "rev3")]
-    let hco_controller = HcoControllerRev3::new(p.PA7, p.PA8, p.PB0, p.PB1, p.TIM1, p.TIM3, hco_state_temp).await;
+    let hco_controller = HcoControllerRev3::new(p.PA7, p.PA8, p.PB0, p.PB1, p.TIM1, p.TIM3, hco_initial).await;
 
     // let can_open_interface =
     //     CanOpenInterface::new((can_out.publisher().unwrap(), can_in.subscriber().unwrap()), hco_controller);
@@ -162,9 +199,32 @@ pub async fn init_board(spawner: Spawner) -> Board {
         can1,
         #[cfg(feature = "rev3")]
         onboard_sens,
-        // cancan,
-        // for cancan
+        config_store,
+        // for cancan's A/B image handling
         flash_peri: p.FLASH,
+    }
+}
+
+/// Toggle raw debug mode on a button press.
+#[embassy_executor::task]
+async fn watch_debug_button(mut button: ExtiInput<'static, Async>) -> ! {
+    loop {
+        button.wait_for_falling_edge().await;
+        embassy_time::Timer::after_millis(30).await;
+        if button.is_high() {
+            continue; // bounce or noise, not a press
+        }
+
+        {
+            let mut store = crate::store::STORE.lock().await;
+            store.raw_debug = !store.raw_debug;
+            store.pending.outputs = true;
+            defmt::warn!("button: raw debug mode {}", if store.raw_debug { "ON" } else { "off" });
+        }
+        crate::store::CONTROL_WAKE.signal(());
+
+        // debounce
+        embassy_time::Timer::after_millis(300).await;
     }
 }
 

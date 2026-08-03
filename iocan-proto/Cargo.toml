@@ -1,0 +1,15 @@
+[package]
+name = "iocan-proto"
+version = "0.1.0"
+edition = "2024"
+description = "Wire protocol for the ioCan CAN bus: identifier layout and TPDO frame encode/decode. no_std, no heap."
+
+[dependencies]
+# Only for `Format` impls so the ioCan firmware can log these types directly; nothing in this
+# crate needs it to encode or decode a frame, so it stays opt-in for anyone else depending on
+# this crate.
+defmt = { version = "0.3", optional = true }
+
+[features]
+default = []
+defmt = ["dep:defmt"]

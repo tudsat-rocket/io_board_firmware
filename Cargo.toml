@@ -5,71 +5,142 @@ edition = "2024"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [workspace]
-# The bootloader is its own standalone crate/workspace, flashed once via probe-rs.
+# iocan-proto is the wire protocol (identifiers, TPDO frame encode/decode) split out so other
+# devices and tooling can depend on it without pulling in this firmware. The bootloader is its
+# own standalone crate/workspace, flashed once via probe-rs, and stays excluded.
+members = [".", "iocan-proto"]
 exclude = ["bootloader"]
+
+# One binary per physical node, each a shell around the matching factory defaults in
+# src/zenith_mapping. `required-features = ["hardware"]` keeps them out of a host build, so
+# `cargo test --no-default-features --target <host>` does not try to link firmware for x86.
 
 [[bin]]
 name = "node2"
 path = "src/bin/node2.rs"
+required-features = ["hardware"]
 
 [[bin]]
 name = "node3"
 path = "src/bin/node3.rs"
+required-features = ["hardware"]
 
 [[bin]]
 name = "node4"
 path = "src/bin/node4.rs"
+required-features = ["hardware"]
 
 [[bin]]
 name = "node5"
 path = "src/bin/node5.rs"
+required-features = ["hardware"]
 
 [[bin]]
 name = "node6"
 path = "src/bin/node6.rs"
+required-features = ["hardware"]
 
 [[bin]]
 name = "node7"
 path = "src/bin/node7.rs"
+required-features = ["hardware"]
+
+# The self-regulating relief node: watches a transducer and bleeds its own valve.
+[[bin]]
+name = "node8reg"
+path = "src/bin/node8reg.rs"
+required-features = ["hardware"]
+
+# The bench node, for a board that is not installed in the vehicle.
+[[bin]]
+name = "generic"
+path = "src/bin/generic.rs"
+required-features = ["hardware"]
 
 
 [dependencies]
+# The CAN wire protocol (identifiers, TPDO frame layouts): see iocan-proto/src/lib.rs. Not
+# optional/feature-gated — the pure-logic build (`build` in can/tpdo.rs) needs it too.
+iocan-proto = { path = "iocan-proto", features = ["defmt"] }
+
 defmt = "0.3"
 # `disable-blocking-mode`: without it, defmt-rtt blocks forever once the 1KiB RTT buffer
 # fills if probe-rs was attached and then unplugged, hanging the firmware in a critical
 # section. Losing log lines is always preferable to that.
-defmt-rtt = { version = "0.4", features = ["disable-blocking-mode"] }
+defmt-rtt = { version = "0.4", features = ["disable-blocking-mode"], optional = true }
 # NOTE: no panic-probe. Its handler ends in `udf` -> HardFault -> infinite loop, which
 # leaves the HCO timers driving the valves. See src/panic.rs.
 
-embedded-hal = "1.0"
-embedded-hal-async = "1.0"
+embedded-hal = { version = "1.0", optional = true }
+# Always-on: `src/sensors/ext_adc.rs`'s `Buses` is generic over `embedded_hal_async::i2c::I2c` so
+# it can be built and tested on the host against a mock bus. Safe to promote — it only depends on
+# `embedded-hal 1.0`, which itself has zero dependencies.
+embedded-hal-async = { version = "1.0" }
 
-cortex-m = { version = "0.7", features = ["inline-asm", "critical-section-single-core"] }
-cortex-m-rt = "0.7"
-alloc-cortex-m = "0.4"
+cortex-m = { version = "0.7", features = ["inline-asm", "critical-section-single-core"], optional = true }
+cortex-m-rt = { version = "0.7", optional = true }
 
-embassy-stm32 = { version = "0.6", features = ["stm32f105rc", "unstable-pac", "time-driver-any", "exti"]  }
-embassy-executor = { version = "0.10", features = [ "platform-cortex-m", "executor-thread", "executor-interrupt"] }
-embassy-time = { version = "0.5", features = ["tick-hz-32_768"] }
-embassy-embedded-hal = { version = "0.6" }
+embassy-stm32 = { version = "0.6", features = ["stm32f105rc", "unstable-pac", "time-driver-any", "exti"], optional = true }
+embassy-executor = { version = "0.10", features = [ "platform-cortex-m", "executor-thread", "executor-interrupt"], optional = true }
+embassy-time = { version = "0.5" }
+embassy-embedded-hal = { version = "0.6", optional = true }
 embassy-sync = { version = "0.8" }
-embassy-futures = { version = "0.1" }
+embassy-futures = { version = "0.1", optional = true }
 
-
-zencan-node = { version = "0.0.4", default-features = false, features = [ "defmt" ] }
 zencan-common = { version = "0.0.4", default-features = false, features = [ "defmt" ] }
 
-cancan = { git = "https://github.com/tudsat-rocket/cancan", features = ["defmt"] }
+# Only for host tests: `embassy-sync`'s `CriticalSectionRawMutex` needs a real critical-section
+# implementation to link against. On target, `cortex-m`'s `critical-section-single-core` feature
+# (under `hardware`) provides one instead — enabling `std` here for the embedded build would try
+# to link `std::sync::Mutex` on a target that has no `std`, so this stays host-test-only.
+critical-section = { version = "1", features = ["std"], optional = true }
 
-static_cell = "2"
+cancan = { git = "https://github.com/tudsat-rocket/cancan", features = ["defmt"], optional = true }
+
+# Always-on: `src/leds.rs` (unconditional, so `Control` can be built/tested on the host) needs it
+# for `STATE_LED_PUB_SUB`. Safe to promote — its only dependency is `portable-atomic`, which has a
+# host fallback and no target coupling.
+static_cell = { version = "2" }
 crc = "3"
 heapless = "0.9"
+embedded-storage-async = { version = "0.4.1", default-features = false }
+
+# NOTE: deliberately no [dev-dependencies].
+#
+# Cargo unifies features across normal and dev dependencies, and dev-dependencies are enabled
+# whenever *any* test/bench/example target is built — which `--all-targets` does, and which
+# rust-analyzer passes by default. A dev-dependency on `defmt/unstable-test` therefore makes
+# defmt a `std` crate for the ordinary embedded build too, and the whole thing stops compiling
+# with "std is required by defmt". The host-test requirements live in the opt-in `host-test`
+# feature below instead, so nothing turns them on unless it is asked to.
 
 [features]
-default = ["rev3"]
+# `hardware` is everything that only compiles for the target: the HAL, the executor, the drivers.
+# Turning it off leaves the pure logic — the object dictionary, the valve model, the fallback
+# state machine, sensor calibration, the CAN identifier layout — which is what the unit tests
+# exercise on the host. See `host-test`.
+default = ["rev3", "hardware"]
+hardware = [
+    "dep:embassy-stm32",
+    "dep:embassy-executor",
+    "dep:embassy-embedded-hal",
+    "dep:embassy-futures",
+    "dep:cortex-m",
+    "dep:cortex-m-rt",
+    "dep:defmt-rtt",
+    "dep:cancan",
+    "dep:embedded-hal",
+]
 rev2 = []
 rev3 = []
+
+# Everything the pure logic needs to build and link for the host, and nothing the target build
+# should ever see. `mock-driver` satisfies embassy-time's driver symbol; `defmt/unstable-test`
+# gives the logging macros a backend so tests link without a probe attached — but it also makes
+# defmt a `std` crate, which is exactly why this must stay opt-in rather than a dev-dependency.
+#
+#   cargo test --no-default-features --features host-test --target x86_64-unknown-linux-gnu
+host-test = ["defmt/unstable-test", "embassy-time/mock-driver", "dep:critical-section"]
 
 [build-dependencies]
 # zencan-build = { git = "https://github.com/mcbridejc/zencan", rev = "4edcf8c9f7d06b51be9e773c511ab7c6360958b2", version = "0.0.1", default-features = false }

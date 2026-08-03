@@ -11,7 +11,7 @@ use embassy_stm32::{
 };
 
 use super::HcoControl;
-use super::types::*;
+use crate::hco::*;
 
 /// High current output controller for IO board rev3.
 pub struct HcoControllerRev3 {
@@ -24,53 +24,31 @@ pub struct HcoControllerRev3 {
 }
 
 impl HcoControl for HcoControllerRev3 {
-    fn set_level(&mut self, output: HighCurrentOutput, level: Level) {
-        let mut new_state = self.get_state();
-        new_state.set_level(output, level);
-        self.set_state(new_state);
+    fn get_state(&self) -> HcoState {
+        self.state
     }
 
-    fn set_pwm_micros(&mut self, output: HighCurrentOutput, micros: u16) {
-        let mut new_state = self.get_state();
-        new_state.set_pwm_micros(output, micros);
-        self.set_state(new_state);
-    }
-    fn get_state(&self) -> HcoState {
-        self.state.clone()
-    }
     fn set_state(&mut self, target_state: HcoState) {
         self.state = target_state;
-        match self.state._1 {
-            State::Digital(Level::High) => self.out1.set_duty_cycle_fully_on(),
-            State::Digital(Level::Low) => self.out1.set_duty_cycle_fully_off(),
-            State::Pwm(duty) => {
-                let num = (u32::from(duty.as_u16()) * 5) / 10;
-                self.out1.set_duty_cycle_fraction(num, 10_000);
-            }
-        };
-        match self.state._2 {
-            State::Digital(Level::High) => self.out2.set_duty_cycle_fully_on(),
-            State::Digital(Level::Low) => self.out2.set_duty_cycle_fully_off(),
-            State::Pwm(duty) => {
-                let num = (u32::from(duty.as_u16()) * 5) / 10;
-                self.out2.set_duty_cycle_fraction(num, 10_000);
-            }
-        };
-        match self.state._3 {
-            State::Digital(Level::High) => self.out3.set_duty_cycle_fully_on(),
-            State::Digital(Level::Low) => self.out3.set_duty_cycle_fully_off(),
-            State::Pwm(duty) => {
-                let num = (u32::from(duty.as_u16()) * 5) / 10;
-                self.out3.set_duty_cycle_fraction(num, 10_000);
-            }
-        }
-        match self.state._4 {
-            State::Digital(Level::High) => self.out4.set_duty_cycle_fully_on(),
-            State::Digital(Level::Low) => self.out4.set_duty_cycle_fully_off(),
-            State::Pwm(duty) => {
-                let num = (u32::from(duty.as_u16()) * 5) / 10;
-                self.out4.set_duty_cycle_fraction(num, 10_000);
-            }
+        // Every output is a PWM channel on this revision, so one helper covers all four and the
+        // channel-to-output mapping is stated once, here, rather than in four near-identical
+        // match blocks where a transposed pair would be invisible.
+        apply(&mut self.out1, self.state[HcoId::Hco0]);
+        apply(&mut self.out2, self.state[HcoId::Hco1]);
+        apply(&mut self.out3, self.state[HcoId::Hco2]);
+        apply(&mut self.out4, self.state[HcoId::Hco3]);
+    }
+}
+
+/// Drive one PWM channel to a requested output state. The pulse width is in microseconds against
+/// a 50 Hz (20 ms) period, hence `us * 5 / 10` parts in ten thousand.
+fn apply<T: embassy_stm32::timer::GeneralInstance4Channel>(channel: &mut SimplePwmChannel<'static, T>, state: State) {
+    match state {
+        State::Digital(Level::High) => channel.set_duty_cycle_fully_on(),
+        State::Digital(Level::Low) => channel.set_duty_cycle_fully_off(),
+        State::Pwm(duty) => {
+            let num = (u32::from(duty.as_u16()) * 5) / 10;
+            channel.set_duty_cycle_fraction(num, 10_000);
         }
     }
 }
@@ -112,7 +90,7 @@ impl HcoControllerRev3 {
         channels2.ch1.enable();
 
         let mut ctl = Self {
-            state: init_state.clone(),
+            state: init_state,
             out1: channels134.ch2,
             out2: channels2.ch1,
             out3: channels134.ch3,

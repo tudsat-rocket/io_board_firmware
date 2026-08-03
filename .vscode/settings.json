@@ -1,3 +1,22 @@
 {
-  "rust-analyzer.cargo.features": ["rev3"]
+  // This is a no_std crate whose default target is thumbv7m-none-eabi (see .cargo/config.toml).
+  //
+  // rust-analyzer passes --all-targets by default, which makes cargo build the crate's unit-test
+  // harness. That harness needs `std` and `test`, neither of which exists for a bare-metal
+  // target, so every `#[cfg(test)]` module reports hundreds of nonsense errors ("cannot find
+  // macro `assert_eq`", "cannot find trait `Sized`") that have nothing to do with the code.
+  //
+  // Turning both of these off makes rust-analyzer analyse and check exactly what actually gets
+  // flashed: the lib and the node binaries.
+  //
+  // The cost is that #[cfg(test)] modules are not analysed in the editor. Run them from a
+  // terminal instead, where they are built for the host:
+  //
+  //   cargo test --no-default-features --features host-test --target x86_64-unknown-linux-gnu
+  //
+  "rust-analyzer.cargo.allTargets": false,
+  "rust-analyzer.check.allTargets": false,
+
+  // Explicit rather than relying on `default`, so switching to rev2 here is a one-word edit.
+  "rust-analyzer.cargo.features": ["rev3", "hardware"]
 }

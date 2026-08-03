@@ -1,17 +1,22 @@
+//! The bench node: a board that is not installed in the vehicle.
+//!
+//! Everything is left uncalibrated on purpose. Sensor slots report raw ADC counts, which is what
+//! you want while working out a calibration, and every amplifier address that answers shows up in
+//! the presence bitmap (TPDO kind 14) whether or not a slot is mapped to it — which is how an
+//! address-strap mistake gets caught during assembly.
+//!
+//! Configure it over the bus and write "save" to 0x1010 to make a setup stick; the constants here
+//! are only what a freshly flashed board falls back to.
+
 #![no_std]
 #![no_main]
-#![allow(unused_imports, reason = "imports change because this is a testing and debug node")]
+
 use embassy_executor::Spawner;
-use embassy_time::Duration;
 
-use io_board::valves::SolenoidVavle;
-use io_board::zenith_mapping::sensors::{PLACEHOLDER_P, PLACEHOLDER_T};
-use io_board::zenith_mapping::valves::PLACEHOLDER_S;
-
-use io_board::zenith_mapping::valves;
-use io_board::{
-    ext_adc::SensorSettings, node::NodeSettings, sensors::SensorMapping, tpdo::TpdoIntervals, valves::ValveMapping,
-};
+use io_board::config::Config;
+use io_board::index::{AmplifierId, AmplifierId::*, HcoPair, I2cBus, I2cBus::*, SensorSlot::*, ValveId::*};
+use io_board::node::NodeSettings;
+use io_board::zenith_mapping::{sensors::PLACEHOLDER_P, valves};
 
 use defmt_rtt as _;
 
@@ -20,62 +25,22 @@ include!(concat!(env!("OUT_DIR"), "/cancan_metadata.rs"));
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
-    io_board::node::spawn_node(spawner, NODE6_DEBUG).await;
+    io_board::node::spawn_node(spawner, BENCH).await;
 }
 
-pub const EMPTY: NodeSettings = NodeSettings {
-    node_id: 2,
-    valve_mapping: ValveMapping::new_empty(),
-    sensor_mapping: SensorMapping::new_empty(),
-    sensor_settings: SensorSettings {
-        measure_interval: Duration::from_millis(10),
-    },
-    tpdo_intervals: no_tpdo(),
-};
+/// Two uncharacterised servos on the two HCO pairs, and the first four amplifier positions of
+/// bus 0 mapped straight through as raw counts.
+const BENCH: NodeSettings = NodeSettings::new(
+    6,
+    Config::new()
+        .with_valve(Valve0, valves::placeholder_servo(HcoPair::A))
+        .with_valve(Valve1, valves::placeholder_servo(HcoPair::B))
+        .with_sensor(Slot0, raw(Bus0, Amp0))
+        .with_sensor(Slot1, raw(Bus0, Amp1))
+        .with_sensor(Slot2, raw(Bus0, Amp2))
+        .with_sensor(Slot3, raw(Bus1, Amp0)),
+);
 
-pub const NODE6_DEBUG: NodeSettings = NodeSettings {
-    node_id: 6,
-    valve_mapping: ValveMapping::new_empty()
-        // main valve
-        .add_std_servo_hco12(PLACEHOLDER_S, 0)
-        .unwrap()
-        .add_std_servo_hco34(valves::OX_FILL_AND_DUMP, 0)
-        .unwrap(),
-    sensor_mapping: SensorMapping::new_empty().add_consecutive(PLACEHOLDER_T, 0, 0).unwrap(),
-
-    sensor_settings: SensorSettings {
-        measure_interval: Duration::from_millis(10),
-    },
-    tpdo_intervals: TpdoIntervals::default(),
-};
-
-const fn no_tpdo() -> TpdoIntervals {
-    TpdoIntervals {
-        valves: Some(Duration::from_millis(1000)),
-        binary_outpus: None,
-        pwm_us: None,
-        raw_bus0a: None,
-        raw_bus0b: None,
-        raw_bus1a: None,
-        raw_bus1b: None,
-        sensor0: None,
-        sensor1: None,
-        sensor2: None,
-    }
-}
-
-#[allow(dead_code)]
-const fn slow() -> TpdoIntervals {
-    TpdoIntervals {
-        valves: Some(Duration::from_millis(1000)),
-        binary_outpus: Some(Duration::from_millis(1000)),
-        pwm_us: Some(Duration::from_millis(1000)),
-        raw_bus0a: Some(Duration::from_millis(1000)),
-        raw_bus0b: None,
-        raw_bus1a: Some(Duration::from_millis(1000)),
-        raw_bus1b: None,
-        sensor0: Some(Duration::from_millis(1000)),
-        sensor1: None,
-        sensor2: None,
-    }
+const fn raw(bus: I2cBus, amplifier: AmplifierId) -> io_board::config::SensorSlotConfig {
+    io_board::config::SensorSlotConfig::pressure(bus, amplifier, PLACEHOLDER_P.unit, PLACEHOLDER_P.calib)
 }

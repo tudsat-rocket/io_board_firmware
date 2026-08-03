@@ -1,6 +1,6 @@
 use embassy_stm32::Peripherals;
 use embassy_stm32::peripherals::{
-    CAN1, CAN2, DMA1_CH4, DMA1_CH5, DMA1_CH6, DMA1_CH7, I2C1, I2C2, UART5, USART1, USART2, USART3,
+    CAN1, CAN2, DMA1_CH2, DMA1_CH3, DMA1_CH4, DMA1_CH5, DMA1_CH6, DMA1_CH7, I2C1, I2C2, UART5, USART1, USART2, USART3,
 };
 use embassy_stm32::rcc::*;
 use embassy_stm32::time::Hertz;
@@ -28,6 +28,13 @@ embassy_stm32::bind_interrupts!(pub struct Irqs {
     DMA1_CHANNEL4 => embassy_stm32::dma::InterruptHandler<DMA1_CH4>;
     DMA1_CHANNEL5 => embassy_stm32::dma::InterruptHandler<DMA1_CH5>;
 
+    // SPI1, to the external NOR flash holding the runtime configuration.
+    DMA1_CHANNEL2 => embassy_stm32::dma::InterruptHandler<DMA1_CH2>;
+    DMA1_CHANNEL3 => embassy_stm32::dma::InterruptHandler<DMA1_CH3>;
+
+    // The on-board button, which toggles raw debug mode.
+    EXTI9_5 => embassy_stm32::exti::InterruptHandler<embassy_stm32::interrupt::typelevel::EXTI9_5>;
+
     USART1 => embassy_stm32::usart::InterruptHandler<USART1>;
     USART2 => embassy_stm32::usart::InterruptHandler<USART2>;
     USART3 => embassy_stm32::usart::InterruptHandler<USART3>;
@@ -36,6 +43,10 @@ embassy_stm32::bind_interrupts!(pub struct Irqs {
 pub fn setup() -> Peripherals {
     //configure "p"
     let mut config = embassy_stm32::Config::default();
+
+    // Free PB3/PB4 (JTDO/NJTRST at reset) so SPI1 can be remapped onto PB3/4/5 for the external
+    // flash, disbles unused jtag
+    config.swj = embassy_stm32::gpio::SwjCfg::SwdOnly;
     config.rcc.hse = Some(embassy_stm32::rcc::Hse {
         mode: embassy_stm32::rcc::HseMode::Oscillator,
         freq: Hertz::mhz(8), // our high-speed external oscillator speed

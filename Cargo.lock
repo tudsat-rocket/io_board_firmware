@@ -21,16 +21,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "alloc-cortex-m"
-version = "0.4.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "483c3bd0f9a7bb982b72988f5f173d29687c432d8013c1d3232635e6c0f0a60c"
-dependencies = [
- "cortex-m",
- "linked_list_allocator",
-]
-
-[[package]]
 name = "arbitrary-int"
 version = "2.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -238,12 +228,6 @@ name = "crc-catalog"
 version = "2.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "19d374276b40fb8bbdee95aef7c7fa6b5316ec764510eb64b8dd0e2ed0d7e7f5"
-
-[[package]]
-name = "crc16"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "338089f42c427b86394a5ee60ff321da23a5c89c9d89514c829687b26359fcff"
 
 [[package]]
 name = "critical-section"
@@ -560,6 +544,7 @@ dependencies = [
  "critical-section",
  "document-features",
  "embassy-time-driver",
+ "embassy-time-queue-utils",
  "embedded-hal 0.2.7",
  "embedded-hal 1.0.0",
  "embedded-hal-async",
@@ -726,51 +711,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3f9eec918d3f24069decb9af1554cad7c880e2da24a9afd88aca000531ab82c1"
 
 [[package]]
-name = "futures"
-version = "0.3.31"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "65bc07b1a8bc7c85c5f2e110c476c7389b4554ba72af57d8445ea63a576b0876"
-dependencies = [
- "futures-channel",
- "futures-core",
- "futures-io",
- "futures-sink",
- "futures-task",
- "futures-util",
-]
-
-[[package]]
-name = "futures-channel"
-version = "0.3.31"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2dff15bf788c671c1934e366d07e30c1814a8ef514e1af724a602e8a2fbe1b10"
-dependencies = [
- "futures-core",
- "futures-sink",
-]
-
-[[package]]
 name = "futures-core"
 version = "0.3.31"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "05f29059c0c2090612e8d742178b0580d2dc940c837851ad723096f87af6663e"
-
-[[package]]
-name = "futures-io"
-version = "0.3.31"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9e5c1b78ca4aae1ac06c48a526a655760685149f0d465d21f37abfe57ce075c6"
-
-[[package]]
-name = "futures-macro"
-version = "0.3.31"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "162ee34ebcb7c64a8abebc059ce0fee27c2262618d7b60ed8faf72fef13c3650"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.110",
-]
 
 [[package]]
 name = "futures-sink"
@@ -791,8 +735,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9fa08315bb612088cc391249efdc3bc77536f16c91f6cf495e6fbe85b20a4a81"
 dependencies = [
  "futures-core",
- "futures-macro",
- "futures-sink",
  "futures-task",
  "pin-project-lite",
  "pin-utils",
@@ -887,12 +829,12 @@ dependencies = [
 name = "io_board"
 version = "0.1.0"
 dependencies = [
- "alloc-cortex-m",
  "cancan",
  "cancan-build",
  "cortex-m",
  "cortex-m-rt",
  "crc",
+ "critical-section",
  "defmt 0.3.100",
  "defmt-rtt",
  "embassy-embedded-hal",
@@ -903,11 +845,19 @@ dependencies = [
  "embassy-time",
  "embedded-hal 1.0.0",
  "embedded-hal-async",
+ "embedded-storage-async",
  "heapless",
+ "iocan-proto",
  "static_cell",
- "zencan-build 0.0.1 (git+https://gitlab.olaf.one/tomcruz/zencan?rev=b662174fc55b43c386991bad63a5546d3bdc03c3)",
+ "zencan-build",
  "zencan-common 0.0.4",
- "zencan-node",
+]
+
+[[package]]
+name = "iocan-proto"
+version = "0.1.0"
+dependencies = [
+ "defmt 0.3.100",
 ]
 
 [[package]]
@@ -921,12 +871,6 @@ name = "libc"
 version = "0.2.186"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
-
-[[package]]
-name = "linked_list_allocator"
-version = "0.10.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9afa463f5405ee81cdb9cc2baf37e08ec7e4c8209442b5d72c04cfb2cd6e6286"
 
 [[package]]
 name = "litrs"
@@ -1558,20 +1502,6 @@ dependencies = [
 [[package]]
 name = "zencan-build"
 version = "0.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "63f974ba39e3eda16b259f3acb4ee3b3b8bfd34082cef7178c6aed77c1657e03"
-dependencies = [
- "prettyplease",
- "proc-macro2",
- "quote",
- "snafu",
- "syn 2.0.110",
- "zencan-common 0.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
-]
-
-[[package]]
-name = "zencan-build"
-version = "0.0.1"
 source = "git+https://gitlab.olaf.one/tomcruz/zencan?rev=b662174fc55b43c386991bad63a5546d3bdc03c3#b662174fc55b43c386991bad63a5546d3bdc03c3"
 dependencies = [
  "prettyplease",
@@ -1579,22 +1509,7 @@ dependencies = [
  "quote",
  "snafu",
  "syn 2.0.110",
- "zencan-common 0.0.1 (git+https://gitlab.olaf.one/tomcruz/zencan?rev=b662174fc55b43c386991bad63a5546d3bdc03c3)",
-]
-
-[[package]]
-name = "zencan-common"
-version = "0.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "25fbb1e254c892956b3cc3a81724b39ebce2f2d544254af90d69ba9ab0468793"
-dependencies = [
- "critical-section",
- "defmt-or-log",
- "int-enum",
- "regex",
- "serde",
- "snafu",
- "toml",
+ "zencan-common 0.0.1",
 ]
 
 [[package]]
@@ -1624,36 +1539,4 @@ dependencies = [
  "defmt-or-log",
  "int-enum",
  "snafu",
-]
-
-[[package]]
-name = "zencan-macro"
-version = "0.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "338af6c9e17dba97f80c804f2c5a77bc04546441512dda41d516fbcbfbc74867"
-dependencies = [
- "darling",
- "proc-macro2",
- "quote",
- "syn 2.0.110",
- "zencan-build 0.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
- "zencan-common 0.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
-]
-
-[[package]]
-name = "zencan-node"
-version = "0.0.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "385cede2ff32dc91e6adaf72b3678bf38b517f155a67b4ff6e9dbf913a6f87db"
-dependencies = [
- "crc16",
- "critical-section",
- "defmt 1.0.1",
- "defmt-or-log",
- "embedded-io 0.7.1",
- "futures",
- "portable-atomic",
- "static_cell",
- "zencan-common 0.0.4",
- "zencan-macro",
 ]
