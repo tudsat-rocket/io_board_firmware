@@ -112,7 +112,7 @@ dependencies = [
 [[package]]
 name = "cancan"
 version = "0.0.1"
-source = "git+https://github.com/tudsat-rocket/cancan#3e41dc01a0be8ff16137906d05be71d116e08795"
+source = "git+https://github.com/tudsat-rocket/cancan#90abb3355a98d918e834ac137efeb7ab21b71d75"
 dependencies = [
  "can-iso-tp",
  "cortex-m",
@@ -135,7 +135,7 @@ dependencies = [
 [[package]]
 name = "cancan-build"
 version = "0.0.1"
-source = "git+https://github.com/tudsat-rocket/cancan#3e41dc01a0be8ff16137906d05be71d116e08795"
+source = "git+https://github.com/tudsat-rocket/cancan#90abb3355a98d918e834ac137efeb7ab21b71d75"
 
 [[package]]
 name = "cc"
