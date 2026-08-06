@@ -66,7 +66,7 @@ pub const A_100BAR: Transducer = centibar(47.0, 0.10604454);
 /// At R_gain = 220R, ref = 0V
 pub const B_100BAR: Transducer = centibar(190.0, 0.22675737);
 /// At R_gain = 120R, ref = 0V
-pub const C_100BAR: Transducer = centibar(204.0, 0.12578616);
+pub const C_100BAR: Transducer = centibar(27.0, 0.12578616);
 /// At R_gain = 120R, ref = 0V
 pub const D_100BAR: Transducer = centibar(166.0, 0.12594458);
 /// At R_gain = 120R, ref = 0V
@@ -97,7 +97,7 @@ pub const PLACEHOLDER_P: Transducer = Transducer {
 //
 // See the P&ID: https://wiki.tudsat.space/doc/plumbing-and-valvery-BCyIc3l2TW
 
-pub const PRESSURANT_TANK_P: Transducer = B_400BAR;
+pub const PRESSURANT_TANK_P: Transducer = C_400BAR;
 pub const REG_1_P: Transducer = C_100BAR;
 pub const REG_2_P: Transducer = D_100BAR;
 pub const OX_TANK_UPPER_P: Transducer = B_100BAR;
