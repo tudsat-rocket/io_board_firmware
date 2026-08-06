@@ -373,8 +373,8 @@ const DEFAULT_TPDO_MS: PerTpdoKind<u16> = PerTpdoKind::new([
     100,  // 7  RawBus1A
     0,    // 8  RawBus1B
     50,   // 9  Sensor0
-    0,    // 10 Sensor1
-    0,    // 11 Sensor3 (this node has no sensors there)
+    50,   // 10 Sensor1
+    0,    // 11 Sensor3
     5000, // 12 SensorUnits
     1000, // 13 I2cScan
     1000, // 14 RailVoltage

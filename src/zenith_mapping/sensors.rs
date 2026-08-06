@@ -82,10 +82,10 @@ pub const H_100BAR: Transducer = centibar(74.0, 0.232);
 // --- 400 bar --------------------------------------------------------------
 
 /// At R_gain = 220R, ref = 1.65V
-pub const B_400BAR: Transducer = decibar(439.0, 0.91116173);
+pub const B_400BAR: Transducer = centibar(439.0, 0.91116173);
 // NOTE: not optimized, may change
 /// At R_gain = 220R, ref = 0V
-pub const C_400BAR: Transducer = decibar(49.0, 0.888);
+pub const C_400BAR: Transducer = centibar(49.0, 0.888);
 
 /// An uncalibrated slot: reports raw ADC counts, which is where a calibration starts.
 pub const PLACEHOLDER_P: Transducer = Transducer {

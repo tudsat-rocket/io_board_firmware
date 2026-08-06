@@ -459,8 +459,12 @@ mod tests {
         let mut cfg = Config::new();
         cfg.master_node_id = 4;
         cfg.valves[ValveId::Valve1] = ValveConfig::servo_on_pair(crate::index::HcoPair::A, 2470, 500, 1200);
-        cfg.sensors[SensorSlot::Slot2] =
-            SensorSlotConfig::pressure(I2cBus::Bus1, AmplifierId::Amp3, Unit::DeciBar, PressureCalib::from_bar_per_count(439.0, 0.911_161_7));
+        cfg.sensors[SensorSlot::Slot2] = SensorSlotConfig::pressure(
+            I2cBus::Bus1,
+            AmplifierId::Amp3,
+            Unit::DeciBar,
+            PressureCalib::from_bar_per_count(439.0, 0.911_161_7),
+        );
 
         let mut buf = [0u8; BUF_LEN];
         let len = write_record(&cfg, 7, &mut buf);
@@ -472,7 +476,10 @@ mod tests {
         assert_eq!(back.valves[ValveId::Valve1].closed_us, 2470);
         assert_eq!(back.valves[ValveId::Valve1].power_hco, Some(HcoId::Hco0));
         assert_eq!(back.sensors[SensorSlot::Slot2].unit as u8, Unit::DeciBar as u8);
-        assert_eq!(back.sensors[SensorSlot::Slot2].calib.slope_nanobar, cfg.sensors[SensorSlot::Slot2].calib.slope_nanobar);
+        assert_eq!(
+            back.sensors[SensorSlot::Slot2].calib.slope_nanobar,
+            cfg.sensors[SensorSlot::Slot2].calib.slope_nanobar
+        );
     }
 
     /// The constant term is the difference between gauge and absolute pressure for a slot, so
@@ -654,7 +661,10 @@ mod tests {
         block_on(store.save(&cfg)).unwrap();
         assert_eq!(store.flash.writes, 1);
 
-        let mut reloaded = NorConfigStore::new(MockFlash { data: store.flash.data, writes: 0 });
+        let mut reloaded = NorConfigStore::new(MockFlash {
+            data: store.flash.data,
+            writes: 0,
+        });
         let loaded = block_on(reloaded.load()).expect("should load the record just saved");
 
         block_on(reloaded.save(&loaded)).expect("resaving the loaded config should succeed");

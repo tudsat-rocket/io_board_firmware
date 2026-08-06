@@ -29,7 +29,8 @@ pub const NODE2: NodeSettings = NodeSettings::new(2, Config::new().with_sensor(S
 pub const NODE3: NodeSettings = NodeSettings::new(3, Config::new());
 
 /// Node 4 — upper propulsion. Oxidizer vent solenoid on HCO1.
-pub const NODE4: NodeSettings = NodeSettings::new(4, Config::new().with_valve(Valve0, ValveConfig::solenoid_on(HcoId::Hco0)));
+pub const NODE4: NodeSettings =
+    NodeSettings::new(4, Config::new().with_valve(Valve0, ValveConfig::solenoid_on(HcoId::Hco0)));
 
 /// Node 5 — upper propulsion: pressurization and pressurant vent, tank and regulator sensing.
 pub const NODE5: NodeSettings = NodeSettings::new(
@@ -44,7 +45,7 @@ pub const NODE5: NodeSettings = NodeSettings::new(
         .with_sensor(Slot2, pressure(Bus0, Amp2, sensors::REG_1_P))
         // upper oxidizer tank
         .with_sensor(Slot3, pressure(Bus1, Amp0, sensors::OX_TANK_UPPER_P))
-        // pressurant (N2) tank — 400 bar, so this one reports decibar
+        // pressurant (N2) tank — 400 bar
         .with_sensor(Slot4, pressure(Bus1, Amp1, sensors::PRESSURANT_TANK_P)),
 );
 
@@ -83,8 +84,6 @@ pub const NODE8_REG: NodeSettings = NodeSettings::new(
         .with_valve(Valve0, ValveConfig::solenoid_on(HcoId::Hco0))
         .with_sensor(Slot0, pressure(Bus0, Amp0, sensors::OX_TANK_UPPER_P))
         .with_relief(
-            ReliefConfig::new(Valve0, Slot0, RELIEF_THRESHOLD_60_BAR)
-                .with_pulse_ms(500)
-                .with_cooldown_ms(500),
+            ReliefConfig::new(Valve0, Slot0, RELIEF_THRESHOLD_60_BAR).with_pulse_ms(500).with_cooldown_ms(500),
         ),
 );
