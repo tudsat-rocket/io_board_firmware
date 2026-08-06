@@ -407,7 +407,7 @@ impl Config {
             master_node_id: 1,
             fallback_a_ms: 3_000,
             fallback_b_ms: 300_000,
-            fallback_enabled: true,
+            fallback_enabled: false,
             heartbeat_period_ms: 1000,
             valves: PerValve::splat(ValveConfig::unmapped()),
             sensors: PerSensorSlot::splat(SensorSlotConfig::unused()),

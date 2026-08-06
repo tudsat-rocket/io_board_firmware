@@ -80,14 +80,9 @@ pub async fn spawn_node(spawner: Spawner, settings: NodeSettings) {
         defmt::panic!("factory default config is invalid: {}", e);
     }
 
-    let mut config_store = board.config_store;
-    let config = match config_store {
-        Some(ref mut store) => store.load().await.unwrap_or_else(|e| {
-            defmt::info!("no stored configuration ({}), using compile-time defaults", e);
-            defaults.clone()
-        }),
-        None => defaults.clone(),
-    };
+    let config_store = board.config_store;
+    // DEBUG: loading the stored config from NOR is disabled; always boot the compile-time defaults.
+    let config = defaults.clone();
     // Legal but probably-unintended settings, complained about once rather than rejected.
     config.log_warnings();
     {
