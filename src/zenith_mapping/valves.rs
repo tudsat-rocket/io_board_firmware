@@ -34,7 +34,7 @@ pub const fn pressurant_vent(pair: HcoPair) -> ValveConfig {
 }
 
 pub const fn main_valve(pair: HcoPair) -> ValveConfig {
-    servo(pair, 2470, 500)
+    servo(pair, 2470, 700)
 }
 
 pub const fn pressurization(pair: HcoPair) -> ValveConfig {
