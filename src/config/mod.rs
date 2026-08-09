@@ -271,7 +271,7 @@ impl PressureCalib {
         Self {
             offset_milli_counts: (offset_counts * 1000.0) as i32,
             slope_nanobar: (bar_per_count * 1_000_000_000.0) as i32,
-            constant_millibar: 0,
+            constant_millibar: 1_000,
         }
     }
 

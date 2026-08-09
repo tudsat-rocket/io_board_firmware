@@ -55,16 +55,18 @@ const fn decibar(offset: f32, bar_per_count: f32) -> Transducer {
 // --- 40 bar ---------------------------------------------------------------
 
 // NOTE: not optimized, may change
-pub const C_40BAR: Transducer = centibar(15.0, 0.0855);
+// pub const C_40BAR: Transducer = centibar(15.0, 0.0855);
+pub const C_40BAR: Transducer = centibar(1.0, 0.0855);
 // NOTE: not optimized, may change
 pub const D_40BAR: Transducer = centibar(-385.0, 0.0535);
 
 // --- 100 bar --------------------------------------------------------------
 
 /// At R_gain = 100R, ref = 0V
-pub const A_100BAR: Transducer = centibar(47.0, 0.10604454);
+// pub const A_100BAR: Transducer = centibar(47.0, 0.10604454);
+pub const A_100BAR: Transducer = centibar(1.0, 0.10604454);
 /// At R_gain = 220R, ref = 0V
-pub const B_100BAR: Transducer = centibar(190.0, 0.22675737);
+pub const B_100BAR: Transducer = centibar(88.0, 0.22675737);
 /// At R_gain = 120R, ref = 0V
 pub const C_100BAR: Transducer = centibar(27.0, 0.12578616);
 /// At R_gain = 120R, ref = 0V
@@ -102,6 +104,6 @@ pub const REG_1_P: Transducer = C_100BAR;
 pub const REG_2_P: Transducer = D_100BAR;
 pub const OX_TANK_UPPER_P: Transducer = A_100BAR;
 pub const OX_TANK_LOWER_P: Transducer = B_100BAR;
-pub const COMB_CHAMBER_1_P: Transducer = C_40BAR;
-pub const COMB_CHAMBER_2_P: Transducer = D_40BAR;
+pub const COMB_CHAMBER_1_P: Transducer = D_40BAR;
+pub const COMB_CHAMBER_2_P: Transducer = C_40BAR;
 pub const OX_FILL_EXT_P: Transducer = E_100BAR;

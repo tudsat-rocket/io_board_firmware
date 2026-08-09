@@ -57,9 +57,9 @@ pub const NODE6: NodeSettings = NodeSettings::new(
         .with_valve(Valve1, valves::ox_fill_and_dump(HcoPair::B))
         .with_sensor(Slot0, pressure(Bus0, Amp0, sensors::OX_TANK_LOWER_P))
         .with_sensor(Slot2, pt1000(Bus0, Amp2))
-        // 40bar-F
+        // 40bar-F = D
         .with_sensor(Slot1, pressure(Bus1, Amp0, sensors::COMB_CHAMBER_1_P))
-        // 40bar-E
+        // 40bar-E = C
         .with_sensor(Slot3, pressure(Bus1, Amp1, sensors::COMB_CHAMBER_2_P)),
     // .with_valve(Valve0, valves::main_valve(HcoPair::A))
     // .with_valve(Valve1, valves::ox_fill_and_dump(HcoPair::B))

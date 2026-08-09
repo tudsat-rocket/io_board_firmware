@@ -5,7 +5,7 @@ cancan := cancan_target / "release/cancan"
 rev := "rev3"
 features := "--no-default-features --features " + rev + ",hardware"
 
-boards := "node4:4 node5:5 node6:6 node7:7"
+boards := "node3:3 node4:4 node5:5 node6:6 node7:7"
 
 target_dir := justfile_directory() / "target/thumbv7m-none-eabi/release"
 
