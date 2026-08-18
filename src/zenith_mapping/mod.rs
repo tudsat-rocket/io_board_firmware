@@ -32,7 +32,12 @@ pub const NODE3: NodeSettings = NodeSettings::new(3, Config::new());
 pub const NODE4: NodeSettings =
     NodeSettings::new(4, Config::new().with_valve(Valve0, ValveConfig::solenoid_on(HcoId::Hco0)));
 
-/// Node 5 — upper propulsion: pressurization and pressurant vent, tank and regulator sensing.
+/// Node 5 — upper propulsion: pressurization and pressurant vent, tank and regulator sensing,
+/// plus the AS5600 magnetic encoder on COM1.
+///
+/// The encoder shares COM1 with the amplifiers already on it; its address (0x36) is nowhere near
+/// their 0x50..0x5A block, so the presence scan and the encoder cannot be mistaken for each other.
+/// Its reading is logged only — see [`crate::sensors::as5600`].
 pub const NODE5: NodeSettings = NodeSettings::new(
     5,
     Config::new()
@@ -47,7 +52,8 @@ pub const NODE5: NodeSettings = NodeSettings::new(
         .with_sensor(Slot3, pressure(Bus1, Amp0, sensors::OX_TANK_UPPER_P))
         // pressurant (N2) tank — 400 bar
         .with_sensor(Slot4, pressure(Bus1, Amp1, sensors::PRESSURANT_TANK_P)),
-);
+)
+.with_encoder(Bus1);
 
 /// Node 6 — lower propulsion, valve control: main valve and oxidizer fill/dump.
 pub const NODE6: NodeSettings = NodeSettings::new(

@@ -107,10 +107,16 @@ pub async fn spawn_node(spawner: Spawner, settings: NodeSettings) {
     spawner.spawn(run_control(control).unwrap());
 
     // --- sensors ------------------------------------------------------------
-    let sensors = SENSORS.init(BoardSensors::new(Buses {
-        bus0: Some(board.com1_i2c),
-        bus1: Some(board.com2_i2c),
-    }));
+    // Bus 0 is COM1 and bus 1 is COM2, which is also what `NodeSettings::encoder_bus` names. The
+    // sensor task owns both peripherals outright, so anything else that needs one of these buses —
+    // the magnetic encoder included — is sampled from inside that task rather than a second one.
+    let sensors = SENSORS.init(
+        BoardSensors::new(Buses {
+            bus0: Some(board.com1_i2c),
+            bus1: Some(board.com2_i2c),
+        })
+        .with_encoder(settings.encoder_bus),
+    );
     spawner.spawn(run_sensors(sensors).unwrap());
 
     // --- the bus ------------------------------------------------------------

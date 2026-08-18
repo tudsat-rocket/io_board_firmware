@@ -1,6 +1,6 @@
 //! Reading the amplifier boards, calibrating them, and keeping an eye on who is actually there.
 //!
-//! Three things happen on the same tick, in one task, because they all contend for the same two
+//! Four things happen on the same tick, in one task, because they all contend for the same two
 //! I2C buses:
 //!
 //! 1. **Sampling** every amplifier we currently believe is present.
@@ -8,7 +8,11 @@
 //!    slot mapping and the calibration coefficients are runtime-writable (0x3020..0x3025), so a
 //!    sensor can be recalibrated or moved to a different amplifier without a firmware build.
 //! 3. **Presence scanning**, one address at a time.
+//! 4. **The magnetic encoder**, on the one bus a node has it wired to, if any. Its reading is only
+//!    logged for now — it has no sensor slot and no TPDO, so nothing on the bus can see it yet.
 
+#[cfg(any(feature = "hardware", test))]
+pub mod as5600;
 #[cfg(any(feature = "hardware", test))]
 pub mod ext_adc;
 
@@ -23,7 +27,7 @@ use crate::config::AMPLIFIER_ADDRESSES;
 use crate::config::Config;
 use crate::config::{SensorKind, SensorSlotConfig, Unit};
 #[cfg(any(feature = "hardware", test))]
-use crate::index::{AdcSlot, PerAdcSlot, PerI2cBus, PerSensorSlot};
+use crate::index::{AdcSlot, I2cBus, PerAdcSlot, PerI2cBus, PerSensorSlot};
 use crate::store::SENSOR_INVALID;
 #[cfg(any(feature = "hardware", test))]
 use crate::store::{RAW_INVALID, STORE};
@@ -129,6 +133,15 @@ impl ScanCursor {
     }
 }
 
+/// How often the encoder reading is printed.
+///
+/// The task ticks every `sensor_interval_ms` — 10 ms by default — which is far faster than anybody
+/// reads a log and fast enough to keep the 1 KiB RTT buffer permanently full, at which point
+/// `defmt-rtt` starts dropping lines (see the `disable-blocking-mode` note in Cargo.toml). The
+/// encoder is still sampled every tick; this only throttles the printing.
+#[cfg(any(feature = "hardware", test))]
+const ENCODER_LOG_INTERVAL_MS: u64 = 250;
+
 /// Generic over the I2C transport (see [`ext_adc::Buses`]) so this can be built and tested on
 /// the host against a mock bus. [`BoardSensors`] is the concrete alias the firmware spawns.
 #[cfg(any(feature = "hardware", test))]
@@ -140,6 +153,14 @@ pub struct Sensors<I0: I2c, I1: I2c> {
     raw: PerAdcSlot<u16>,
     scan: ScanCursor,
     sweeps: u32,
+    /// Which bus the AS5600 is wired to, or `None` on a node with no encoder fitted. A build-time
+    /// board fact rather than part of [`Config`], because nothing on the CAN bus can address the
+    /// encoder yet — see [`crate::config::NodeSettings::encoder_bus`].
+    encoder_bus: Option<I2cBus>,
+    /// The last encoder sample, `None` when the chip is not answering. Kept so that an encoder
+    /// appearing or vanishing is logged once rather than every tick.
+    encoder: Option<as5600::Reading>,
+    encoder_last_log: Instant,
 }
 
 /// The concrete `Sensors` the firmware spawns; mirrors `control::BoardControl`. Same concrete
@@ -159,7 +180,17 @@ impl<I0: I2c, I1: I2c> Sensors<I0, I1> {
             raw: PerAdcSlot::splat(RAW_INVALID),
             scan: ScanCursor::new(Instant::now()),
             sweeps: 0,
+            encoder_bus: None,
+            encoder: None,
+            encoder_last_log: Instant::now(),
         }
+    }
+
+    /// Sample an AS5600 magnetic encoder on `bus` as well. `None` leaves it off, which is what
+    /// every node without one passes.
+    pub fn with_encoder(mut self, bus: Option<I2cBus>) -> Self {
+        self.encoder_bus = bus;
+        self
     }
 
     fn is_present(&self, slot: AdcSlot) -> bool {
@@ -202,6 +233,7 @@ impl<I0: I2c, I1: I2c> Sensors<I0, I1> {
 
             self.sample(&config).await;
             self.scan_step(&config, now).await;
+            self.encoder_step(now).await;
             self.publish(&config).await;
 
             Timer::after_millis(config.sensor_interval_ms.max(1) as u64).await;
@@ -253,6 +285,60 @@ impl<I0: I2c, I1: I2c> Sensors<I0, I1> {
         }
         if self.scan.wrapped() {
             self.sweeps = self.sweeps.wrapping_add(1);
+        }
+    }
+
+    /// Sample the magnetic encoder, if this node has one, and print what it says.
+    ///
+    /// Nothing but the log consumes this yet: the encoder has no sensor slot, no object dictionary
+    /// entry and no TPDO, so the reading exists to be watched over RTT while the sensor is being
+    /// mounted. Everything needed to publish it later is here — this is where the value would be
+    /// handed to [`STORE`].
+    async fn encoder_step(&mut self, now: Instant) {
+        let Some(bus) = self.encoder_bus else {
+            return;
+        };
+
+        let reading = as5600::read(&mut self.buses, bus).await;
+
+        // Same rule as an amplifier: a device that stops answering is gone until it answers again.
+        // Worth a line either way, because on this board it means a COM cable.
+        match (self.encoder.is_some(), reading.is_some()) {
+            (false, true) => {
+                defmt::info!("as5600 encoder appeared on com{} (addr {=u8:#04x})", bus.com(), as5600::ADDRESS)
+            }
+            (true, false) => defmt::warn!("as5600 encoder on com{} stopped answering", bus.com()),
+            _ => {}
+        }
+        self.encoder = reading;
+
+        let Some(reading) = reading else {
+            return;
+        };
+        if (now - self.encoder_last_log).as_millis() < ENCODER_LOG_INTERVAL_MS {
+            return;
+        }
+        self.encoder_last_log = now;
+
+        defmt::info!(
+            "as5600 com{}: angle {} counts = {} centi-degrees (raw {}), agc {}, magnitude {}, status {}",
+            bus.com(),
+            reading.angle,
+            reading.centi_degrees(),
+            reading.raw_angle,
+            reading.agc,
+            reading.magnitude,
+            reading.status
+        );
+
+        // The angle register always reads *something*, so a badly placed magnet is invisible unless
+        // the status bits are looked at. Rate-limited with the reading itself.
+        if !reading.status.magnet_detected {
+            defmt::warn!("as5600 com{}: no magnet detected, the angle means nothing", bus.com());
+        } else if reading.status.too_weak {
+            defmt::warn!("as5600 com{}: magnet too weak, move it closer", bus.com());
+        } else if reading.status.too_strong {
+            defmt::warn!("as5600 com{}: magnet too strong, move it further away", bus.com());
         }
     }
 

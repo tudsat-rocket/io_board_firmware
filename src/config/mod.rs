@@ -600,11 +600,28 @@ pub struct NodeSettings {
     pub node_id: u8,
     /// Factory defaults, used when the NOR flash holds no valid configuration.
     pub config: Config,
+    /// Bus an AS5600 magnetic encoder is wired to, or `None` on a board without one.
+    ///
+    /// Deliberately here rather than in [`Config`]: the encoder has no sensor slot, no object
+    /// dictionary entry and no TPDO yet (see [`crate::sensors::as5600`]), so there is nothing for a
+    /// master to reconfigure and nothing worth spending a persisted-record format bump on. Move it
+    /// into [`Config`] when the reading goes on the wire.
+    pub encoder_bus: Option<I2cBus>,
 }
 
 impl NodeSettings {
     pub const fn new(node_id: u8, config: Config) -> Self {
-        Self { node_id, config }
+        Self {
+            node_id,
+            config,
+            encoder_bus: None,
+        }
+    }
+
+    /// Fit an AS5600 magnetic encoder on `bus`. One per bus at most — the chip's address is fixed.
+    pub const fn with_encoder(mut self, bus: I2cBus) -> Self {
+        self.encoder_bus = Some(bus);
+        self
     }
 }
 

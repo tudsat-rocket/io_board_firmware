@@ -162,6 +162,16 @@ impl HcoPair {
     }
 }
 
+impl I2cBus {
+    /// The COM header number silkscreened on the board: bus 0 is COM1.
+    ///
+    /// For log messages only, in the same spirit as [`HcoId::silkscreen`] — everything inside the
+    /// firmware, and everything on the wire, counts buses from zero.
+    pub const fn com(self) -> u8 {
+        self as u8 + 1
+    }
+}
+
 impl HcoId {
     /// Which shunt pair this output sits on.
     pub const fn pair(self) -> HcoPair {
@@ -459,6 +469,14 @@ mod tests {
             assert_eq!(slot.bus().index(), i / AmplifierId::COUNT);
             assert_eq!(slot.amplifier().index(), i % AmplifierId::COUNT);
         }
+    }
+
+    /// Bus 0 is the connector labelled COM1. Getting this backwards would send somebody looking
+    /// for a sensor on the wrong header.
+    #[test]
+    fn i2c_buses_are_named_after_their_com_header() {
+        assert_eq!(I2cBus::Bus0.com(), 1);
+        assert_eq!(I2cBus::Bus1.com(), 2);
     }
 
     /// The harness convention the stall attribution depends on: a servo's power and signal are
