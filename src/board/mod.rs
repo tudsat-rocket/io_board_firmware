@@ -178,13 +178,16 @@ pub async fn init_board(spawner: Spawner) -> Board {
     #[cfg(feature = "rev3")]
     let onboard_sens = OnboardSensRev3::new(
         p.ADC1,
+        // The HCO pairs are crossed against the schematic label numbering on this revision: PA1
+        // (`I_sense_2`) and PC2 (`hc2_sense`) belong to HCO1+2, PA0 and PC3 to HCO3+4. See
+        // [`OnboardSens3Peri`] for the trace from the load back to each pin.
         OnboardSens3Peri {
-            i_sens_hco12: p.PA0,
-            i_sens_hco34: p.PA1,
+            i_sens_hco12: p.PA1,
+            i_sens_hco34: p.PA0,
             i_sens_supply_current: Some(p.PC0),
             v_logic_supply: p.PC1,
-            v_hco12_supply: p.PC3,
-            v_hco34_supply: p.PC2,
+            v_hco12_supply: p.PC2,
+            v_hco34_supply: p.PC3,
             v_temp: p.PA4,
         },
         adc::SampleTime::CYCLES7_5,

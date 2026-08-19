@@ -33,13 +33,32 @@ pub struct OnboardSensRev3 {
     vref_sample: u16,
 }
 
+/// The pins behind each rail measurement.
+///
+/// The two HCO rails are crossed with respect to the schematic label numbering, on both the
+/// current and the voltage side, and the field names are what the rest of the firmware trusts.
+/// Traced through the rev3 netlist, load side back to the pin:
+///
+/// | outputs | sheet | shunt | fuse / rail | amp | label | pin |
+/// |---------|-------|-------|-------------|-----|-------|-----|
+/// | HCO1+2  | `Digital Output`  | `R33` (`SH21`-`SH22`) | `F3` from `high_current2` | `U8` | `I_sense_2` | `PA1` |
+/// | HCO3+4  | `Digital Output1` | `R32` (`SH11`-`SH12`) | `F2` from `high_current`  | `U7` | `I_sense_1` | `PA0` |
+///
+/// The sheet-to-output link is the part worth restating, since it is what the numbering suggests
+/// and the board contradicts: the *Digital Output* sheet takes `HC_OUT_1`/`HC_OUT_2` on its D1/D2
+/// pins and is supplied from `SH22`, while *Digital Output1* takes `HC_OUT_3`/`HC_OUT_4` and is
+/// supplied from `SH12`. The voltage dividers follow their own rails (`R43` on `high_current2` to
+/// `hc2_sense`, `R42` on `high_current` to `hc_sense`), so they are crossed the same way.
+///
+/// Only the logic rail lands where the labels imply: `I_sense_3`/`PC0` and `vmain_sense`/`PC1`
+/// both sit on `R2`, in front of the 5 V regulator.
 pub struct OnboardSens3Peri {
-    pub i_sens_hco12: Peri<'static, I_SENSE_1>,
-    pub i_sens_hco34: Peri<'static, I_SENSE_2>,
+    pub i_sens_hco12: Peri<'static, I_SENSE_2>,
+    pub i_sens_hco34: Peri<'static, I_SENSE_1>,
     pub i_sens_supply_current: Option<Peri<'static, I_SENSE_3>>,
     pub v_logic_supply: Peri<'static, V_MAIN_SENSE>,
-    pub v_hco12_supply: Peri<'static, HC_SENSE>,
-    pub v_hco34_supply: Peri<'static, HC2_SENSE>,
+    pub v_hco12_supply: Peri<'static, HC2_SENSE>,
+    pub v_hco34_supply: Peri<'static, HC_SENSE>,
     pub v_temp: Peri<'static, TH_SENSE>,
 }
 
