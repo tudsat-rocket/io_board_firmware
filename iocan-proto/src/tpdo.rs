@@ -147,6 +147,16 @@ pub enum TpdoFrame {
         state: u8,
         mode: u8,
     },
+    /// Mirrors [`crate::od::TEMPERATURE`]: the board's on-board temperatures in millidegrees Celsius.
+    ///
+    /// `board` is the NTC next to the high current outputs, `mcu` is the die sensor inside the
+    /// STM32 — the two together separate "the board is in a hot bay" from "this node is
+    /// dissipating". Millidegrees in `i32` rather than the `i16` centidegrees the pressure slots
+    /// use, because two of them fill the frame exactly and the resolution costs nothing.
+    ///
+    /// Either field is [`crate::od::TEMPERATURE_INVALID`] when that sensor has no usable reading:
+    /// a board with no on-board sensing at all (rev2), or a thermistor reading open or shorted.
+    Temperature { board_milli_c: i32, mcu_milli_c: i32 },
 }
 
 impl TpdoFrame {
@@ -172,6 +182,7 @@ impl TpdoFrame {
             Self::Status { .. } => TpdoKind::Status,
             Self::ValveCurrent(_) => TpdoKind::ValveCurrent,
             Self::Heater { .. } => TpdoKind::Heater,
+            Self::Temperature { .. } => TpdoKind::Temperature,
         }
     }
 
@@ -206,6 +217,15 @@ impl TpdoFrame {
                 out
             }
             Self::I2cScan { present, sweeps } => u16x4_to_bytes([present[0], present[1], sweeps, 0]),
+            Self::Temperature {
+                board_milli_c,
+                mcu_milli_c,
+            } => {
+                let mut out = [0u8; 8];
+                out[..4].copy_from_slice(&board_milli_c.to_le_bytes());
+                out[4..].copy_from_slice(&mcu_milli_c.to_le_bytes());
+                out
+            }
             Self::RailVoltage(v) => u16x4_to_bytes([v[0], v[1], v[2], 0]),
             Self::RailCurrent(v) => u16x4_to_bytes([v[0], v[1], v[2], 0]),
             Self::Status {
@@ -275,6 +295,10 @@ impl TpdoFrame {
                 let words = u16x4_from_bytes(bytes);
                 Self::RailCurrent([words[0], words[1], words[2]])
             }
+            TpdoKind::Temperature => Self::Temperature {
+                board_milli_c: i32::from_le_bytes(bytes[..4].try_into().unwrap()),
+                mcu_milli_c: i32::from_le_bytes(bytes[4..].try_into().unwrap()),
+            },
             TpdoKind::Status => Self::Status {
                 link_state: bytes[0],
                 raw_debug: bytes[1] != 0,
@@ -402,6 +426,10 @@ mod tests {
                 state: 5,
                 mode: 2,
             },
+            TpdoFrame::Temperature {
+                board_milli_c: -12_345,
+                mcu_milli_c: crate::od::TEMPERATURE_INVALID,
+            },
         ];
 
         for frame in samples {
@@ -491,6 +519,17 @@ mod tests {
         assert_ne!(voltage.encode(), current.encode());
         assert_eq!(voltage.kind(), TpdoKind::RailVoltage);
         assert_eq!(current.kind(), TpdoKind::RailCurrent);
+    }
+
+    #[test]
+    fn temperature_packs_two_signed_words_at_fixed_offsets() {
+        let frame = TpdoFrame::Temperature {
+            board_milli_c: 41_500,
+            mcu_milli_c: -3_250,
+        };
+        let bytes = frame.encode();
+        assert_eq!(&bytes[..4], &41_500i32.to_le_bytes());
+        assert_eq!(&bytes[4..], &(-3_250i32).to_le_bytes());
     }
 
     #[test]

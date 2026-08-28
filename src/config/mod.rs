@@ -84,6 +84,7 @@ const DEFAULT_TPDO_MS: PerTpdoKind<u16> = PerTpdoKind::new([
     1000, // 16 Status
     0,    // 17 ValveCurrent
     1000, // 18 Heater — never sent by a node without one, see `crate::can::tpdo`
+    1000, // 19 Temperature
 ]);
 
 #[derive(Clone, Debug)]

@@ -191,6 +191,11 @@ fn frame_for(store: &Store, kind: TpdoKind) -> TpdoFrame {
         TpdoKind::RailVoltage => TpdoFrame::RailVoltage(*store.rail_voltage_mv.as_array()),
         TpdoKind::RailCurrent => TpdoFrame::RailCurrent(*store.rail_current_ma.as_array()),
 
+        TpdoKind::Temperature => TpdoFrame::Temperature {
+            board_milli_c: store.temperature_milli_c[crate::index::TempSensorId::Board],
+            mcu_milli_c: store.temperature_milli_c[crate::index::TempSensorId::Mcu],
+        },
+
         TpdoKind::Status => TpdoFrame::Status {
             link_state: store.link_state as u8,
             raw_debug: store.raw_debug,
@@ -294,6 +299,38 @@ mod tests {
 
         assert_eq!(build(&store, TpdoKind::RailCurrent), TpdoFrame::RailCurrent([111, 222, 333]).encode());
         assert_eq!(build(&store, TpdoKind::RailVoltage), TpdoFrame::RailVoltage([444, 555, 666]).encode());
+    }
+
+    #[test]
+    fn temperatures_are_published_in_temp_sensor_id_order() {
+        use crate::index::TempSensorId;
+
+        let mut store = Store::new();
+        store.temperature_milli_c = crate::index::PerTemp::new([41_500, -3_250]);
+
+        assert_eq!(
+            build(&store, TpdoKind::Temperature),
+            TpdoFrame::Temperature {
+                board_milli_c: 41_500,
+                mcu_milli_c: -3_250,
+            }
+            .encode()
+        );
+        assert_eq!(store.temperature_milli_c[TempSensorId::Board], 41_500);
+    }
+
+    /// A board with no on-board sensing still broadcasts the frame; it just says so.
+    #[test]
+    fn a_node_with_no_temperature_sensing_publishes_the_invalid_sentinel() {
+        let store = Store::new();
+        assert_eq!(
+            build(&store, TpdoKind::Temperature),
+            TpdoFrame::Temperature {
+                board_milli_c: crate::store::TEMPERATURE_INVALID,
+                mcu_milli_c: crate::store::TEMPERATURE_INVALID,
+            }
+            .encode()
+        );
     }
 
     #[test]

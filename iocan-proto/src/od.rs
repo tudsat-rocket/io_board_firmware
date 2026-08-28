@@ -33,7 +33,7 @@ pub const RAW_INVALID: u16 = u16::MAX;
 /// "no slot is mapped here" versus "the slot mapped here has nothing to say".
 pub const SENSOR_INVALID: i16 = i16::MIN;
 
-/// A temperature with no usable reading ([`HEATER`] sub 1).
+/// A temperature with no usable reading ([`HEATER`] sub 1, [`TEMPERATURE`]).
 pub const TEMPERATURE_INVALID: i32 = i32::MIN;
 
 /// The "unset" sentinel for an optional index in the 0x3000 block: no sensor slot, no valve, no
@@ -312,6 +312,17 @@ pub const RAIL_CURRENT: u16 = 0x2040;
 
 /// Rail voltages in millivolts: logic, HCO1+2, HCO3+4. `uint16[3]`, read-only. rev3 only.
 pub const RAIL_VOLTAGE: u16 = 0x2041;
+
+/// On-board temperatures in millidegrees Celsius. `int32[2]`, read-only. rev3 only.
+///
+/// Sub 1 is TH1, the 10k NTC on `TH_sense` (PA4) reading the PCB near the high current outputs;
+/// sub 2 is the STM32's own die sensor. Together they separate "the board is in a hot bay" from
+/// "this node is dissipating". Either reads [`TEMPERATURE_INVALID`] with no usable reading: always
+/// on rev2, and for a thermistor that reads open or shorted. The die sensor is uncalibrated on
+/// this part — treat it as a trend against sub 1, not as a thermometer.
+///
+/// Sampled once a second and broadcast as [`crate::TpdoFrame::Temperature`].
+pub const TEMPERATURE: u16 = 0x2042;
 
 /// Error counters, one per failure kind. `uint32[NUM_ERROR_COUNTERS]`, read-only.
 ///
@@ -707,7 +718,7 @@ pub const SENSOR_INTERVAL_MS: u16 = 0x3030;
 /// newly plugged-in amplifier boards does not disturb the sample rate during assembly.
 pub const SCAN_INTERVAL_MS: u16 = 0x3031;
 
-/// TPDO broadcast period per kind, milliseconds. `uint16[19]`, read/write.
+/// TPDO broadcast period per kind, milliseconds. `uint16[20]`, read/write.
 ///
 /// Sub-index *n + 1* is the period for TPDO kind *n* (see [`crate::TpdoKind`], whose discriminant
 /// is that same *n*); 0 disables that kind. A period changed here takes effect on the next tick,
@@ -923,6 +934,7 @@ mod tests {
             MS_SINCE_HEARTBEAT,
             RAIL_CURRENT,
             RAIL_VOLTAGE,
+            TEMPERATURE,
             ERROR_COUNTERS,
             MASTER_NODE_ID,
             FALLBACK_A_MS,

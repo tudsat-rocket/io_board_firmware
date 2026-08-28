@@ -32,10 +32,11 @@ const MAGIC: u32 = 0x4249_4F43; // "COIB", little-endian "IOCB"
 ///    unchanged — hence a bump rather than a silent widening.
 /// 5: added the clock/direction steppers (`StepperConfig`), one block per `StepperId`.
 /// 6: added the heater setpoint; a 19th TPDO kind (`Heater`) lengthened the period table.
-const VERSION: u16 = 6;
+/// 7: a 20th TPDO kind (`Temperature`, the on-board temperatures) lengthened the period table.
+const VERSION: u16 = 7;
 
 const HEADER_LEN: usize = 12;
-const BODY_LEN: usize = 485;
+const BODY_LEN: usize = 487;
 #[cfg(test)]
 const RECORD_LEN: usize = HEADER_LEN + BODY_LEN + 4;
 

@@ -288,6 +288,16 @@ access_type = "ro"
 array_size = 3
 default_value = [0, 0, 0]
 
+# Board NTC (TH1, PA4) and MCU die temperature, m°C; -2147483648 = no reading (always on rev2).
+[[objects]]
+index = 0x2042
+parameter_name = "temperatures in millidegrees celsius (board ntc, mcu die)"
+object_type = "array"
+data_type = "int32"
+access_type = "ro"
+array_size = 2
+default_value = [-2147483648, -2147483648]
+
 # One free-running counter per failure kind, sub n+1 = iocan_proto::od::ErrorCounter n. Poll and
 # difference; only a reset clears them.
 [[objects]]
@@ -612,8 +622,8 @@ parameter_name = "tpdo broadcast period per kind, milliseconds"
 object_type = "array"
 data_type = "uint16"
 access_type = "rw"
-array_size = 19
-default_value = [500, 500, 200, 500, 500, 500, 100, 0, 100, 0, 0, 50, 0, 5000, 1000, 1000, 1000, 0, 1000]
+array_size = 20
+default_value = [500, 500, 200, 500, 500, 500, 100, 0, 100, 0, 0, 50, 0, 5000, 1000, 1000, 1000, 0, 1000, 1000]
 
 # ============================================================================
 # 0x3050 — overpressure relief: the one decision a node makes for itself.
