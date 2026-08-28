@@ -122,6 +122,16 @@ id_domain!(
     RailId, PerRail, 3, [Logic, Hco12, Hco34]
 );
 
+id_domain!(
+    /// One of the board's two temperature sensors.
+    ///
+    /// [`Board`](TempSensorId::Board) is TH1, the 10k NTC in the divider on `TH_sense`; it reads
+    /// the PCB near the high current outputs. [`Mcu`](TempSensorId::Mcu) is the STM32's own die
+    /// sensor. They are kept as separate readings rather than averaged because they answer
+    /// different questions — ambient in the bay versus how hard this node is working.
+    TempSensorId, PerTemp, 2, [Board, Mcu]
+);
+
 /// A pair of high current outputs sharing one current shunt.
 ///
 /// The vehicle harness wires each servo across a whole pair — the lower output carries power, the

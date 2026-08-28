@@ -26,7 +26,7 @@ pub const NODE_ID_MASK: u16 = 0x000F;
 
 /// Number of fixed TPDO kinds. Must agree with `TpdoKind` and with `array_size` of 0x3040 in
 /// `device-conf/can-io.toml`.
-pub const NUM_TPDO_KINDS: usize = 18;
+pub const NUM_TPDO_KINDS: usize = 19;
 
 /// The fixed TPDO table. The discriminant is the `kind` field of the identifier and the index
 /// into a node's `tpdo_interval_ms` (0x3040), so the three never drift apart.
@@ -61,6 +61,8 @@ pub enum TpdoKind {
     /// No longer carries `relief_state` — see [`crate::TpdoFrame::ValveStatus`].
     Status = 16,
     ValveCurrent = 17,
+    /// Board thermistor and MCU die temperature — see [`crate::TpdoFrame::Temperature`].
+    Temperature = 18,
 }
 
 /// All kinds, in discriminant order. The broadcaster walks this.
@@ -83,6 +85,7 @@ pub const TPDO_KINDS: [TpdoKind; NUM_TPDO_KINDS] = [
     TpdoKind::RailCurrent,
     TpdoKind::Status,
     TpdoKind::ValveCurrent,
+    TpdoKind::Temperature,
 ];
 
 impl TpdoKind {
@@ -112,6 +115,7 @@ impl TpdoKind {
             15 => Some(Self::RailCurrent),
             16 => Some(Self::Status),
             17 => Some(Self::ValveCurrent),
+            18 => Some(Self::Temperature),
             _ => None,
         }
     }
@@ -143,13 +147,13 @@ mod tests {
 
     #[test]
     fn an_out_of_range_index_does_not_decode() {
-        assert_eq!(TpdoKind::from_index(18), None);
+        assert_eq!(TpdoKind::from_index(19), None);
         assert_eq!(TpdoKind::from_index(255), None);
     }
 
     #[test]
     fn every_kind_fits_the_five_bit_field() {
-        // A 19th kind would collide with the SDO range.
+        // The 5-bit `kind` field is what actually bounds the table.
         assert!(TPDO_KINDS.len() <= 32);
         let highest = TPDO_KINDS.last().unwrap().cob_id(15);
         assert!(highest < SDO_RESPONSE_BASE, "process data must not reach the SDO range");

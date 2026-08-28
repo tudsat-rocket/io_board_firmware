@@ -17,4 +17,4 @@ pub mod ids;
 pub mod tpdo;
 
 pub use ids::{TPDO_KINDS, TpdoKind, decode_pdo};
-pub use tpdo::{HcoOutput, TpdoFrame};
+pub use tpdo::{HcoOutput, TEMPERATURE_INVALID, TpdoFrame};

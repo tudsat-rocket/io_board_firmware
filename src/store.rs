@@ -18,8 +18,8 @@ use zencan_common::sdo::AbortCode;
 
 use crate::config::{Config, SensorKind, SensorSlotConfig, Unit, ValveKind};
 use crate::index::{
-    AmplifierId, HcoId, I2cBus, Id, PerAdcSlot, PerHco, PerI2cBus, PerRail, PerSensorSlot, PerValve, SensorSlot,
-    ValveId,
+    AmplifierId, HcoId, I2cBus, Id, PerAdcSlot, PerHco, PerI2cBus, PerRail, PerSensorSlot, PerTemp, PerValve,
+    SensorSlot, ValveId,
 };
 use crate::valves::position_of;
 
@@ -40,6 +40,10 @@ pub static PERSIST_WAKE: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 pub const RAW_INVALID: u16 = u16::MAX;
 /// A sensor slot with no usable reading.
 pub const SENSOR_INVALID: i16 = i16::MIN;
+/// A temperature sensor with no usable reading. Re-exported from the wire protocol rather than
+/// defined twice, because unlike the two above it travels on the bus verbatim (0x2042, and
+/// [`iocan_proto::TpdoFrame::Temperature`]).
+pub use iocan_proto::TEMPERATURE_INVALID;
 
 /// Magic values for 0x1010 / 0x1011, as CANopen defines them: ASCII, little-endian.
 pub const SIGNATURE_SAVE: u32 = 0x6576_6173; // "save"
@@ -123,6 +127,9 @@ pub struct Store {
     /// Zero on rev2, which has no on-board sensing.
     pub rail_current_ma: PerRail<u16>,
     pub rail_voltage_mv: PerRail<u16>,
+    /// 0x2042. [`TEMPERATURE_INVALID`] per entry until a reading lands, and permanently so on
+    /// rev2 and for a thermistor that reads open or shorted.
+    pub temperature_milli_c: PerTemp<i32>,
 
     // --- 0x3000 runtime config ----------------------------------------------
     pub config: Config,
@@ -156,6 +163,7 @@ impl Store {
             ms_since_heartbeat: 0,
             rail_current_ma: PerRail::splat(0),
             rail_voltage_mv: PerRail::splat(0),
+            temperature_milli_c: PerTemp::splat(TEMPERATURE_INVALID),
             config: Config::new(),
             pending: Pending {
                 valves: PerValve::splat(false),
@@ -215,6 +223,7 @@ pub mod od {
     pub const MS_SINCE_HEARTBEAT: u16 = 0x2033;
     pub const RAIL_CURRENT: u16 = 0x2040;
     pub const RAIL_VOLTAGE: u16 = 0x2041;
+    pub const TEMPERATURE: u16 = 0x2042;
 
     pub const MASTER_NODE_ID: u16 = 0x3000;
     pub const FALLBACK_A_MS: u16 = 0x3001;
@@ -384,6 +393,7 @@ pub fn read(store: &Store, index: u16, sub: u8) -> Result<OdValue, AbortCode> {
         MS_SINCE_HEARTBEAT => scalar(OdValue::u32(store.ms_since_heartbeat)),
         RAIL_CURRENT => read_array(store.rail_current_ma.as_slice(), sub, OdValue::u16),
         RAIL_VOLTAGE => read_array(store.rail_voltage_mv.as_slice(), sub, OdValue::u16),
+        TEMPERATURE => read_array(store.temperature_milli_c.as_slice(), sub, OdValue::i32),
 
         MASTER_NODE_ID => scalar(OdValue::u8(cfg.master_node_id)),
         FALLBACK_A_MS => scalar(OdValue::u32(cfg.fallback_a_ms)),

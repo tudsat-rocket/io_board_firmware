@@ -59,6 +59,7 @@ pub mod rail_sense;
 pub mod relief;
 pub mod safety;
 pub mod store;
+pub mod temp_sense;
 pub mod valves;
 pub mod zenith_mapping;
 

@@ -24,10 +24,11 @@ const MAGIC: u32 = 0x4249_4F43; // "COIB", little-endian "IOCB"
 ///
 /// 2: pressure calibration gained a constant term (`PressureCalib::constant_millibar`).
 /// 3: added the overpressure relief loop (`ReliefConfig`).
-const VERSION: u16 = 3;
+/// 4: a 19th TPDO kind (`Temperature`), which lengthens `tpdo_interval_ms` by one entry.
+const VERSION: u16 = 4;
 
 const HEADER_LEN: usize = 12;
-const BODY_LEN: usize = 291;
+const BODY_LEN: usize = 293;
 #[cfg(test)]
 const RECORD_LEN: usize = HEADER_LEN + BODY_LEN + 4;
 

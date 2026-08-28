@@ -381,6 +381,7 @@ const DEFAULT_TPDO_MS: PerTpdoKind<u16> = PerTpdoKind::new([
     1000, // 15 RailCurrent
     1000, // 16 Status
     0,    // 17 ValveCurrent
+    1000, // 18 Temperature
 ]);
 
 #[derive(Clone, Debug)]

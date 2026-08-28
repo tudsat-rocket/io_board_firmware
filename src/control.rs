@@ -13,13 +13,14 @@ use embassy_time::Instant;
 
 use crate::config::{Config, ValveConfig};
 use crate::hco::{HcoState, Level, State};
-use crate::index::{HcoId, PerHco, PerSensorSlot, PerValve, ValveId};
+use crate::index::{HcoId, PerHco, PerSensorSlot, PerTemp, PerValve, ValveId};
 use crate::leds::{LedsState, StateLedPub};
 use crate::outputs::{Outputs, digital, pwm};
 use crate::rail_sense::{NoRails, RailSensing, Rails};
 use crate::relief::Relief;
 use crate::safety::{self, FallbackLatch};
 use crate::store::{CONTROL_WAKE, LinkState, STORE};
+use crate::temp_sense::TemperatureSensing;
 use crate::valves::{
     NoFeedback, PositionFeedback, Valve, ValveDrive, ValveStatus, is_unpowered, position_of, unpowered_at,
 };
@@ -28,9 +29,19 @@ use crate::valves::{
 /// on the order of a second to travel, slow enough to leave the bus and sensor tasks room.
 const TICK: embassy_time::Duration = embassy_time::Duration::from_millis(20);
 
-/// Generic over rail sensing so this whole task can be built and driven by a host test against
-/// [`NoRails`] and a mocked [`crate::hco::HcoControl`], not just against real hardware.
-pub struct Control<R: RailSensing = NoRails> {
+/// How often the on-board temperatures are sampled, as opposed to every [`TICK`].
+///
+/// Both temperature channels need the ADC's longest sample time (see
+/// `OnboardSensRev3::TEMPERATURE_SAMPLE_TIME`), so a pair of readings is ~40 us — a third again
+/// on top of what the six rail conversions already cost this loop. Neither a PCB nor a die moves
+/// meaningfully inside a second, and this is the one task that must not run late, so the reading
+/// is taken at roughly the rate it is broadcast at instead.
+const TEMPERATURE_INTERVAL: embassy_time::Duration = embassy_time::Duration::from_millis(1000);
+
+/// Generic over on-board sensing so this whole task can be built and driven by a host test
+/// against [`NoRails`] and a mocked [`crate::hco::HcoControl`], not just against real hardware.
+/// Rails and temperatures are two bounds on one type because on rev3 they are one ADC.
+pub struct Control<R: RailSensing + TemperatureSensing = NoRails> {
     outputs: Outputs,
     valves: PerValve<Valve>,
     feedback: NoFeedback,
@@ -41,6 +52,10 @@ pub struct Control<R: RailSensing = NoRails> {
     /// claims; in raw debug mode it can also override an owned one.
     direct: HcoState,
     rails: R,
+    /// When the temperatures were last sampled; `None` until the first tick, so a freshly booted
+    /// node publishes a real reading rather than [`crate::store::TEMPERATURE_INVALID`] for a
+    /// second.
+    last_temperature: Option<Instant>,
     leds: StateLedPub,
     last_leds: LedsState,
     last_link: LinkState,
@@ -99,7 +114,7 @@ struct TickOutcome {
     leds: Option<LedsState>,
 }
 
-impl<R: RailSensing> Control<R> {
+impl<R: RailSensing + TemperatureSensing> Control<R> {
     pub fn new(outputs: Outputs, rails: R, leds: StateLedPub) -> Self {
         let now = Instant::now();
         Self {
@@ -110,6 +125,7 @@ impl<R: RailSensing> Control<R> {
             relief: Relief::new(),
             direct: HcoState::splat(State::Digital(Level::Low)),
             rails,
+            last_temperature: None,
             leds,
             last_leds: LedsState::default(),
             last_link: LinkState::NeverSeen,
@@ -129,6 +145,7 @@ impl<R: RailSensing> Control<R> {
     async fn tick(&mut self) {
         let rails = self.read_rails().await;
         let now = Instant::now();
+        let temperatures = self.sample_temperatures(now).await;
         let since_heartbeat = safety::since_last_heartbeat();
         let seen = safety::master_ever_seen();
 
@@ -192,6 +209,9 @@ impl<R: RailSensing> Control<R> {
         if let Some(rails) = rails {
             store.rail_current_ma = rails.current_ma;
             store.rail_voltage_mv = rails.voltage_mv;
+        }
+        if let Some(temperatures) = temperatures {
+            store.temperature_milli_c = temperatures;
         }
         if let Some(leds) = outcome.leds {
             store.leds = leds.as_byte();
@@ -355,6 +375,22 @@ impl<R: RailSensing> Control<R> {
 
     async fn read_rails(&mut self) -> Option<Rails> {
         self.rails.read().await
+    }
+
+    /// Sample the on-board temperatures, but no more often than [`TEMPERATURE_INTERVAL`].
+    ///
+    /// `None` means "not due this tick", not "no reading" — the store keeps the last one, so a
+    /// slow channel does not blink in and out of validity between samples. A board with no
+    /// sensing reports [`crate::store::TEMPERATURE_INVALID`] per entry instead, which is a
+    /// different statement and travels as one.
+    async fn sample_temperatures(&mut self, now: Instant) -> Option<PerTemp<i32>> {
+        if let Some(last) = self.last_temperature
+            && now.saturating_duration_since(last) < TEMPERATURE_INTERVAL
+        {
+            return None;
+        }
+        self.last_temperature = Some(now);
+        Some(self.rails.read_temperatures().await)
     }
 
     /// Decide the LED state and publish it if it changed, returning the state to mirror into the
