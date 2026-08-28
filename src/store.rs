@@ -22,7 +22,7 @@ use zencan_common::sdo::AbortCode;
 use crate::config::{Config, HcoSet, SensorKind, SensorSlotConfig, Unit, ValveKind};
 use crate::index::{
     AmplifierId, AnalogInput, HcoId, I2cBus, Id, PdoSensorChannel, PerAdcSlot, PerAnalogInput, PerErrorCounter, PerHco,
-    PerI2cBus, PerPdoSensor, PerRail, PerSensorSlot, PerValve, SensorSlot, ValveId,
+    PerI2cBus, PerPdoSensor, PerRail, PerSensorSlot, PerTemp, PerValve, SensorSlot, ValveId,
 };
 use crate::valves::position_of;
 
@@ -43,7 +43,7 @@ pub static PERSIST_WAKE: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 /// [`iocan_proto::od`], which is where an object's meaning is documented; re-exported here
 /// because the whole firmware reaches for them through the store.
 pub use iocan_proto::od;
-pub use iocan_proto::od::{NO_INDEX, RAW_INVALID, SENSOR_INVALID, SIGNATURE_LOAD, SIGNATURE_SAVE};
+pub use iocan_proto::od::{NO_INDEX, RAW_INVALID, SENSOR_INVALID, SIGNATURE_LOAD, SIGNATURE_SAVE, TEMPERATURE_INVALID};
 
 /// 0x2032. How the node currently sees the master.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, defmt::Format)]
@@ -142,6 +142,9 @@ pub struct Store {
     /// Zero on rev2, which has no on-board sensing.
     pub rail_current_ma: PerRail<u16>,
     pub rail_voltage_mv: PerRail<u16>,
+    /// 0x2042. [`TEMPERATURE_INVALID`] per entry until a reading lands, and permanently so on
+    /// rev2 and for a thermistor that reads open or shorted.
+    pub temperature_milli_c: PerTemp<i32>,
 
     /// Mirror of [`crate::errors`]'s atomics, refreshed on the control tick.
     ///
@@ -197,6 +200,7 @@ impl Store {
             error_counts: PerErrorCounter::splat(0),
             cpu_load_permille: od::CPU_LOAD_UNKNOWN,
             control_tick_peak_us: 0,
+            temperature_milli_c: PerTemp::splat(TEMPERATURE_INVALID),
             config: Config::new(),
             pending: Pending {
                 valves: PerValve::splat(false),
@@ -416,6 +420,7 @@ pub fn read(store: &Store, index: u16, sub: u8) -> Result<OdValue, AbortCode> {
         RAIL_CURRENT => read_array(store.rail_current_ma.as_slice(), sub, OdValue::u16),
         RAIL_VOLTAGE => read_array(store.rail_voltage_mv.as_slice(), sub, OdValue::u16),
         ERROR_COUNTERS => read_array(store.error_counts.as_slice(), sub, OdValue::u32),
+        TEMPERATURE => read_array(store.temperature_milli_c.as_slice(), sub, OdValue::i32),
 
         MASTER_NODE_ID => scalar(OdValue::u8(cfg.master_node_id)),
         FALLBACK_A_MS => scalar(OdValue::u32(cfg.fallback_a_ms)),
@@ -920,7 +925,7 @@ pub fn write(store: &mut Store, index: u16, sub: u8, data: &[u8]) -> Result<(), 
         // Everything else in the 0x2000 block is process data we produce.
         RAW_ADC_BUS0 | RAW_ADC_BUS1 | RAW_ENCODER | RAW_ANALOG | I2C_PRESENT | I2C_SWEEPS | SENSOR_VALUE
         | SENSOR_UNIT | VALVE_TARGET | VALVE_MEASURED | VALVE_STATUS | VALVE_CURRENT | RELIEF_STATE | HCO_OWNER
-        | VALVE_HEATING_STATE | LINK_STATE | MS_SINCE_HEARTBEAT | RAIL_CURRENT | RAIL_VOLTAGE => {
+        | VALVE_HEATING_STATE | LINK_STATE | MS_SINCE_HEARTBEAT | RAIL_CURRENT | RAIL_VOLTAGE | TEMPERATURE => {
             return Err(AbortCode::ReadOnly);
         }
 

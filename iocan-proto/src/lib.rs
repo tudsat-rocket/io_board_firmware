@@ -78,5 +78,8 @@ pub mod tpdo;
 pub mod valve;
 
 pub use ids::{TPDO_KINDS, TpdoKind, decode_pdo};
+// Re-exported at the root as well as in `od`, because a decoder of `TpdoFrame::Temperature` needs
+// it and should not have to know which module the object dictionary is in.
+pub use od::TEMPERATURE_INVALID;
 pub use tpdo::{HcoOutput, NUM_PROTOCOL_SENSOR_SLOTS, TpdoFrame};
 pub use valve::{POSITION_MASK, PROMILLE_MAX, UNPOWERED_FLAG, is_unpowered, position_of, unpowered_at};
