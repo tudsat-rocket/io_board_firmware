@@ -173,12 +173,13 @@ fn frame_for(store: &Store, kind: TpdoKind) -> TpdoFrame {
         TpdoKind::RawBus1A => TpdoFrame::RawBus1A(window(&store.raw_adc.as_slice()[NUM_AMPLIFIERS..], 0, RAW_INVALID)),
         TpdoKind::RawBus1B => TpdoFrame::RawBus1B(window(&store.raw_adc.as_slice()[NUM_AMPLIFIERS..], 4, RAW_INVALID)),
 
-        TpdoKind::Sensor0 => TpdoFrame::Sensor0(window(store.sensor_value.as_slice(), 0, SENSOR_INVALID)),
-        TpdoKind::Sensor1 => TpdoFrame::Sensor1(window(store.sensor_value.as_slice(), 4, SENSOR_INVALID)),
-        // This node has NUM_SENSOR_SLOTS (8) slots, so offset 8 always runs straight past the end
-        // of `sensor_value` and every entry here is the fill value — see the kind's own doc.
-        TpdoKind::Sensor3 => TpdoFrame::Sensor3(window(store.sensor_value.as_slice(), 8, SENSOR_INVALID)),
-        TpdoKind::SensorUnits => TpdoFrame::SensorUnits(window(store.sensor_unit.as_slice(), 0, 0)),
+        // Windows over the by-channel arrays, not over the slots: this node has more sensor slots
+        // than there are channels, and which slot occupies which channel is configuration
+        // (0x3027). `Store::refresh_pdo_sensors` has already done the gathering.
+        TpdoKind::Sensor0 => TpdoFrame::Sensor0(window(store.pdo_sensor_value.as_slice(), 0, SENSOR_INVALID)),
+        TpdoKind::Sensor1 => TpdoFrame::Sensor1(window(store.pdo_sensor_value.as_slice(), 4, SENSOR_INVALID)),
+        TpdoKind::Sensor3 => TpdoFrame::Sensor3(window(store.pdo_sensor_value.as_slice(), 8, SENSOR_INVALID)),
+        TpdoKind::SensorUnits => TpdoFrame::SensorUnits(window(store.pdo_sensor_unit.as_slice(), 0, 0)),
 
         TpdoKind::I2cScan => TpdoFrame::I2cScan {
             present: *store.i2c_present.as_array(),
@@ -220,7 +221,7 @@ mod tests {
 
     use super::*;
     use crate::index::{HcoId, ValveId};
-    use crate::store::LinkState;
+    use crate::store::{LinkState, SENSOR_INVALID};
 
     #[test]
     fn every_kind_produces_a_full_frame() {
@@ -296,28 +297,59 @@ mod tests {
     }
 
     #[test]
-    fn sensor_windows_do_not_overlap_and_slot_3_is_always_invalid_here() {
+    fn sensor_windows_tile_the_twelve_channels_without_overlapping() {
         let mut store = Store::new();
-        store.sensor_value = crate::index::PerSensorSlot::new([10, 11, 12, 13, 14, 15, 16, 17]);
+        store.pdo_sensor_value = crate::index::PerPdoSensor::new([10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21]);
         assert_eq!(build(&store, TpdoKind::Sensor0), TpdoFrame::Sensor0([10, 11, 12, 13]).encode());
         assert_eq!(build(&store, TpdoKind::Sensor1), TpdoFrame::Sensor1([14, 15, 16, 17]).encode());
+        assert_eq!(build(&store, TpdoKind::Sensor3), TpdoFrame::Sensor3([18, 19, 20, 21]).encode());
+    }
+
+    /// The point of the channel indirection: a node with more slots than channels broadcasts the
+    /// ones it chose, wherever they sit in the slot array, and everything else stays off the bus
+    /// while remaining readable at 0x2004.
+    #[test]
+    fn only_the_slots_that_claimed_a_channel_reach_the_bus() {
+        use crate::config::{SensorSlotConfig, Unit};
+        use crate::index::{AmplifierId, I2cBus, PdoSensorChannel, SensorSlot};
+
+        let mut store = Store::new();
+        // Slot 14 is well past the twelfth, so it can only be on the bus by asking.
+        store.config.sensors[SensorSlot::Slot14] =
+            SensorSlotConfig::pt1000(I2cBus::Bus0, AmplifierId::Amp0).on_channel(PdoSensorChannel::Ch1);
+        // Slot 3 is read and published, but never broadcast.
+        store.config.sensors[SensorSlot::Slot3] = SensorSlotConfig::pressure(
+            I2cBus::Bus0,
+            AmplifierId::Amp1,
+            Unit::CentiBar,
+            crate::config::SensorCalib::ZERO,
+        );
+        store.sensor_value[SensorSlot::Slot14] = 2500;
+        store.sensor_value[SensorSlot::Slot3] = 777;
+        store.refresh_derived();
+
         assert_eq!(
-            build(&store, TpdoKind::Sensor3),
-            TpdoFrame::Sensor3([crate::store::SENSOR_INVALID; 4]).encode(),
-            "this node only has 8 sensor slots, so slots 8..12 never have real data"
+            build(&store, TpdoKind::Sensor0),
+            TpdoFrame::Sensor0([SENSOR_INVALID, 2500, SENSOR_INVALID, SENSOR_INVALID]).encode(),
+            "slot 14 broadcasts on channel 1; slot 3 claimed no channel and 777 stays off the bus"
+        );
+        assert_eq!(
+            build(&store, TpdoKind::SensorUnits)[0],
+            (Unit::CentiCelsius as u8) << 4,
+            "the unit follows the value onto its channel, not onto its slot number"
         );
     }
 
     #[test]
-    fn sensor_units_covers_all_twelve_protocol_slots() {
+    fn sensor_units_covers_all_twelve_channels() {
         let mut store = Store::new();
-        store.sensor_unit = crate::index::PerSensorSlot::new([0, 1, 2, 3, 1, 1, 1, 1]);
+        store.pdo_sensor_unit = crate::index::PerPdoSensor::new([0, 1, 2, 3, 4, 1, 1, 1, 0, 0, 0, 0]);
 
         let frame = build(&store, TpdoKind::SensorUnits);
         assert_eq!(
             frame,
-            TpdoFrame::SensorUnits([0, 1, 2, 3, 1, 1, 1, 1, 0, 0, 0, 0]).encode(),
-            "slots 8..12 pad with 0 (this node has no sensors there)"
+            TpdoFrame::SensorUnits([0, 1, 2, 3, 4, 1, 1, 1, 0, 0, 0, 0]).encode(),
+            "channels nothing claimed pad with 0"
         );
     }
 

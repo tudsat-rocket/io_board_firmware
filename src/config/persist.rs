@@ -12,9 +12,9 @@
 use embedded_storage_async::nor_flash::NorFlash;
 
 use super::{
-    Config, FallbackAction, PressureCalib, ReliefConfig, SensorKind, SensorSlotConfig, Unit, ValveConfig, ValveKind,
+    Config, FallbackAction, ReliefConfig, SensorCalib, SensorKind, SensorSlotConfig, Unit, ValveConfig, ValveKind,
 };
-use crate::index::{AmplifierId, HcoId, I2cBus, Id, SensorSlot, ValveId};
+use crate::index::{AmplifierId, HcoId, I2cBus, Id, PdoSensorChannel, SensorSlot, ValveId};
 
 const MAGIC: u32 = 0x4249_4F43; // "COIB", little-endian "IOCB"
 
@@ -22,18 +22,22 @@ const MAGIC: u32 = 0x4249_4F43; // "COIB", little-endian "IOCB"
 /// than misparsed, and the board falls back to its compile-time defaults — which is the safe
 /// outcome, since a config half-read into valve hardware is worse than no config at all.
 ///
-/// 2: pressure calibration gained a constant term (`PressureCalib::constant_millibar`).
+/// 2: pressure calibration gained a constant term (`PressureCalib::constant_millibar`, since renamed).
 /// 3: added the overpressure relief loop (`ReliefConfig`).
-const VERSION: u16 = 3;
+/// 4: sixteen sensor slots instead of eight, each with a TPDO channel assignment; valves gained
+///    a position sensor; the calibration record became kind-agnostic (`SensorCalib`), which
+///    changes what a Pt1000 slot's three coefficients *mean* even though their layout is
+///    unchanged — hence a bump rather than a silent widening.
+const VERSION: u16 = 4;
 
 const HEADER_LEN: usize = 12;
-const BODY_LEN: usize = 291;
+const BODY_LEN: usize = 439;
 #[cfg(test)]
 const RECORD_LEN: usize = HEADER_LEN + BODY_LEN + 4;
 
 /// Padded to a comfortable margin over `RECORD_LEN` so a future field does not force a format
-/// bump just to fit.
-const BUF_LEN: usize = 320;
+/// bump just to fit. Still an order of magnitude inside the 4 KiB sector.
+const BUF_LEN: usize = 512;
 
 const SECTOR_LEN: u32 = 4096;
 const SLOT_OFFSETS: [u32; 2] = [0, SECTOR_LEN];
@@ -178,6 +182,7 @@ fn write_body(cfg: &Config, out: &mut [u8]) -> usize {
         w.u16(v.settle_ms);
         w.u16(v.min_promille);
         w.u16(v.max_promille);
+        w.opt_id(v.position_sensor);
         w.u16(v.fallback_a.position);
         w.u8(v.fallback_a.unpower as u8);
         w.u16(v.fallback_b.position);
@@ -189,9 +194,10 @@ fn write_body(cfg: &Config, out: &mut [u8]) -> usize {
         w.opt_id(s.bus);
         w.id(s.amplifier);
         w.u8(s.unit as u8);
-        w.i32(s.calib.offset_milli_counts);
-        w.i32(s.calib.slope_nanobar);
-        w.i32(s.calib.constant_millibar);
+        w.opt_id(s.pdo_channel);
+        w.i32(s.calib.offset_milli);
+        w.i32(s.calib.slope_nano);
+        w.i32(s.calib.constant_milli);
     }
 
     for period in cfg.tpdo_interval_ms.values() {
@@ -242,6 +248,7 @@ fn read_body(body: &[u8]) -> Option<Config> {
             settle_ms: r.u16(),
             min_promille: r.u16(),
             max_promille: r.u16(),
+            position_sensor: r.opt_id().ok()?,
             fallback_a: FallbackAction {
                 position: r.u16(),
                 unpower: r.u8() != 0,
@@ -258,15 +265,17 @@ fn read_body(body: &[u8]) -> Option<Config> {
         let bus: Option<I2cBus> = r.opt_id().ok()?;
         let amplifier: AmplifierId = r.id().ok()?;
         let unit = Unit::from_u8(r.u8())?;
+        let pdo_channel: Option<PdoSensorChannel> = r.opt_id().ok()?;
         cfg.sensors[i] = SensorSlotConfig {
             kind,
             bus,
             amplifier,
             unit,
-            calib: PressureCalib {
-                offset_milli_counts: r.i32(),
-                slope_nanobar: r.i32(),
-                constant_millibar: r.i32(),
+            pdo_channel,
+            calib: SensorCalib {
+                offset_milli: r.i32(),
+                slope_nano: r.i32(),
+                constant_milli: r.i32(),
             },
         };
     }
@@ -463,7 +472,7 @@ mod tests {
             I2cBus::Bus1,
             AmplifierId::Amp3,
             Unit::DeciBar,
-            PressureCalib::from_bar_per_count(439.0, 0.911_161_7),
+            SensorCalib::from_per_count(439.0, 0.911_161_7),
         );
 
         let mut buf = [0u8; BUF_LEN];
@@ -476,10 +485,7 @@ mod tests {
         assert_eq!(back.valves[ValveId::Valve1].closed_us, 2470);
         assert_eq!(back.valves[ValveId::Valve1].power_hco, Some(HcoId::Hco0));
         assert_eq!(back.sensors[SensorSlot::Slot2].unit as u8, Unit::DeciBar as u8);
-        assert_eq!(
-            back.sensors[SensorSlot::Slot2].calib.slope_nanobar,
-            cfg.sensors[SensorSlot::Slot2].calib.slope_nanobar
-        );
+        assert_eq!(back.sensors[SensorSlot::Slot2].calib.slope_nano, cfg.sensors[SensorSlot::Slot2].calib.slope_nano);
     }
 
     /// The constant term is the difference between gauge and absolute pressure for a slot, so
@@ -491,22 +497,66 @@ mod tests {
             I2cBus::Bus0,
             AmplifierId::Amp0,
             Unit::CentiBar,
-            PressureCalib::from_bar_per_count(47.0, 0.106_044_5).with_constant_bar(1.013),
+            SensorCalib::from_per_count(47.0, 0.106_044_5).with_constant(1.013),
         );
         // ...and a slot on the plain form keeps its zero.
         cfg.sensors[SensorSlot::Slot1] = SensorSlotConfig::pressure(
             I2cBus::Bus0,
             AmplifierId::Amp1,
             Unit::CentiBar,
-            PressureCalib::from_bar_per_count(15.0, 0.0855),
+            SensorCalib::from_per_count(15.0, 0.0855),
         );
 
         let mut buf = [0u8; BUF_LEN];
         write_record(&cfg, 1, &mut buf);
         let (_, back) = read_record(&buf).expect("record should validate");
 
-        assert_eq!(back.sensors[SensorSlot::Slot0].calib.constant_millibar, 1013);
-        assert_eq!(back.sensors[SensorSlot::Slot1].calib.constant_millibar, 0);
+        assert_eq!(back.sensors[SensorSlot::Slot0].calib.constant_milli, 1013);
+        assert_eq!(back.sensors[SensorSlot::Slot1].calib.constant_milli, 0);
+    }
+
+    /// The three things version 4 added. Each is silent when lost: a valve would quietly go back
+    /// to extrapolating its position, and a sensor would quietly stop reaching the bus.
+    #[test]
+    fn the_new_sensor_plane_survives_a_round_trip() {
+        use crate::index::PdoSensorChannel;
+
+        let mut cfg = Config::new();
+        cfg.sensors[SensorSlot::Slot15] =
+            SensorSlotConfig::encoder(I2cBus::Bus1, 1124, -1024).on_channel(PdoSensorChannel::Ch7);
+        cfg.sensors[SensorSlot::Slot9] = SensorSlotConfig::mcp9700(I2cBus::Bus0, AmplifierId::Amp4);
+        cfg.valves[ValveId::Valve2] = ValveConfig::servo_on_pair(crate::index::HcoPair::B, 2000, 1000, 900)
+            .with_position_sensor(SensorSlot::Slot15);
+
+        let mut buf = [0u8; BUF_LEN];
+        write_record(&cfg, 1, &mut buf);
+        let (_, back) = read_record(&buf).expect("record should validate");
+
+        assert_eq!(back.valves[ValveId::Valve2].position_sensor, Some(SensorSlot::Slot15));
+        assert_eq!(back.sensors[SensorSlot::Slot15].pdo_channel, Some(PdoSensorChannel::Ch7));
+        assert_eq!(back.sensors[SensorSlot::Slot15].kind as u8, SensorKind::Angle as u8);
+        assert!(back.sensors[SensorSlot::Slot15].calib.slope_nano < 0, "the reversed travel is in the slope's sign");
+        assert_eq!(back.sensors[SensorSlot::Slot9].calib, SensorCalib::MCP9700);
+        // Slots past the twelfth are only reachable at all because the record now carries sixteen.
+        assert_eq!(back.sensors[SensorSlot::Slot9].kind as u8, SensorKind::Mcp9700 as u8);
+    }
+
+    /// A record from before the slot count doubled describes a different object dictionary, so it
+    /// has to be rejected outright rather than read short — the board then comes up on its
+    /// compile-time defaults, which is the safe outcome.
+    #[test]
+    fn a_record_from_the_previous_version_is_rejected() {
+        let cfg = Config::new();
+        let mut buf = [0u8; BUF_LEN];
+        write_record(&cfg, 1, &mut buf);
+        // Stamp the previous version into the header and fix up the CRC, so this tests the
+        // version gate rather than the checksum that would otherwise catch it first.
+        buf[4..6].copy_from_slice(&(VERSION - 1).to_le_bytes());
+        let end = HEADER_LEN + BODY_LEN;
+        let checksum = CRC.checksum(&buf[..end]).to_le_bytes();
+        buf[end..end + 4].copy_from_slice(&checksum);
+
+        assert!(read_record(&buf).is_none());
     }
 
     #[test]

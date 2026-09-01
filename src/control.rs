@@ -19,7 +19,7 @@ use crate::outputs::{Outputs, digital, pwm};
 use crate::rail_sense::{NoRails, RailSensing, Rails};
 use crate::relief::Relief;
 use crate::safety::{self, FallbackLatch};
-use crate::store::{CONTROL_WAKE, LinkState, STORE};
+use crate::store::{CONTROL_WAKE, LinkState, SENSOR_INVALID, STORE};
 use crate::valves::{
     NoFeedback, PositionFeedback, Valve, ValveDrive, ValveStatus, is_unpowered, position_of, unpowered_at,
 };
@@ -33,6 +33,12 @@ const TICK: embassy_time::Duration = embassy_time::Duration::from_millis(20);
 pub struct Control<R: RailSensing = NoRails> {
     outputs: Outputs,
     valves: PerValve<Valve>,
+    /// Position feedback from anything that is not a configured sensor slot.
+    ///
+    /// Nothing on this board has any: an encoder reaches a valve through the sensor plane
+    /// (0x301B), which `decide` consults first. The hook stays because [`PositionFeedback`] is
+    /// how a directly-wired potentiometer would arrive, and that is a wiring change rather than
+    /// a firmware one.
     feedback: NoFeedback,
     // TODO: document what exactly latch is, or choose a better name
     latch: FallbackLatch,
@@ -83,6 +89,26 @@ struct TickInputs {
     now: Instant,
     since_heartbeat: u32,
     seen: bool,
+}
+
+/// Where a valve's position sensor says it is, in promille, or `None` to fall back to the
+/// travel-time estimate.
+///
+/// `None` covers three cases that all mean the same thing to the valve model — no sensor
+/// configured, the sensor has no reading this tick, or the reading is out of range — because a
+/// valve that has lost its encoder should coast on the estimate rather than freeze at whatever
+/// the last good reading was. A magnet knocked off its shaft is exactly this case: the AS5600
+/// stops answering, the slot reports [`SENSOR_INVALID`], and the valve keeps working open-loop.
+///
+/// The unit is not re-checked here: [`Config::sanity_check`] refuses a config whose position
+/// sensor reports anything but promille, so by the time a config is running this reading is
+/// already in the right unit.
+fn sensed_position(cfg: &ValveConfig, values: &PerSensorSlot<i16>) -> Option<u16> {
+    let reading = values[cfg.position_sensor?];
+    if reading == SENSOR_INVALID || reading < 0 {
+        return None;
+    }
+    Some((reading as u16).min(crate::config::PROMILLE_MAX))
 }
 
 /// What one tick decided, ready to push into the store.
@@ -242,7 +268,9 @@ impl<R: RailSensing> Control<R> {
             };
             targets[valve] = target;
 
-            let feedback = self.feedback.position(valve);
+            // A configured position sensor wins over the directly-wired hook: it is the one an
+            // operator can point at a different slot without touching the firmware.
+            let feedback = sensed_position(cfg, &inputs.sensor_value).or_else(|| self.feedback.position(valve));
             let drive = self.valves[valve].tick(cfg, target, inputs.now, current_ma, feedback);
             apply_drive(&mut desired, cfg, drive);
 
@@ -497,6 +525,68 @@ mod tests {
             since_heartbeat: 0,
             seen: true,
         }
+    }
+
+    /// The whole point of an encoder: `measured` stops being "where the travel time says it
+    /// should be by now" and becomes "where it is". Here the valve is commanded fully open but
+    /// the encoder says it has barely moved — a jammed valve, which the open-loop estimate would
+    /// have reported as wide open.
+    #[test]
+    fn a_position_sensor_overrides_the_travel_time_estimate() {
+        use crate::config::SensorSlotConfig;
+        use crate::index::{I2cBus, SensorSlot};
+
+        let mut ctl = test_control();
+        let cfg = Config::new()
+            .with_valve(
+                ValveId::Valve0,
+                ValveConfig::servo_on_pair(HcoPair::A, 2000, 1000, 500).with_position_sensor(SensorSlot::Slot0),
+            )
+            .with_sensor(SensorSlot::Slot0, SensorSlotConfig::encoder(I2cBus::Bus0, 0, 1024));
+
+        let mut tick = inputs(cfg.clone(), [1000, 0, 0, 0], Instant::from_millis(0));
+        tick.sensor_value[SensorSlot::Slot0] = 120;
+        ctl.decide(tick);
+
+        // A full travel time later the estimate alone would say 1000.
+        let mut tick = inputs(cfg, [1000, 0, 0, 0], Instant::from_millis(500));
+        tick.sensor_value[SensorSlot::Slot0] = 120;
+        let outcome = ctl.decide(tick);
+
+        assert_eq!(outcome.targets[ValveId::Valve0], 1000, "the target is still fully open");
+        assert_eq!(position_of(outcome.measured[ValveId::Valve0]), 120, "but the encoder says otherwise");
+    }
+
+    /// An encoder that drops off the bus must not freeze the valve at its last reading — the
+    /// open-loop estimate has to take over, or a lost magnet would look like a stuck valve.
+    #[test]
+    fn a_valve_falls_back_to_the_estimate_when_its_sensor_has_no_reading() {
+        use crate::config::SensorSlotConfig;
+        use crate::index::{I2cBus, SensorSlot};
+
+        let mut ctl = test_control();
+        let cfg = Config::new()
+            .with_valve(
+                ValveId::Valve0,
+                ValveConfig::servo_on_pair(HcoPair::A, 2000, 1000, 500).with_position_sensor(SensorSlot::Slot0),
+            )
+            .with_sensor(SensorSlot::Slot0, SensorSlotConfig::encoder(I2cBus::Bus0, 0, 1024));
+
+        // `inputs` seeds every slot at 0, so make the first tick a real reading and the second
+        // one the encoder having vanished.
+        let mut tick = inputs(cfg.clone(), [1000, 0, 0, 0], Instant::from_millis(0));
+        tick.sensor_value[SensorSlot::Slot0] = 0;
+        ctl.decide(tick);
+
+        let mut tick = inputs(cfg, [1000, 0, 0, 0], Instant::from_millis(500));
+        tick.sensor_value[SensorSlot::Slot0] = SENSOR_INVALID;
+        let outcome = ctl.decide(tick);
+
+        assert_eq!(
+            position_of(outcome.measured[ValveId::Valve0]),
+            1000,
+            "with no reading the travel-time estimate takes over rather than the valve freezing"
+        );
     }
 
     #[test]

@@ -18,8 +18,8 @@ use zencan_common::sdo::AbortCode;
 
 use crate::config::{Config, SensorKind, SensorSlotConfig, Unit, ValveKind};
 use crate::index::{
-    AmplifierId, HcoId, I2cBus, Id, PerAdcSlot, PerHco, PerI2cBus, PerRail, PerSensorSlot, PerValve, SensorSlot,
-    ValveId,
+    AmplifierId, HcoId, I2cBus, Id, PdoSensorChannel, PerAdcSlot, PerHco, PerI2cBus, PerPdoSensor, PerRail,
+    PerSensorSlot, PerValve, SensorSlot, ValveId,
 };
 use crate::valves::position_of;
 
@@ -90,10 +90,20 @@ pub struct Store {
     // --- 0x2000 process data ------------------------------------------------
     /// Raw conversion results, one per probe-able amplifier position.
     pub raw_adc: PerAdcSlot<u16>,
+    /// Raw AS5600 angle per bus, [`RAW_INVALID`] when no encoder answered.
+    pub raw_angle: PerI2cBus<u16>,
     pub i2c_present: PerI2cBus<u16>,
     pub i2c_sweeps: u32,
     pub sensor_value: PerSensorSlot<i16>,
     pub sensor_unit: PerSensorSlot<u8>,
+    /// The subset of `sensor_value` that goes out as process data, gathered by channel.
+    ///
+    /// Derived from `sensor_value` and the config's channel assignment, not written to directly.
+    /// It exists so the TPDO builder is a straight window over an array rather than a search
+    /// through sixteen slots for the one that claimed a channel — that search would run once per
+    /// frame per channel, on a 10 ms tick.
+    pub pdo_sensor_value: PerPdoSensor<i16>,
+    pub pdo_sensor_unit: PerPdoSensor<u8>,
 
     pub valve_commanded: PerValve<u16>,
     pub valve_target: PerValve<u16>,
@@ -135,10 +145,13 @@ impl Store {
     pub const fn new() -> Self {
         Self {
             raw_adc: PerAdcSlot::splat(RAW_INVALID),
+            raw_angle: PerI2cBus::splat(RAW_INVALID),
             i2c_present: PerI2cBus::splat(0),
             i2c_sweeps: 0,
             sensor_value: PerSensorSlot::splat(SENSOR_INVALID),
             sensor_unit: PerSensorSlot::splat(0),
+            pdo_sensor_value: PerPdoSensor::splat(SENSOR_INVALID),
+            pdo_sensor_unit: PerPdoSensor::splat(0),
             valve_commanded: PerValve::splat(0),
             valve_target: PerValve::splat(0),
             valve_measured: PerValve::splat(0),
@@ -176,6 +189,25 @@ impl Store {
         for (slot, unit) in self.sensor_unit.iter_mut() {
             *unit = self.config.sensors[slot].unit as u8;
         }
+        self.refresh_pdo_sensors();
+    }
+
+    /// Gather the slots that claim a TPDO channel into the by-channel arrays the broadcaster
+    /// reads. Called after a config change *and* after every sensor sample, since the values
+    /// move even when the assignment does not.
+    ///
+    /// A channel no slot claims keeps [`SENSOR_INVALID`], which is the same thing a listener
+    /// already sees for a slot that has no reading — so an unmapped channel needs no new
+    /// encoding to say "nothing here".
+    pub fn refresh_pdo_sensors(&mut self) {
+        self.pdo_sensor_value = PerPdoSensor::splat(SENSOR_INVALID);
+        self.pdo_sensor_unit = PerPdoSensor::splat(0);
+        for (slot, cfg) in self.config.sensors.iter() {
+            if let Some(channel) = cfg.pdo_channel {
+                self.pdo_sensor_value[channel] = self.sensor_value[slot];
+                self.pdo_sensor_unit[channel] = cfg.unit as u8;
+            }
+        }
     }
 }
 
@@ -197,6 +229,7 @@ pub mod od {
     pub const I2C_SWEEPS: u16 = 0x2003;
     pub const SENSOR_VALUE: u16 = 0x2004;
     pub const SENSOR_UNIT: u16 = 0x2005;
+    pub const RAW_ENCODER: u16 = 0x2006;
 
     pub const VALVE_COMMANDED: u16 = 0x2010;
     pub const VALVE_TARGET: u16 = 0x2011;
@@ -236,6 +269,7 @@ pub mod od {
     pub const VALVE_SETTLE_MS: u16 = 0x3018;
     pub const VALVE_MIN_PROMILLE: u16 = 0x3019;
     pub const VALVE_MAX_PROMILLE: u16 = 0x301A;
+    pub const VALVE_POSITION_SENSOR: u16 = 0x301B;
 
     pub const SENSOR_BUS: u16 = 0x3020;
     pub const SENSOR_AMPLIFIER: u16 = 0x3021;
@@ -244,6 +278,7 @@ pub mod od {
     pub const SENSOR_SLOPE: u16 = 0x3024;
     pub const SENSOR_UNIT_CFG: u16 = 0x3025;
     pub const SENSOR_CONSTANT: u16 = 0x3026;
+    pub const SENSOR_PDO_CHANNEL: u16 = 0x3027;
 
     pub const SENSOR_INTERVAL_MS: u16 = 0x3030;
     pub const SCAN_INTERVAL_MS: u16 = 0x3031;
@@ -358,6 +393,7 @@ pub fn read(store: &Store, index: u16, sub: u8) -> Result<OdValue, AbortCode> {
         I2C_SWEEPS => scalar(OdValue::u32(store.i2c_sweeps)),
         SENSOR_VALUE => read_array(store.sensor_value.as_slice(), sub, OdValue::i16),
         SENSOR_UNIT => read_array(store.sensor_unit.as_slice(), sub, OdValue::u8),
+        RAW_ENCODER => read_array(store.raw_angle.as_slice(), sub, OdValue::u16),
 
         VALVE_COMMANDED => read_array(store.valve_commanded.as_slice(), sub, OdValue::u16),
         VALVE_TARGET => read_array(store.valve_target.as_slice(), sub, OdValue::u16),
@@ -405,14 +441,20 @@ pub fn read(store: &Store, index: u16, sub: u8) -> Result<OdValue, AbortCode> {
         VALVE_SETTLE_MS => read_valve_array(cfg, sub, |v| OdValue::u16(v.settle_ms)),
         VALVE_MIN_PROMILLE => read_valve_array(cfg, sub, |v| OdValue::u16(v.min_promille)),
         VALVE_MAX_PROMILLE => read_valve_array(cfg, sub, |v| OdValue::u16(v.max_promille)),
+        VALVE_POSITION_SENSOR => {
+            read_valve_array(cfg, sub, |v| OdValue::u8(v.position_sensor.map_or(NO_INDEX, SensorSlot::as_u8)))
+        }
 
         SENSOR_BUS => read_sensor_array(cfg, sub, |s| OdValue::u8(s.bus.map_or(0xFF, I2cBus::as_u8))),
         SENSOR_AMPLIFIER => read_sensor_array(cfg, sub, |s| OdValue::u8(s.amplifier.as_u8())),
         SENSOR_KIND => read_sensor_array(cfg, sub, |s| OdValue::u8(s.kind as u8)),
-        SENSOR_OFFSET => read_sensor_array(cfg, sub, |s| OdValue::i32(s.calib.offset_milli_counts)),
-        SENSOR_SLOPE => read_sensor_array(cfg, sub, |s| OdValue::i32(s.calib.slope_nanobar)),
-        SENSOR_CONSTANT => read_sensor_array(cfg, sub, |s| OdValue::i32(s.calib.constant_millibar)),
+        SENSOR_OFFSET => read_sensor_array(cfg, sub, |s| OdValue::i32(s.calib.offset_milli)),
+        SENSOR_SLOPE => read_sensor_array(cfg, sub, |s| OdValue::i32(s.calib.slope_nano)),
+        SENSOR_CONSTANT => read_sensor_array(cfg, sub, |s| OdValue::i32(s.calib.constant_milli)),
         SENSOR_UNIT_CFG => read_sensor_array(cfg, sub, |s| OdValue::u8(s.unit as u8)),
+        SENSOR_PDO_CHANNEL => {
+            read_sensor_array(cfg, sub, |s| OdValue::u8(s.pdo_channel.map_or(NO_INDEX, PdoSensorChannel::as_u8)))
+        }
 
         SENSOR_INTERVAL_MS => scalar(OdValue::u16(cfg.sensor_interval_ms)),
         SCAN_INTERVAL_MS => scalar(OdValue::u16(cfg.scan_interval_ms)),
@@ -433,6 +475,23 @@ fn hco_from_wire(v: u8) -> Result<Option<HcoId>, AbortCode> {
     match v {
         0 => Ok(None),
         _ => HcoId::from_u8(v - 1).map(Some).ok_or(AbortCode::InvalidValue),
+    }
+}
+
+/// Wire sentinel for an optional id that is currently unset.
+///
+/// Everything except [`HcoId`] uses this rather than 0-means-none: an HCO's wire form is
+/// 1-indexed to match the silkscreen, but a sensor slot or a PDO channel is numbered from zero on
+/// the wire as it is in the firmware, so zero is a real value and the sentinel has to sit at the
+/// far end.
+pub const NO_INDEX: u8 = 0xFF;
+
+/// Read an optional id off the wire, rejecting anything that is neither [`NO_INDEX`] nor a valid
+/// index of the domain. The counterpart of `map_or(NO_INDEX, ..)` on the read side.
+fn opt_id_from_wire<I: Id>(v: u8) -> Result<Option<I>, AbortCode> {
+    match v {
+        NO_INDEX => Ok(None),
+        _ => I::from_index(v as usize).map(Some).ok_or(AbortCode::InvalidValue),
     }
 }
 
@@ -716,13 +775,15 @@ pub fn write(store: &mut Store, index: u16, sub: u8, data: &[u8]) -> Result<(), 
             store.config.valves[i].max_promille = promille(data)?;
             store.pending.config = true;
         }
+        VALVE_POSITION_SENSOR => {
+            let i: ValveId = slot(sub)?;
+            store.config.valves[i].position_sensor = opt_id_from_wire(as_u8(data)?)?;
+            store.pending.config = true;
+        }
 
         SENSOR_BUS => {
             let i: SensorSlot = slot(sub)?;
-            store.config.sensors[i].bus = match as_u8(data)? {
-                0xFF => None,
-                b => Some(I2cBus::from_u8(b).ok_or(AbortCode::InvalidValue)?),
-            };
+            store.config.sensors[i].bus = opt_id_from_wire(as_u8(data)?)?;
             store.pending.config = true;
         }
         SENSOR_AMPLIFIER => {
@@ -732,27 +793,47 @@ pub fn write(store: &mut Store, index: u16, sub: u8, data: &[u8]) -> Result<(), 
         }
         SENSOR_KIND => {
             let i: SensorSlot = slot(sub)?;
-            store.config.sensors[i].kind = SensorKind::from_u8(as_u8(data)?).ok_or(AbortCode::InvalidValue)?;
+            let kind = SensorKind::from_u8(as_u8(data)?).ok_or(AbortCode::InvalidValue)?;
+            let cfg = &mut store.config.sensors[i];
+            // Changing the kind invalidates everything downstream of it: a slope in nanobar per
+            // count means nothing to a Pt1000, and a unit of centibar means nothing to either.
+            // So a kind change re-seeds both from the new kind — which for a Pt1000 or an
+            // MCP9700 is a complete, working calibration, and for the kinds whose curve is
+            // per-installation is the uncalibrated `ZERO` that reports no reading until the
+            // coefficients arrive. Either way the slot is never left describing itself with the
+            // previous kind's numbers.
+            //
+            // Write the kind first and the coefficients after; the reverse order loses them.
+            if cfg.kind != kind {
+                cfg.kind = kind;
+                cfg.calib = kind.default_calib();
+                cfg.unit = kind.natural_unit();
+            }
             store.pending.config = true;
         }
         SENSOR_OFFSET => {
             let i: SensorSlot = slot(sub)?;
-            store.config.sensors[i].calib.offset_milli_counts = as_i32(data)?;
+            store.config.sensors[i].calib.offset_milli = as_i32(data)?;
             store.pending.config = true;
         }
         SENSOR_SLOPE => {
             let i: SensorSlot = slot(sub)?;
-            store.config.sensors[i].calib.slope_nanobar = as_i32(data)?;
+            store.config.sensors[i].calib.slope_nano = as_i32(data)?;
             store.pending.config = true;
         }
         SENSOR_CONSTANT => {
             let i: SensorSlot = slot(sub)?;
-            store.config.sensors[i].calib.constant_millibar = as_i32(data)?;
+            store.config.sensors[i].calib.constant_milli = as_i32(data)?;
             store.pending.config = true;
         }
         SENSOR_UNIT_CFG => {
             let i: SensorSlot = slot(sub)?;
             store.config.sensors[i].unit = Unit::from_u8(as_u8(data)?).ok_or(AbortCode::InvalidValue)?;
+            store.pending.config = true;
+        }
+        SENSOR_PDO_CHANNEL => {
+            let i: SensorSlot = slot(sub)?;
+            store.config.sensors[i].pdo_channel = opt_id_from_wire(as_u8(data)?)?;
             store.pending.config = true;
         }
         SENSOR_INTERVAL_MS => {
@@ -782,10 +863,7 @@ pub fn write(store: &mut Store, index: u16, sub: u8, data: &[u8]) -> Result<(), 
         }
         RELIEF_VALVE => {
             expect_scalar(sub)?;
-            store.config.relief.valve = match as_u8(data)? {
-                0xFF => None,
-                v => Some(ValveId::from_u8(v).ok_or(AbortCode::InvalidValue)?),
-            };
+            store.config.relief.valve = opt_id_from_wire(as_u8(data)?)?;
             store.pending.config = true;
         }
         RELIEF_SENSOR => {
@@ -819,8 +897,8 @@ pub fn write(store: &mut Store, index: u16, sub: u8, data: &[u8]) -> Result<(), 
         }
 
         // Everything else in the 0x2000 block is process data we produce.
-        RAW_ADC_BUS0 | RAW_ADC_BUS1 | I2C_PRESENT | I2C_SWEEPS | SENSOR_VALUE | SENSOR_UNIT | VALVE_TARGET
-        | VALVE_MEASURED | VALVE_STATUS | VALVE_CURRENT | RELIEF_STATE | HCO_OWNER | LINK_STATE
+        RAW_ADC_BUS0 | RAW_ADC_BUS1 | RAW_ENCODER | I2C_PRESENT | I2C_SWEEPS | SENSOR_VALUE | SENSOR_UNIT
+        | VALVE_TARGET | VALVE_MEASURED | VALVE_STATUS | VALVE_CURRENT | RELIEF_STATE | HCO_OWNER | LINK_STATE
         | MS_SINCE_HEARTBEAT | RAIL_CURRENT | RAIL_VOLTAGE => return Err(AbortCode::ReadOnly),
 
         _ => return Err(AbortCode::NoSuchObject),
@@ -943,6 +1021,148 @@ mod tests {
     fn reads_past_the_end_abort() {
         let s = store_with_servo();
         assert!(matches!(read(&s, od::VALVE_COMMANDED, 5), Err(AbortCode::NoSuchSubIndex)));
+    }
+
+    /// Writing nothing but the kind has to leave a Pt1000 that actually reads a temperature.
+    ///
+    /// It did not, briefly: the bridge inversion moved behind the per-slot calibration, and a
+    /// virgin slot's zero slope turned every reading into 0.00 degC. A master configuring a slot
+    /// from scratch over the bus — rather than from `zenith_mapping`, whose constructors set the
+    /// calibration for it — would have got a confident, wrong, plausible number.
+    #[test]
+    fn writing_only_the_kind_gives_a_working_pt1000() {
+        use crate::config::SensorKind;
+        use crate::sensors::calibrate;
+
+        let mut s = Store::new();
+        let sub = SensorSlot::Slot0.as_u8() + 1;
+        write(&mut s, od::SENSOR_KIND, sub, &[SensorKind::Pt1000 as u8]).unwrap();
+        write(&mut s, od::SENSOR_BUS, sub, &[I2cBus::Bus0.as_u8()]).unwrap();
+
+        let cfg = &s.config.sensors[SensorSlot::Slot0];
+        assert_eq!(cfg.unit, Unit::CentiCelsius, "the kind brings its natural unit with it");
+        assert_eq!(calibrate(cfg, Some(600)), 848, "and a working bridge, in centicelsius");
+    }
+
+    /// The counterpart: a transducer's curve is not knowable from its kind, so the slot stays
+    /// silent rather than inventing one, and starts reporting the moment a slope arrives.
+    #[test]
+    fn writing_only_the_kind_leaves_a_transducer_uncalibrated() {
+        use crate::config::SensorKind;
+        use crate::sensors::calibrate;
+
+        let mut s = Store::new();
+        let sub = SensorSlot::Slot0.as_u8() + 1;
+        write(&mut s, od::SENSOR_KIND, sub, &[SensorKind::Pressure as u8]).unwrap();
+        write(&mut s, od::SENSOR_BUS, sub, &[I2cBus::Bus0.as_u8()]).unwrap();
+        assert_eq!(calibrate(&s.config.sensors[SensorSlot::Slot0], Some(600)), SENSOR_INVALID);
+
+        // 0.1 bar per count, no offset and no constant: 600 counts is 60 bar.
+        write(&mut s, od::SENSOR_SLOPE, sub, &100_000_000i32.to_le_bytes()).unwrap();
+        assert_eq!(calibrate(&s.config.sensors[SensorSlot::Slot0], Some(600)), 6000);
+    }
+
+    /// A kind change re-seeds the calibration, because the old one described a different sensor.
+    /// Re-writing the *same* kind must not, or a master that resends its whole config would wipe
+    /// the calibration it just wrote.
+    #[test]
+    fn a_kind_change_reseeds_the_calibration_but_a_repeat_does_not() {
+        use crate::config::SensorKind;
+
+        let mut s = Store::new();
+        let sub = SensorSlot::Slot0.as_u8() + 1;
+        write(&mut s, od::SENSOR_KIND, sub, &[SensorKind::Pressure as u8]).unwrap();
+        write(&mut s, od::SENSOR_SLOPE, sub, &123_456_789i32.to_le_bytes()).unwrap();
+        write(&mut s, od::SENSOR_OFFSET, sub, &47_000i32.to_le_bytes()).unwrap();
+
+        // Same kind again: a no-op, so the operator's coefficients survive.
+        write(&mut s, od::SENSOR_KIND, sub, &[SensorKind::Pressure as u8]).unwrap();
+        assert_eq!(s.config.sensors[SensorSlot::Slot0].calib.slope_nano, 123_456_789);
+        assert_eq!(s.config.sensors[SensorSlot::Slot0].calib.offset_milli, 47_000);
+
+        // A different kind: nanobar per count is meaningless to a Pt1000, so it goes.
+        write(&mut s, od::SENSOR_KIND, sub, &[SensorKind::Pt1000 as u8]).unwrap();
+        assert_eq!(s.config.sensors[SensorSlot::Slot0].calib, SensorKind::Pt1000.default_calib());
+        assert_eq!(s.config.sensors[SensorSlot::Slot0].unit, Unit::CentiCelsius);
+    }
+
+    /// The calibration plane an operator actually works through: pick the kind, point it at a
+    /// device, write three coefficients, choose whether it goes on the bus.
+    #[test]
+    fn a_sensor_slot_is_configurable_end_to_end_over_sdo() {
+        use crate::config::SensorKind;
+        use crate::index::PdoSensorChannel;
+
+        let mut s = Store::new();
+        let sub = SensorSlot::Slot12.as_u8() + 1;
+
+        write(&mut s, od::SENSOR_KIND, sub, &[SensorKind::Angle as u8]).unwrap();
+        write(&mut s, od::SENSOR_BUS, sub, &[I2cBus::Bus1.as_u8()]).unwrap();
+        write(&mut s, od::SENSOR_UNIT_CFG, sub, &[Unit::Promille as u8]).unwrap();
+        write(&mut s, od::SENSOR_OFFSET, sub, &1_124_000i32.to_le_bytes()).unwrap();
+        write(&mut s, od::SENSOR_SLOPE, sub, &(-976_563i32).to_le_bytes()).unwrap();
+        write(&mut s, od::SENSOR_CONSTANT, sub, &0i32.to_le_bytes()).unwrap();
+        write(&mut s, od::SENSOR_PDO_CHANNEL, sub, &[PdoSensorChannel::Ch9.as_u8()]).unwrap();
+
+        let cfg = &s.config.sensors[SensorSlot::Slot12];
+        assert_eq!(cfg.kind, SensorKind::Angle);
+        assert_eq!(cfg.calib.slope_nano, -976_563, "a reversed valve's negative slope survives the wire");
+        assert_eq!(cfg.pdo_channel, Some(PdoSensorChannel::Ch9));
+        // ...and reads back as what was written.
+        assert_eq!(read(&s, od::SENSOR_PDO_CHANNEL, sub).unwrap().data(), &[PdoSensorChannel::Ch9.as_u8()]);
+        assert_eq!(read(&s, od::SENSOR_SLOPE, sub).unwrap().data(), &(-976_563i32).to_le_bytes());
+    }
+
+    /// Slot 12 exists at all only because there are sixteen now; the wire has to agree.
+    #[test]
+    fn the_sensor_arrays_are_sixteen_long() {
+        let s = store_with_servo();
+        assert_eq!(read(&s, od::SENSOR_VALUE, 0).unwrap().data(), &[crate::config::NUM_SENSOR_SLOTS as u8]);
+        assert!(read(&s, od::SENSOR_KIND, 16).is_ok());
+        assert!(matches!(read(&s, od::SENSOR_KIND, 17), Err(AbortCode::NoSuchSubIndex)));
+    }
+
+    /// `NO_INDEX` is the "unset" sentinel for everything but an HCO, whose wire form is 1-indexed
+    /// to match the silkscreen. Zero has to stay a real slot on both objects.
+    #[test]
+    fn an_optional_slot_reference_round_trips_through_its_sentinel() {
+        let mut s = store_with_servo();
+
+        write(&mut s, od::VALVE_POSITION_SENSOR, 1, &[NO_INDEX]).unwrap();
+        assert_eq!(s.config.valves[ValveId::Valve0].position_sensor, None);
+        assert_eq!(read(&s, od::VALVE_POSITION_SENSOR, 1).unwrap().data(), &[NO_INDEX]);
+
+        write(&mut s, od::VALVE_POSITION_SENSOR, 1, &[0]).unwrap();
+        assert_eq!(s.config.valves[ValveId::Valve0].position_sensor, Some(SensorSlot::Slot0));
+
+        assert!(matches!(write(&mut s, od::VALVE_POSITION_SENSOR, 1, &[16]), Err(AbortCode::InvalidValue)));
+    }
+
+    /// A slot's value goes out on the channel it claimed, not on its own number — and the derived
+    /// arrays have to be rebuilt whenever the assignment changes, not just when a sample lands.
+    #[test]
+    fn changing_a_channel_assignment_regathers_the_pdo_arrays() {
+        use crate::index::PdoSensorChannel;
+
+        let mut s = Store::new();
+        s.config.sensors[SensorSlot::Slot11] = SensorSlotConfig::pt1000(I2cBus::Bus0, AmplifierId::Amp0);
+        s.sensor_value[SensorSlot::Slot11] = 2350;
+        s.refresh_derived();
+        assert_eq!(s.pdo_sensor_value[PdoSensorChannel::Ch0], SENSOR_INVALID, "nothing claims channel 0 yet");
+
+        write(&mut s, od::SENSOR_PDO_CHANNEL, SensorSlot::Slot11.as_u8() + 1, &[PdoSensorChannel::Ch0.as_u8()])
+            .unwrap();
+
+        assert_eq!(s.pdo_sensor_value[PdoSensorChannel::Ch0], 2350);
+        assert_eq!(s.pdo_sensor_unit[PdoSensorChannel::Ch0], Unit::CentiCelsius as u8);
+    }
+
+    #[test]
+    fn the_raw_encoder_angles_are_readable_and_read_only() {
+        let mut s = Store::new();
+        s.raw_angle[I2cBus::Bus1] = 2048;
+        assert_eq!(read(&s, od::RAW_ENCODER, 2).unwrap().data(), &2048u16.to_le_bytes());
+        assert!(matches!(write(&mut s, od::RAW_ENCODER, 2, &0u16.to_le_bytes()), Err(AbortCode::ReadOnly)));
     }
 
     #[test]

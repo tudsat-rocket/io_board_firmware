@@ -50,8 +50,7 @@ pub enum TpdoKind {
     RawBus1B = 8,
     Sensor0 = 9,
     Sensor1 = 10,
-    /// Slots 8..12. Unused on any node with `NUM_SENSOR_SLOTS <= 8` (today, every node), kept
-    /// for boards with more amplifier slots.
+    /// Sensor channels 8..12.
     Sensor3 = 11,
     SensorUnits = 12,
     /// Presence bitmaps and the sweep counter: the assembly-verification channel.

@@ -99,8 +99,30 @@ id_domain!(
 );
 
 id_domain!(
-    /// One of the eight configurable sensor slots (0x2004 / 0x3020..).
-    SensorSlot, PerSensorSlot, 8, [Slot0, Slot1, Slot2, Slot3, Slot4, Slot5, Slot6, Slot7]
+    /// One of the sixteen configurable sensor slots (0x2004 / 0x3020..).
+    ///
+    /// There are deliberately more slots than the twelve the TPDO table can carry: a board with
+    /// both I2C buses populated has 18 amplifier positions plus two encoders to address, and the
+    /// bus bandwidth to broadcast all of them does not exist. Which slots get on the wire is a
+    /// separate, explicit choice — see [`PdoSensorChannel`].
+    SensorSlot, PerSensorSlot, 16, [
+        Slot0, Slot1, Slot2, Slot3, Slot4, Slot5, Slot6, Slot7,
+        Slot8, Slot9, Slot10, Slot11, Slot12, Slot13, Slot14, Slot15
+    ]
+);
+
+id_domain!(
+    /// One of the twelve sensor channels the TPDO table can carry: `Sensor0` covers channels
+    /// 0..4, `Sensor1` 4..8 and `Sensor3` 8..12.
+    ///
+    /// A *channel* is a position in those broadcast frames, not a sensor slot. Any
+    /// [`SensorSlot`] may claim at most one channel (0x3027); slots that claim none are still
+    /// read, calibrated and published at 0x2004, they just never appear in a TPDO. The count is
+    /// fixed by the wire protocol — see `iocan_proto::NUM_PROTOCOL_SENSOR_SLOTS`, which a test
+    /// in this module cross-checks against.
+    PdoSensorChannel, PerPdoSensor, 12, [
+        Ch0, Ch1, Ch2, Ch3, Ch4, Ch5, Ch6, Ch7, Ch8, Ch9, Ch10, Ch11
+    ]
 );
 
 id_domain!(
@@ -412,7 +434,22 @@ mod tests {
         }
         assert_eq!(HcoId::from_index(HcoId::COUNT), None);
         assert_eq!(ValveId::from_u8(4), None);
-        assert_eq!(SensorSlot::from_u8(8), None);
+        assert_eq!(SensorSlot::from_u8(16), None);
+    }
+
+    /// The TPDO sensor channels are positions in a wire frame, so their count belongs to the
+    /// protocol crate. If the two ever disagree, `Sensor3` would either drop a channel or read
+    /// past the end of the window it fills.
+    #[test]
+    fn pdo_sensor_channels_match_the_protocol() {
+        assert_eq!(PdoSensorChannel::COUNT, iocan_proto::NUM_PROTOCOL_SENSOR_SLOTS);
+    }
+
+    /// More slots than channels is the whole point of splitting the two domains: a sensor that
+    /// is read and published at 0x2004 need not be on the bus every tick.
+    #[test]
+    fn there_are_more_sensor_slots_than_pdo_channels() {
+        assert!(SensorSlot::COUNT > PdoSensorChannel::COUNT);
     }
 
     #[test]
@@ -441,7 +478,7 @@ mod tests {
     #[test]
     fn from_fn_sees_every_id_exactly_once() {
         let per = PerSensorSlot::from_fn(|slot| slot.index() as u8);
-        assert_eq!(per.as_array(), &[0, 1, 2, 3, 4, 5, 6, 7]);
+        assert_eq!(per.as_array(), &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
     }
 
     /// The flattening the raw ADC array at 0x2000/0x2001 is defined by: bus 0's nine straps, then

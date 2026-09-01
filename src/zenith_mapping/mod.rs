@@ -7,6 +7,10 @@
 //! proven.
 
 use crate::config::{Config, NodeSettings, ReliefConfig, SensorSlotConfig, ValveConfig};
+#[allow(
+    unused_imports,
+    reason = "SensorSlot's later variants are only used by node configs that do not exist yet"
+)]
 use crate::index::{AmplifierId::*, HcoId, HcoPair, I2cBus::*, SensorSlot::*, ValveId::*};
 use crate::zenith_mapping::sensors::Transducer;
 
@@ -20,6 +24,23 @@ const fn pressure(bus: crate::index::I2cBus, amplifier: crate::index::AmplifierI
 
 const fn pt1000(bus: crate::index::I2cBus, amplifier: crate::index::AmplifierId) -> SensorSlotConfig {
     SensorSlotConfig::pt1000(bus, amplifier)
+}
+
+/// An MCP9700 on an amplifier channel. Cheaper and less fussy than a Pt1000 bridge, and good
+/// enough wherever a couple of degrees does not change a decision.
+#[allow(dead_code, reason = "a factory default waiting on the harness that uses it")]
+const fn mcp9700(bus: crate::index::I2cBus, amplifier: crate::index::AmplifierId) -> SensorSlotConfig {
+    SensorSlotConfig::mcp9700(bus, amplifier)
+}
+
+/// The AS5600 on `bus`, reporting a valve's travel in promille.
+///
+/// `zero_counts` is the raw angle at the closed stop and `counts` the signed span to the open one
+/// — negative for a valve that opens counter-clockwise. Both are read off 0x2006 on the bench with
+/// the valve parked on each stop; see [`crate::config::SensorCalib::angle_over`].
+#[allow(dead_code, reason = "a factory default waiting on the harness that uses it")]
+const fn encoder(bus: crate::index::I2cBus, zero_counts: u16, counts: i16) -> SensorSlotConfig {
+    SensorSlotConfig::encoder(bus, zero_counts, counts)
 }
 
 /// Node 2 — nosecone / recovery. One temperature probe, no valves.

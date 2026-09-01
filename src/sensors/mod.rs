@@ -1,13 +1,27 @@
-//! Reading the amplifier boards, calibrating them, and keeping an eye on who is actually there.
+//! Reading the I2C devices, calibrating them, and keeping an eye on who is actually there.
 //!
 //! Three things happen on the same tick, in one task, because they all contend for the same two
 //! I2C buses:
 //!
-//! 1. **Sampling** every amplifier we currently believe is present.
-//! 2. **Calibration**, turning raw counts into the value a slot is configured to report. Both the
-//!    slot mapping and the calibration coefficients are runtime-writable (0x3020..0x3025), so a
-//!    sensor can be recalibrated or moved to a different amplifier without a firmware build.
+//! 1. **Sampling** every device we currently believe is present — the ADC101C027 amplifiers and,
+//!    on each bus, the AS5600 magnetic encoder.
+//! 2. **Calibration**, turning a raw device number into the value a slot is configured to report.
+//!    Both the slot mapping and the calibration coefficients are runtime-writable
+//!    (0x3020..0x3027), so a sensor can be recalibrated, moved to a different amplifier, or taken
+//!    off the process data plane without a firmware build.
 //! 3. **Presence scanning**, one address at a time.
+//!
+//! Only [`calibrate`] and its supporting arithmetic are unconditional; the sampling loop needs
+//! embassy's clock and an I2C bus, so it is gated behind `hardware` (or `test`, against a mock).
+//!
+//! # One pipeline, four kinds
+//!
+//! What differs between a pressure transducer, a Pt1000, an MCP9700 and a rotary encoder is
+//! confined to two places: [`linearise`], which turns a raw device number into thousandths of
+//! whatever the sensor is actually linear in, and `calibrate`'s choice of a wrapping zero for the
+//! encoder. Everything downstream — the affine trim, the scale to the slot's unit, the i16
+//! saturation, the wire — is shared, which is what makes recalibrating any of them the same three
+//! SDO writes.
 
 #[cfg(any(feature = "hardware", test))]
 pub mod ext_adc;
@@ -21,16 +35,18 @@ use embedded_hal_async::i2c::I2c;
 use crate::config::AMPLIFIER_ADDRESSES;
 #[cfg(any(feature = "hardware", test))]
 use crate::config::Config;
-use crate::config::{SensorKind, SensorSlotConfig, Unit};
 #[cfg(any(feature = "hardware", test))]
-use crate::index::{AdcSlot, PerAdcSlot, PerI2cBus, PerSensorSlot};
+use crate::config::{ENCODER_ADDRESS, ENCODER_MAGNET_OK_BIT, ENCODER_PRESENT_BIT, SensorSource};
+use crate::config::{ENCODER_FULL_SCALE, SensorKind, SensorSlotConfig, Unit};
+#[cfg(any(feature = "hardware", test))]
+use crate::index::{AdcSlot, I2cBus, PerAdcSlot, PerI2cBus, PerSensorSlot};
 use crate::store::SENSOR_INVALID;
 #[cfg(any(feature = "hardware", test))]
 use crate::store::{RAW_INVALID, STORE};
 #[cfg(any(feature = "hardware", test))]
 use ext_adc::Buses;
 
-/// Convert a raw Pt1000 bridge reading to centi-degrees Celsius.
+/// Convert a raw Pt1000 bridge reading to milli-degrees Celsius.
 ///
 /// The analogue chain is a Wheatstone bridge into an instrumentation amplifier:
 ///
@@ -45,17 +61,43 @@ use ext_adc::Buses;
 /// Substituting and clearing denominators gives an exact integer form with `n = 33*raw - 16896`:
 ///
 /// ```text
-///   centi_celsius = 40_000_000 * n / (385 * (361236 - 2n))
+///   milli_celsius = 400_000_000 * n / (385 * (361236 - 2n))
 /// ```
 ///
 /// which is what is implemented here. Integer rather than float because the STM32F105 is a
-/// Cortex-M3 with no FPU; the widest intermediate is about 7e11, hence i64. The denominator
+/// Cortex-M3 with no FPU; the widest intermediate is about 7e12, hence i64. The denominator
 /// cannot reach zero: `raw` is 10-bit, so `n` stays within +-17864 and `361236 - 2n` within
 /// [325508, 396964].
-pub fn pt1000_centi_celsius(raw: u16) -> i32 {
+///
+/// This is the *bridge*, not the *probe*: the constants above are the board's resistors and the
+/// amplifier's nominal gain, which is why the result then goes through the slot's own
+/// [`crate::config::SensorCalib`] to trim out the tolerance of those parts. Millicelsius rather than the
+/// centicelsius this used to return so that the trim's offset lands on a sensible scale — see
+/// the table on [`crate::config::SensorCalib`].
+pub fn pt1000_milli_celsius(raw: u16) -> i32 {
     let n = 33i64 * raw.min(1023) as i64 - 16_896;
     let denominator = 385 * (361_236 - 2 * n);
-    ((40_000_000 * n) / denominator) as i32
+    ((400_000_000 * n) / denominator) as i32
+}
+
+/// A kind's raw device number, linearised into *thousandths* of the quantity its calibration is
+/// affine in.
+///
+/// This is the only place a kind's physics lives; everything downstream — the trim, the unit
+/// scaling, the wire — is the same for all of them. Thousandths rather than whole units so that
+/// one [`crate::config::SensorCalib`] can carry a sub-count zero offset for an analogue channel and a
+/// millidegree one for the Pt1000 in the same field.
+pub fn linearise(kind: SensorKind, raw: u16) -> Option<i32> {
+    match kind {
+        SensorKind::None => None,
+        // Already linear in the measured quantity, so the calibration slope carries the whole
+        // scale and all the linearisation does is move to milli-counts.
+        //
+        // Angle counts are linear in angle too; what is different about them is that the zeroing
+        // has to wrap, which is `calibrate`'s choice of `apply_wrapped` over `apply`.
+        SensorKind::Pressure | SensorKind::Mcp9700 | SensorKind::Angle => Some(raw as i32 * 1000),
+        SensorKind::Pt1000 => Some(pt1000_milli_celsius(raw)),
+    }
 }
 
 /// Clamp an i32 into the wire's i16, keeping [`SENSOR_INVALID`] reserved for "no reading".
@@ -63,36 +105,86 @@ fn saturate(v: i32) -> i16 {
     v.clamp(i16::MIN as i32 + 1, i16::MAX as i32) as i16
 }
 
-/// Turn a raw count into the value a slot reports, in the unit it declares.
+/// Turn a raw device reading into the value a slot reports, in the unit it declares.
 ///
-/// The unit is per slot rather than global because no single scale works for every transducer
-/// here: centibar is the natural resolution for a 40 bar sensor but overflows i16 at 400 bar,
-/// which is what decibar is for.
+/// The unit is per slot rather than global because no single scale works for everything here:
+/// centibar is the natural resolution for a 40 bar transducer but overflows i16 at 400 bar,
+/// which is what decibar is for, and neither is any use for a temperature or a valve angle.
+///
+/// The kind's only say is how `raw` is linearised ([`linearise`]) and whether its zero wraps.
+/// After that every kind goes through the same affine trim to milli-units and the same scale
+/// down to the reported unit — so recalibrating a Pt1000 and recalibrating a transducer are the
+/// same three SDO writes.
 pub fn calibrate(slot: &SensorSlotConfig, raw: Option<u16>) -> i16 {
     let Some(raw) = raw else {
         return SENSOR_INVALID;
     };
 
+    // Raw counts bypass the calibration entirely — it is what you read *while* working one out.
     if slot.unit == Unit::RawCounts {
-        return saturate(raw as i32);
+        return match slot.kind {
+            SensorKind::None => SENSOR_INVALID,
+            _ => saturate(raw as i32),
+        };
     }
 
-    match slot.kind {
-        SensorKind::None => SENSOR_INVALID,
-        SensorKind::Pt1000 => saturate(pt1000_centi_celsius(raw)),
-        SensorKind::Pressure => {
-            let millibar = slot.calib.to_millibar(raw);
-            match slot.unit {
-                Unit::DeciBar => saturate(millibar / 100),
-                // Centibar is the sane reading of a pressure slot mistakenly set to a
-                // temperature unit, rather than refusing to report anything.
-                Unit::CentiBar | Unit::CentiCelsius | Unit::RawCounts => saturate(millibar / 10),
-            }
+    let Some(linear) = linearise(slot.kind, raw) else {
+        return SENSOR_INVALID;
+    };
+    // A slot whose slope is zero has not been calibrated: it would map every reading onto the
+    // same constant. Reporting nothing is the honest answer and the safe one — a transducer
+    // confidently reading 0.00 bar is far worse than one admitting it has no reading, and this is
+    // exactly the state a slot is in between "kind written over SDO" and "coefficients written".
+    if !slot.calib.is_calibrated() {
+        return SENSOR_INVALID;
+    }
+    let milli = match slot.kind {
+        SensorKind::Angle => slot.calib.apply_wrapped(linear, ENCODER_FULL_SCALE),
+        _ => slot.calib.apply(linear),
+    };
+    saturate(milli / slot.unit.per_milli())
+}
+
+/// One address the presence sweep can knock on.
+///
+/// The two device families are probed by the same cursor rather than by two, so a board with an
+/// encoder fitted does not probe it 9 times as often as any one amplifier.
+#[cfg(any(feature = "hardware", test))]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ProbeTarget {
+    Amplifier(AdcSlot),
+    Encoder(I2cBus),
+}
+
+#[cfg(any(feature = "hardware", test))]
+impl ProbeTarget {
+    /// Amplifiers first, in [`AdcSlot`] order, then one encoder per bus.
+    const COUNT: usize = AdcSlot::COUNT + I2cBus::COUNT;
+
+    fn from_index(index: usize) -> Option<Self> {
+        match AdcSlot::from_index(index) {
+            Some(slot) => Some(Self::Amplifier(slot)),
+            None => I2cBus::from_index(index - AdcSlot::COUNT).map(Self::Encoder),
+        }
+    }
+
+    fn bus(self) -> I2cBus {
+        match self {
+            Self::Amplifier(slot) => slot.bus(),
+            Self::Encoder(bus) => bus,
+        }
+    }
+
+    /// Which bit of that bus's presence word this target owns.
+    fn present_bit(self) -> u16 {
+        match self {
+            Self::Amplifier(slot) => 1 << slot.amplifier().index(),
+            Self::Encoder(_) => ENCODER_PRESENT_BIT,
         }
     }
 }
 
-/// Which of the 18 probe-able slots the incremental scan looks at next.
+/// Which of the probe-able addresses the incremental scan looks at next.
 #[cfg(any(feature = "hardware", test))]
 struct ScanCursor {
     next: usize,
@@ -108,9 +200,9 @@ impl ScanCursor {
         }
     }
 
-    /// Return the next slot to probe, if the scan interval has elapsed. A zero interval disables
-    /// scanning entirely, freezing the presence bitmap at whatever it last held.
-    fn due(&mut self, cfg: &Config, now: Instant) -> Option<AdcSlot> {
+    /// Return the next address to probe, if the scan interval has elapsed. A zero interval
+    /// disables scanning entirely, freezing the presence bitmap at whatever it last held.
+    fn due(&mut self, cfg: &Config, now: Instant) -> Option<ProbeTarget> {
         if cfg.scan_interval_ms == 0 {
             return None;
         }
@@ -118,9 +210,9 @@ impl ScanCursor {
             return None;
         }
         self.last_probe = now;
-        let slot = AdcSlot::from_index(self.next)?;
-        self.next = (self.next + 1) % AdcSlot::COUNT;
-        Some(slot)
+        let target = ProbeTarget::from_index(self.next)?;
+        self.next = (self.next + 1) % ProbeTarget::COUNT;
+        Some(target)
     }
 
     /// True when the slot just handed out was the last of a sweep.
@@ -135,9 +227,12 @@ impl ScanCursor {
 pub struct Sensors<I0: I2c, I1: I2c> {
     buses: Buses<I0, I1>,
     /// Bit `slot.amplifier()` of `present[slot.bus()]` — the same bitmap that goes out at 0x2002
-    /// and in TPDO kind 14.
+    /// and in TPDO kind 14. Bits 9 and 10 carry the bus's encoder; see [`ENCODER_PRESENT_BIT`].
     present: PerI2cBus<u16>,
     raw: PerAdcSlot<u16>,
+    /// Last raw angle from each bus's AS5600, or [`RAW_INVALID`]. Published at 0x2006 so an
+    /// encoder can be zeroed against its valve's stops without first guessing a calibration.
+    raw_angle: PerI2cBus<u16>,
     scan: ScanCursor,
     sweeps: u32,
 }
@@ -157,6 +252,7 @@ impl<I0: I2c, I1: I2c> Sensors<I0, I1> {
             buses,
             present: PerI2cBus::splat(0),
             raw: PerAdcSlot::splat(RAW_INVALID),
+            raw_angle: PerI2cBus::splat(RAW_INVALID),
             scan: ScanCursor::new(Instant::now()),
             sweeps: 0,
         }
@@ -166,32 +262,71 @@ impl<I0: I2c, I1: I2c> Sensors<I0, I1> {
         self.present[slot.bus()] & (1 << slot.amplifier().index()) != 0
     }
 
-    fn set_present(&mut self, slot: AdcSlot, present: bool) {
-        let bit = 1u16 << slot.amplifier().index();
-        let mask = &mut self.present[slot.bus()];
+    fn encoder_present(&self, bus: I2cBus) -> bool {
+        self.present[bus] & ENCODER_PRESENT_BIT != 0
+    }
+
+    /// Set or clear one bit of a bus's presence word, logging only the transitions.
+    ///
+    /// A device appearing or vanishing is the thing worth a log line — a loose connector during
+    /// assembly shows up here — while the steady state is already on the bus at 0x2002 every
+    /// sweep and does not need repeating.
+    fn set_present(&mut self, target: ProbeTarget, present: bool) {
+        let bit = target.present_bit();
+        let bus = target.bus();
+        let mask = &mut self.present[bus];
         let was = *mask & bit != 0;
         if present {
             *mask |= bit;
         } else {
             *mask &= !bit;
         }
-        if was != present {
-            let address = AMPLIFIER_ADDRESSES[slot.amplifier()];
-            if present {
-                defmt::info!(
-                    "amplifier appeared: bus {} addr {=u8:#04x} (index {})",
-                    slot.bus().as_u8(),
-                    address,
-                    slot.amplifier().as_u8()
-                );
-            } else {
-                defmt::warn!(
-                    "amplifier vanished: bus {} addr {=u8:#04x} (index {})",
-                    slot.bus().as_u8(),
-                    address,
-                    slot.amplifier().as_u8()
-                );
+        if was == present {
+            return;
+        }
+        match target {
+            ProbeTarget::Amplifier(slot) => {
+                let address = AMPLIFIER_ADDRESSES[slot.amplifier()];
+                if present {
+                    defmt::info!(
+                        "amplifier appeared: bus {} addr {=u8:#04x} (index {})",
+                        bus.as_u8(),
+                        address,
+                        slot.amplifier().as_u8()
+                    );
+                } else {
+                    defmt::warn!(
+                        "amplifier vanished: bus {} addr {=u8:#04x} (index {})",
+                        bus.as_u8(),
+                        address,
+                        slot.amplifier().as_u8()
+                    );
+                }
             }
+            ProbeTarget::Encoder(_) => {
+                if present {
+                    defmt::info!("as5600 appeared: bus {} addr {=u8:#04x}", bus.as_u8(), ENCODER_ADDRESS);
+                } else {
+                    defmt::warn!("as5600 vanished: bus {} addr {=u8:#04x}", bus.as_u8(), ENCODER_ADDRESS);
+                }
+            }
+        }
+    }
+
+    /// Record what the encoder thinks of its magnet, logging the transitions the way presence is.
+    ///
+    /// Worth its own bit because the failure is quiet: a magnet that has drifted too far from the
+    /// die still produces an angle, just not the right one.
+    fn set_magnet_ok(&mut self, bus: I2cBus, ok: bool) {
+        let mask = &mut self.present[bus];
+        let was = *mask & ENCODER_MAGNET_OK_BIT != 0;
+        if ok {
+            *mask |= ENCODER_MAGNET_OK_BIT;
+        } else {
+            *mask &= !ENCODER_MAGNET_OK_BIT;
+        }
+        if was != ok && !ok {
+            defmt::warn!("as5600 on bus {}: magnet missing or out of range, angle is not usable", bus.as_u8());
         }
     }
 
@@ -208,7 +343,7 @@ impl<I0: I2c, I1: I2c> Sensors<I0, I1> {
         }
     }
 
-    /// Read every amplifier currently believed present.
+    /// Read every device currently believed present.
     async fn sample(&mut self, _config: &Config) {
         for slot in AdcSlot::ALL {
             if !self.is_present(slot) {
@@ -228,7 +363,25 @@ impl<I0: I2c, I1: I2c> Sensors<I0, I1> {
                     // will find it again if it comes back. This is what makes a cable knocked
                     // loose during assembly visible instead of silently freezing a reading.
                     self.raw[slot] = RAW_INVALID;
-                    self.set_present(slot, false);
+                    self.set_present(ProbeTarget::Amplifier(slot), false);
+                }
+            }
+        }
+
+        for bus in I2cBus::ALL {
+            if !self.encoder_present(bus) {
+                self.raw_angle[bus] = RAW_INVALID;
+                continue;
+            }
+            match self.buses.read_angle(bus).await {
+                Some(reading) => {
+                    self.raw_angle[bus] = reading.angle;
+                    self.set_magnet_ok(bus, reading.magnet_detected && !reading.magnet_out_of_range);
+                }
+                None => {
+                    self.raw_angle[bus] = RAW_INVALID;
+                    self.set_present(ProbeTarget::Encoder(bus), false);
+                    self.set_magnet_ok(bus, false);
                 }
             }
         }
@@ -236,40 +389,52 @@ impl<I0: I2c, I1: I2c> Sensors<I0, I1> {
 
     /// Probe at most one address, so scanning never costs more than one NACK per tick.
     async fn scan_step(&mut self, config: &Config, now: Instant) {
-        let Some(slot) = self.scan.due(config, now) else {
+        let Some(target) = self.scan.due(config, now) else {
             return;
         };
-        if self.is_present(slot) {
-            // Already sampling it; no need to spend a transfer confirming that.
-            if self.scan.wrapped() {
-                self.sweeps = self.sweeps.wrapping_add(1);
+        let already_here = match target {
+            ProbeTarget::Amplifier(slot) => self.is_present(slot),
+            ProbeTarget::Encoder(bus) => self.encoder_present(bus),
+        };
+        // Already sampling it; no need to spend a transfer confirming that.
+        if !already_here {
+            let answered = match target {
+                ProbeTarget::Amplifier(slot) => {
+                    self.buses.probe(slot.bus(), AMPLIFIER_ADDRESSES[slot.amplifier()]).await
+                }
+                ProbeTarget::Encoder(bus) => self.buses.probe_angle(bus).await,
+            };
+            if answered {
+                self.set_present(target, true);
             }
-            return;
-        }
-
-        let address = AMPLIFIER_ADDRESSES[slot.amplifier()];
-        if self.buses.probe(slot.bus(), address).await {
-            self.set_present(slot, true);
         }
         if self.scan.wrapped() {
             self.sweeps = self.sweeps.wrapping_add(1);
         }
     }
 
+    /// The raw reading feeding a slot, or `None` when its device is absent or it has no source.
+    fn raw_for(&self, slot: &SensorSlotConfig) -> Option<u16> {
+        let raw = match slot.source()? {
+            SensorSource::Adc(adc) => self.raw[adc],
+            SensorSource::Encoder(bus) => self.raw_angle[bus],
+        };
+        (raw != RAW_INVALID).then_some(raw)
+    }
+
     async fn publish(&mut self, config: &Config) {
         let mut values = PerSensorSlot::splat(SENSOR_INVALID);
         for (id, slot) in config.sensors.iter() {
-            values[id] = match slot.adc_slot() {
-                Some(adc) if self.raw[adc] != RAW_INVALID => calibrate(slot, Some(self.raw[adc])),
-                _ => SENSOR_INVALID,
-            };
+            values[id] = calibrate(slot, self.raw_for(slot));
         }
 
         let mut store = STORE.lock().await;
         store.raw_adc = self.raw;
+        store.raw_angle = self.raw_angle;
         store.i2c_present = self.present;
         store.i2c_sweeps = self.sweeps;
         store.sensor_value = values;
+        store.refresh_pdo_sensors();
     }
 }
 
@@ -286,7 +451,7 @@ mod tests {
     use embedded_hal_async::i2c::{Error as I2cError, ErrorKind, ErrorType, Operation};
 
     use super::*;
-    use crate::config::{NUM_ADC_SLOTS, NUM_AMPLIFIERS, PressureCalib};
+    use crate::config::{NUM_ADC_SLOTS, SensorCalib};
     use crate::index::{AmplifierId, I2cBus};
 
     /// Answers with a fixed 2-byte conversion register for addresses it's been told to have a
@@ -369,7 +534,7 @@ mod tests {
         let mut bus0 = MockI2c::new();
         bus0.respond(AMPLIFIER_ADDRESSES[AmplifierId::Amp0], 512, false);
         let mut sensors = sensors_with(bus0, MockI2c::new());
-        sensors.set_present(AdcSlot::new(I2cBus::Bus0, AmplifierId::Amp0), true);
+        sensors.set_present(ProbeTarget::Amplifier(AdcSlot::new(I2cBus::Bus0, AmplifierId::Amp0)), true);
 
         block_on(sensors.sample(&Config::new()));
 
@@ -382,7 +547,7 @@ mod tests {
         bus1.respond(AMPLIFIER_ADDRESSES[AmplifierId::Amp2], 300, false);
         let mut sensors = sensors_with(MockI2c::new(), bus1);
         let slot = AdcSlot::new(I2cBus::Bus1, AmplifierId::Amp2);
-        sensors.set_present(slot, true);
+        sensors.set_present(ProbeTarget::Amplifier(slot), true);
 
         block_on(sensors.sample(&Config::new()));
 
@@ -393,7 +558,7 @@ mod tests {
     fn a_nacked_read_marks_the_slot_absent() {
         // Present but nobody answers this tick: a cable knocked loose during assembly.
         let mut sensors = sensors_with(MockI2c::new(), MockI2c::new());
-        sensors.set_present(AdcSlot::new(I2cBus::Bus0, AmplifierId::Amp0), true);
+        sensors.set_present(ProbeTarget::Amplifier(AdcSlot::new(I2cBus::Bus0, AmplifierId::Amp0)), true);
 
         block_on(sensors.sample(&Config::new()));
 
@@ -409,7 +574,7 @@ mod tests {
         let mut bus0 = MockI2c::new();
         bus0.respond(AMPLIFIER_ADDRESSES[AmplifierId::Amp0], 200, true);
         let mut sensors = sensors_with(bus0, MockI2c::new());
-        sensors.set_present(AdcSlot::new(I2cBus::Bus0, AmplifierId::Amp0), true);
+        sensors.set_present(ProbeTarget::Amplifier(AdcSlot::new(I2cBus::Bus0, AmplifierId::Amp0)), true);
 
         block_on(sensors.sample(&Config::new()));
 
@@ -452,20 +617,191 @@ mod tests {
     fn pt1000_midscale_is_zero_celsius() {
         // 512 counts puts the amplifier output exactly at its 1.65 V offset, so the bridge is
         // balanced and the RTD is at its nominal 1000 ohm.
-        assert_eq!(pt1000_centi_celsius(512), 0);
+        assert_eq!(pt1000_milli_celsius(512), 0);
     }
 
     #[test]
     fn pt1000_matches_the_float_derivation() {
         // Worked through the float chain by hand: 600 counts -> 8.489 degrees C.
-        assert_eq!(pt1000_centi_celsius(600), 848);
+        assert_eq!(pt1000_milli_celsius(600), 8488);
+    }
+
+    /// A slot that has been told what it is but not what its numbers mean must say so, rather
+    /// than reporting the constant term a zero slope would otherwise produce. A transducer
+    /// confidently reading 0.00 bar is far more dangerous than one admitting it has no reading.
+    #[test]
+    fn an_uncalibrated_slot_reports_no_reading() {
+        let mut slot = SensorSlotConfig::pressure(
+            I2cBus::Bus0,
+            AmplifierId::Amp0,
+            Unit::CentiBar,
+            crate::config::SensorCalib::ZERO,
+        );
+        assert_eq!(calibrate(&slot, Some(600)), SENSOR_INVALID);
+
+        // A constant with no slope is still not a calibration — it is the same number forever.
+        slot.calib.constant_milli = 5_000;
+        assert_eq!(calibrate(&slot, Some(600)), SENSOR_INVALID);
+
+        // The moment a slope arrives it is a real sensor again.
+        slot.calib.slope_nano = 100_000_000;
+        assert_eq!(calibrate(&slot, Some(600)), 6500);
+    }
+
+    /// Raw counts are what you read *while* working a calibration out, so the bypass has to come
+    /// before the uncalibrated check — otherwise there would be no way to see the numbers you
+    /// need in order to stop being uncalibrated.
+    #[test]
+    fn an_uncalibrated_slot_still_shows_raw_counts() {
+        let mut slot = SensorSlotConfig::pressure(
+            I2cBus::Bus0,
+            AmplifierId::Amp0,
+            Unit::RawCounts,
+            crate::config::SensorCalib::ZERO,
+        );
+        assert_eq!(calibrate(&slot, Some(600)), 600);
+
+        slot.kind = SensorKind::Angle;
+        assert_eq!(calibrate(&slot, Some(2048)), 2048, "the same has to hold for an encoder's stops");
+    }
+
+    /// The two kinds whose transfer function is a property of the board or the part number come
+    /// up working with no calibration written at all; the two whose curve is per-installation
+    /// stay silent until someone supplies one.
+    #[test]
+    fn only_the_kinds_with_a_board_level_curve_have_a_working_default() {
+        for (kind, works) in [
+            (SensorKind::Pt1000, true),
+            (SensorKind::Mcp9700, true),
+            (SensorKind::Pressure, false),
+            (SensorKind::Angle, false),
+        ] {
+            let slot = SensorSlotConfig {
+                kind,
+                bus: Some(I2cBus::Bus0),
+                unit: kind.natural_unit(),
+                calib: kind.default_calib(),
+                ..SensorSlotConfig::unused()
+            };
+            assert_eq!(
+                calibrate(&slot, Some(600)) != SENSOR_INVALID,
+                works,
+                "{kind:?} should {} report on its default calibration",
+                if works { "" } else { "not" }
+            );
+        }
+    }
+
+    /// The bridge is the board; the slot's calibration is the trim on top of it. A Pt1000 slot
+    /// straight out of the factory defaults must therefore report exactly the bridge, or the
+    /// trim has quietly become part of the curve.
+    #[test]
+    fn an_untrimmed_pt1000_slot_reports_the_bridge_verbatim() {
+        let slot = SensorSlotConfig::pt1000(I2cBus::Bus0, AmplifierId::Amp0);
+        assert_eq!(calibrate(&slot, Some(512)), 0);
+        // 8.489 degrees C, in the centicelsius the slot reports.
+        assert_eq!(calibrate(&slot, Some(600)), 848);
+    }
+
+    /// What an operator actually does with a Pt1000: put it in an ice bath, see it read half a
+    /// degree high, and take that back out. The offset is in microcelsius because the bridge
+    /// linearises to millicelsius — see the table on `SensorCalib`.
+    #[test]
+    fn a_pt1000_offset_trim_shifts_the_reading() {
+        let mut slot = SensorSlotConfig::pt1000(I2cBus::Bus0, AmplifierId::Amp0);
+        slot.calib.offset_milli = 500;
+        assert_eq!(calibrate(&slot, Some(512)), -50, "half a degree, in centicelsius");
+        assert_eq!(calibrate(&slot, Some(600)), 798);
+    }
+
+    /// The MCP9700's datasheet curve against a 3.3 V, 10-bit conversion, with no trim applied:
+    /// 500 mV at 0 degC, 10 mV per degree.
+    #[test]
+    fn an_mcp9700_follows_its_datasheet_curve() {
+        let slot = SensorSlotConfig::mcp9700(I2cBus::Bus0, AmplifierId::Amp0);
+        // 155.15 counts is 0.5 V, the sensor's zero.
+        assert_eq!(calibrate(&slot, Some(155)), -4, "within a rounding step of zero");
+        // 500 counts is 1.611 V, i.e. 111.1 degC.
+        assert_eq!(calibrate(&slot, Some(500)), 11113);
+    }
+
+    /// The two temperature kinds are calibrated through the same three fields, which is the whole
+    /// point of one calibration record: a gain trim means the same thing on either.
+    #[test]
+    fn a_gain_trim_scales_either_temperature_kind() {
+        for mut slot in [
+            SensorSlotConfig::pt1000(I2cBus::Bus0, AmplifierId::Amp0),
+            SensorSlotConfig::mcp9700(I2cBus::Bus0, AmplifierId::Amp0),
+        ] {
+            let nominal = calibrate(&slot, Some(700)) as i32;
+            slot.calib.slope_nano = (slot.calib.slope_nano as i64 * 11 / 10) as i32;
+            let trimmed = calibrate(&slot, Some(700)) as i32;
+            // Within a count, since the trimmed slope itself is rounded to an integer nano-unit.
+            assert!(
+                (trimmed - nominal * 11 / 10).abs() <= 1,
+                "a 10% gain trim should scale the reading by 10%: {nominal} -> {trimmed}"
+            );
+        }
+    }
+
+    /// An encoder whose valve sweeps a quarter turn: closed at count 100, open at 1124.
+    #[test]
+    fn an_encoder_maps_its_travel_onto_promille() {
+        let slot = SensorSlotConfig::encoder(I2cBus::Bus0, 100, 1024);
+        assert_eq!(calibrate(&slot, Some(100)), 0, "the closed stop");
+        assert_eq!(calibrate(&slot, Some(612)), 500, "halfway");
+        assert_eq!(calibrate(&slot, Some(1124)), 1000, "the open stop");
+    }
+
+    /// The reason the encoder's zeroing wraps rather than subtracting: a valve whose closed stop
+    /// sits near the top of the turn still reads 0 there and climbs, instead of jumping the
+    /// whole scale as it crosses the encoder's own origin.
+    #[test]
+    fn an_encoder_zero_near_the_wrap_point_still_climbs() {
+        // Closed at count 4000, open a quarter turn later at 928 — across the wrap.
+        let slot = SensorSlotConfig::encoder(I2cBus::Bus0, 4000, 1024);
+        assert_eq!(calibrate(&slot, Some(4000)), 0);
+        assert_eq!(calibrate(&slot, Some(4090)), 87, "still just short of the stop");
+        assert_eq!(calibrate(&slot, Some(0)), 93, "past the wrap, and still climbing");
+        assert_eq!(calibrate(&slot, Some(928)), 1000, "the open stop");
+    }
+
+    /// A valve that opens counter-clockwise: the same quarter turn, walked the other way. Without
+    /// the signed span its travel would sit at the far end of the turn from its own zero.
+    #[test]
+    fn an_encoder_on_a_reversed_valve_still_opens_upward() {
+        // Closed at count 1124, open a quarter turn *below* it at 100.
+        let slot = SensorSlotConfig::encoder(I2cBus::Bus0, 1124, -1024);
+        assert_eq!(calibrate(&slot, Some(1124)), 0, "the closed stop");
+        assert_eq!(calibrate(&slot, Some(612)), 500, "halfway");
+        assert_eq!(calibrate(&slot, Some(100)), 1000, "the open stop");
+    }
+
+    /// Reversed travel across the encoder's wrap point, which is the case that has both
+    /// complications at once.
+    #[test]
+    fn a_reversed_encoder_also_crosses_the_wrap_point() {
+        // Closed at 500, open a quarter turn below at 3572 — down through zero.
+        let slot = SensorSlotConfig::encoder(I2cBus::Bus0, 500, -1024);
+        assert_eq!(calibrate(&slot, Some(500)), 0);
+        assert_eq!(calibrate(&slot, Some(4090)), 494, "just past the wrap, about halfway open");
+        assert_eq!(calibrate(&slot, Some(3572)), 1000, "the open stop");
+    }
+
+    /// Reading the stops is the first half of commissioning an encoder, and it has to work
+    /// before there is any calibration to read them through.
+    #[test]
+    fn an_encoder_on_raw_counts_reports_the_angle_itself() {
+        let mut slot = SensorSlotConfig::encoder(I2cBus::Bus0, 0, ENCODER_FULL_SCALE as i16);
+        slot.unit = Unit::RawCounts;
+        assert_eq!(calibrate(&slot, Some(2048)), 2048);
     }
 
     #[test]
     fn pt1000_is_monotonic_across_the_range() {
         let mut previous = i32::MIN;
         for raw in 0..=1023u16 {
-            let t = pt1000_centi_celsius(raw);
+            let t = pt1000_milli_celsius(raw);
             assert!(t > previous, "not monotonic at raw={raw}");
             previous = t;
         }
@@ -475,7 +811,7 @@ mod tests {
     /// `pressure_bar = (adc_reading - offset) * linear_factor`.
     #[test]
     fn the_plain_linear_form_has_no_constant_term() {
-        let calib = PressureCalib::from_bar_per_count(100.0, 0.1);
+        let calib = SensorCalib::from_per_count(100.0, 0.1);
         let slot = SensorSlotConfig::pressure(I2cBus::Bus0, AmplifierId::Amp0, Unit::CentiBar, calib);
 
         // At the offset the sensor reads exactly zero, not ambient.
@@ -486,7 +822,7 @@ mod tests {
 
     #[test]
     fn a_constant_term_shifts_the_whole_curve() {
-        let calib = PressureCalib::from_bar_per_count(100.0, 0.1).with_constant_bar(1.013);
+        let calib = SensorCalib::from_per_count(100.0, 0.1).with_constant(1.013);
         let slot = SensorSlotConfig::pressure(I2cBus::Bus0, AmplifierId::Amp0, Unit::CentiBar, calib);
 
         assert_eq!(calibrate(&slot, Some(100)), 101, "1.013 bar, in centibar");
@@ -496,7 +832,7 @@ mod tests {
     #[test]
     fn a_400_bar_sensor_needs_decibar_to_avoid_clipping() {
         // 0.911 bar per count with no offset: full scale is well past what centibar can hold.
-        let calib = PressureCalib::from_bar_per_count(0.0, 0.911_161_7);
+        let calib = SensorCalib::from_per_count(0.0, 0.911_161_7);
         let centibar = SensorSlotConfig::pressure(I2cBus::Bus0, AmplifierId::Amp0, Unit::CentiBar, calib);
         let decibar = SensorSlotConfig::pressure(I2cBus::Bus0, AmplifierId::Amp0, Unit::DeciBar, calib);
 
@@ -508,7 +844,7 @@ mod tests {
 
     #[test]
     fn a_40_bar_sensor_keeps_its_resolution_in_centibar() {
-        let calib = PressureCalib::from_bar_per_count(15.0, 0.0855);
+        let calib = SensorCalib::from_per_count(15.0, 0.0855);
         let slot = SensorSlotConfig::pressure(I2cBus::Bus0, AmplifierId::Amp0, Unit::CentiBar, calib);
         // (500 - 15) * 0.0855 bar = 41.4675 bar = 4146 centibar.
         assert_eq!(calibrate(&slot, Some(500)), 4146);
@@ -517,7 +853,7 @@ mod tests {
     #[test]
     fn a_negative_offset_is_handled() {
         // D_40BAR has offset -385, so every reading sits above the zero point.
-        let calib = PressureCalib::from_bar_per_count(-385.0, 0.0535);
+        let calib = SensorCalib::from_per_count(-385.0, 0.0535);
         let slot = SensorSlotConfig::pressure(I2cBus::Bus0, AmplifierId::Amp0, Unit::CentiBar, calib);
         // (0 - -385) * 0.0535 bar = 20.5975 bar.
         assert_eq!(calibrate(&slot, Some(0)), 2059);
@@ -527,7 +863,7 @@ mod tests {
     fn a_reading_below_the_offset_goes_negative() {
         // Gauge pressure below the calibration zero is a real reading, not an error, so it must
         // survive as a negative number rather than wrapping.
-        let calib = PressureCalib::from_bar_per_count(500.0, 0.1);
+        let calib = SensorCalib::from_per_count(500.0, 0.1);
         let slot = SensorSlotConfig::pressure(I2cBus::Bus0, AmplifierId::Amp0, Unit::CentiBar, calib);
         assert_eq!(calibrate(&slot, Some(400)), -1000);
     }
@@ -544,7 +880,7 @@ mod tests {
             I2cBus::Bus0,
             AmplifierId::Amp0,
             Unit::RawCounts,
-            PressureCalib::from_bar_per_count(9.0, 9.0),
+            SensorCalib::from_per_count(9.0, 9.0),
         );
         slot.unit = Unit::RawCounts;
         assert_eq!(calibrate(&slot, Some(777)), 777);
@@ -557,18 +893,21 @@ mod tests {
     }
 
     #[test]
-    fn the_scan_visits_every_slot_before_repeating() {
+    fn the_scan_visits_every_address_before_repeating() {
         let mut cursor = ScanCursor::new(Instant::from_millis(0));
         let cfg = Config::new();
-        let mut seen = [false; NUM_ADC_SLOTS];
+        let mut seen: Vec<ProbeTarget> = Vec::new();
 
-        for step in 1..=NUM_ADC_SLOTS as u64 {
+        for step in 1..=ProbeTarget::COUNT as u64 {
             let now = Instant::from_millis(step * cfg.scan_interval_ms as u64);
-            let slot = cursor.due(&cfg, now).expect("a probe is due");
-            assert!(!seen[slot.index()], "slot {slot:?} probed twice in one sweep");
-            seen[slot.index()] = true;
+            let target = cursor.due(&cfg, now).expect("a probe is due");
+            assert!(!seen.contains(&target), "{target:?} probed twice in one sweep");
+            seen.push(target);
         }
-        assert!(seen.iter().all(|s| *s));
+        assert_eq!(seen.len(), NUM_ADC_SLOTS + 2, "every amplifier plus one encoder per bus");
+        // The encoders are the tail of the sweep, so they are probed exactly as often as any one
+        // amplifier rather than once per amplifier.
+        assert_eq!(seen[NUM_ADC_SLOTS..], [ProbeTarget::Encoder(I2cBus::Bus0), ProbeTarget::Encoder(I2cBus::Bus1)]);
         assert!(cursor.wrapped(), "the sweep should have wrapped");
     }
 

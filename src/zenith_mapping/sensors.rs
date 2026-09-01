@@ -5,7 +5,7 @@
 //! board straight out of a re-flash.
 //!
 //! The numbers stay in human-readable bar-per-count, exactly as measured on the bench and
-//! recorded on the wiki, and [`crate::config::PressureCalib::from_bar_per_count`] folds them to
+//! recorded on the wiki, and [`crate::config::SensorCalib::from_per_count`] folds them to
 //! fixed point in the compiler. Nothing here reaches the target as a float.
 //!
 //! These are calibrated as
@@ -14,7 +14,7 @@
 //!   pressure_bar = (adc_reading - offset) * linear_factor
 //! ```
 //!
-//! with no constant term. A transducer that instead wants one — `.with_constant_bar(1.013)`, to
+//! with no constant term. A transducer that instead wants one — `.with_constant(1.013)`, to
 //! report absolute rather than gauge pressure — says so at its own definition, so the convention
 //! is never left implicit.
 //!
@@ -25,7 +25,7 @@
     reason = "constant source of truth for calibration data"
 )]
 
-use crate::config::{PressureCalib as P, Unit};
+use crate::config::{SensorCalib as P, Unit};
 
 /// A transducer's calibration together with the unit its readings are reported in.
 ///
@@ -40,14 +40,14 @@ pub struct Transducer {
 
 const fn centibar(offset: f32, bar_per_count: f32) -> Transducer {
     Transducer {
-        calib: P::from_bar_per_count(offset, bar_per_count),
+        calib: P::from_per_count(offset, bar_per_count),
         unit: Unit::CentiBar,
     }
 }
 
 const fn decibar(offset: f32, bar_per_count: f32) -> Transducer {
     Transducer {
-        calib: P::from_bar_per_count(offset, bar_per_count),
+        calib: P::from_per_count(offset, bar_per_count),
         unit: Unit::DeciBar,
     }
 }

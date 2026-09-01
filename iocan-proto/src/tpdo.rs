@@ -18,9 +18,12 @@
 
 use crate::ids::TpdoKind;
 
-/// Number of sensor slots this protocol can carry over TPDO: [`TpdoFrame::Sensor0`] (slots
-/// 0..4), [`TpdoFrame::Sensor1`] (4..8) and [`TpdoFrame::Sensor3`] (8..12). Independent of any
-/// one node's actual sensor slot count — see [`TpdoFrame::Sensor3`]'s doc for why.
+/// Number of sensor *channels* this protocol can carry over TPDO: [`TpdoFrame::Sensor0`]
+/// (channels 0..4), [`TpdoFrame::Sensor1`] (4..8) and [`TpdoFrame::Sensor3`] (8..12).
+///
+/// A channel is a position in those three frames, not a node's sensor slot. A node may have more
+/// slots than there are channels — it does today — and decides for itself which slot, if any,
+/// occupies each channel; a channel nothing claims reads as `i16::MIN`.
 pub const NUM_PROTOCOL_SENSOR_SLOTS: usize = 12;
 
 /// One high current output's state, as packed into [`TpdoFrame::HcoState`].
@@ -91,17 +94,15 @@ pub enum TpdoFrame {
     RawBus1A([u16; 4]),
     /// A window of 0x2001 (I2C bus 1): amplifier indices 4..8.
     RawBus1B([u16; 4]),
-    /// A window of 0x2004 (calibrated sensor values): slots 0..4.
+    /// Calibrated values for sensor channels 0..4. Which slot feeds a channel is the node's own
+    /// choice (0x3027); an unclaimed channel is `i16::MIN`.
     Sensor0([i16; 4]),
-    /// A window of 0x2004 (calibrated sensor values): slots 4..8.
+    /// Calibrated values for sensor channels 4..8.
     Sensor1([i16; 4]),
-    /// A window of 0x2004 (calibrated sensor values): slots 8..12. No node built against this
-    /// protocol has more than 8 sensor slots today, so in practice every slot here reads as
-    /// "invalid" — kept as a real kind rather than reserved for later so a board with more
-    /// amplifier headroom does not need a protocol version bump to use it.
+    /// Calibrated values for sensor channels 8..12.
     Sensor3([i16; 4]),
-    /// Mirrors 0x2005: the unit code each sensor slot reports its value in, 2 bits per slot
-    /// (4 possible units) so all 12 protocol-wide slots fit in 3 of the 8 bytes.
+    /// The unit code each sensor channel reports its value in, 4 bits per channel (16 possible
+    /// units) so all 12 channels fit in 6 of the 8 bytes.
     SensorUnits([u8; NUM_PROTOCOL_SENSOR_SLOTS]),
     /// `present` mirrors 0x2002, `sweeps` mirrors 0x2003 (truncated to 16 bits). The remaining 2
     /// bytes are unused padding.
@@ -178,7 +179,7 @@ impl TpdoFrame {
             }
             Self::SensorUnits(units) => {
                 let mut out = [0u8; 8];
-                out[..3].copy_from_slice(&pack_2bit(units));
+                out[..6].copy_from_slice(&pack_nibbles_12(units));
                 out
             }
             Self::I2cScan { present, sweeps } => u16x4_to_bytes([present[0], present[1], sweeps, 0]),
@@ -222,7 +223,7 @@ impl TpdoFrame {
                 hco_owner: unpack_nibbles(bytes[2..4].try_into().unwrap()),
                 relief_state: bytes[4],
             },
-            TpdoKind::SensorUnits => Self::SensorUnits(unpack_2bit(bytes[..3].try_into().unwrap())),
+            TpdoKind::SensorUnits => Self::SensorUnits(unpack_nibbles_12(bytes[..6].try_into().unwrap())),
             TpdoKind::I2cScan => {
                 let words = u16x4_from_bytes(bytes);
                 Self::I2cScan {
@@ -277,9 +278,8 @@ pub fn i16x4_from_bytes(bytes: [u8; 8]) -> [i16; 4] {
     u16x4_from_bytes(bytes).map(|v| v as i16)
 }
 
-/// Four 4-bit values, low nibble first, into 2 bytes. Callers are responsible for keeping each
-/// value under 16 — every current use (`ValveStatus`, `ValveStatus::Stalled` = 4, `hco_owner`'s
-/// 0..=4) has comfortable headroom below that.
+/// Four 4-bit values, low nibble first, into 2 bytes.
+/// Caller is responsible for keeping each value under 16.
 fn pack_nibbles(values: [u8; 4]) -> [u8; 2] {
     [values[0] | (values[1] << 4), values[2] | (values[3] << 4)]
 }
@@ -289,20 +289,22 @@ fn unpack_nibbles(bytes: [u8; 2]) -> [u8; 4] {
     [bytes[0] & 0xF, bytes[0] >> 4, bytes[1] & 0xF, bytes[1] >> 4]
 }
 
-/// [`NUM_PROTOCOL_SENSOR_SLOTS`] 2-bit values, low bits first, into 3 bytes.
-fn pack_2bit(values: [u8; NUM_PROTOCOL_SENSOR_SLOTS]) -> [u8; 3] {
-    let mut out = [0u8; 3];
+/// [`NUM_PROTOCOL_SENSOR_SLOTS`] 4-bit values, low nibble first, into 6 bytes. Values above 15
+/// are truncated, which is the caller's problem: the unit table this carries is nowhere near
+/// that long.
+fn pack_nibbles_12(values: [u8; NUM_PROTOCOL_SENSOR_SLOTS]) -> [u8; 6] {
+    let mut out = [0u8; 6];
     for (i, &v) in values.iter().enumerate() {
-        out[i / 4] |= (v & 0b11) << ((i % 4) * 2);
+        out[i / 2] |= (v & 0xF) << ((i % 2) * 4);
     }
     out
 }
 
-/// The inverse of [`pack_2bit`].
-fn unpack_2bit(bytes: [u8; 3]) -> [u8; NUM_PROTOCOL_SENSOR_SLOTS] {
+/// The inverse of [`pack_nibbles_12`].
+fn unpack_nibbles_12(bytes: [u8; 6]) -> [u8; NUM_PROTOCOL_SENSOR_SLOTS] {
     let mut out = [0u8; NUM_PROTOCOL_SENSOR_SLOTS];
     for (i, slot) in out.iter_mut().enumerate() {
-        *slot = (bytes[i / 4] >> ((i % 4) * 2)) & 0b11;
+        *slot = (bytes[i / 2] >> ((i % 2) * 4)) & 0xF;
     }
     out
 }
@@ -338,7 +340,7 @@ mod tests {
             TpdoFrame::Sensor0([-1, -2, -3, i16::MIN]),
             TpdoFrame::Sensor1([1, 2, 3, i16::MAX]),
             TpdoFrame::Sensor3([0, 0, 0, 0]),
-            TpdoFrame::SensorUnits([0, 1, 2, 3, 0, 1, 2, 3, 3, 2, 1, 0]),
+            TpdoFrame::SensorUnits([0, 1, 2, 3, 4, 1, 2, 3, 4, 2, 1, 0]),
             TpdoFrame::I2cScan {
                 present: [0b1010, 0b0101],
                 sweeps: 42,
@@ -404,11 +406,20 @@ mod tests {
     }
 
     #[test]
-    fn sensor_units_packs_all_twelve_slots_into_three_bytes() {
-        let frame = TpdoFrame::SensorUnits([0, 1, 2, 3, 3, 2, 1, 0, 1, 1, 1, 1]);
+    fn sensor_units_packs_all_twelve_channels_into_six_bytes() {
+        let frame = TpdoFrame::SensorUnits([0, 1, 2, 3, 4, 2, 1, 0, 1, 1, 1, 1]);
         let bytes = frame.encode();
-        assert_eq!(bytes[3..], [0, 0, 0, 0, 0], "only the first 3 bytes carry data");
+        assert_eq!(bytes[0], 0x10, "channel 0 in the low nibble, channel 1 in the high one");
+        assert_eq!(bytes[6..], [0, 0], "only the first 6 bytes carry data");
         assert_eq!(TpdoFrame::decode(TpdoKind::SensorUnits, bytes), frame);
+    }
+
+    /// The widening from 2 bits to 4 is what makes a fifth unit code expressible at all; under
+    /// the old packing `Promille` (4) aliased onto `CentiBar` (0).
+    #[test]
+    fn a_unit_code_above_three_survives_the_packing() {
+        let frame = TpdoFrame::SensorUnits([4; NUM_PROTOCOL_SENSOR_SLOTS]);
+        assert_eq!(TpdoFrame::decode(TpdoKind::SensorUnits, frame.encode()), frame);
     }
 
     #[test]

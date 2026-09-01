@@ -14,348 +14,47 @@
 //!
 //! Every field here is expressible as one expedited SDO transfer (at most 4 bytes), which is what
 //! keeps the config plane to a single request/response frame pair per value.
+//!
+//! # Layout
+//!
+//! [`Config`] itself, its cross-cutting invariants ([`Config::sanity_check`]) and the build-time
+//! [`NodeSettings`] live here. The three sub-domains it is made of get a module each, and every
+//! public name in them is re-exported below — so `crate::config::Unit` keeps working regardless
+//! of which file it happens to be defined in:
+//!
+//! - [`valves`] — what is fitted to a valve slot and how it is driven.
+//! - [`sensors`] — what is on a sensor slot, how its raw number is calibrated, and in what unit.
+//! - [`relief`] — the local overpressure loop.
+//! - [`persist`] — serializing the whole thing to NOR flash.
 
 pub mod persist;
+pub mod relief;
+pub mod sensors;
+pub mod valves;
 
-use crate::index::{
-    AdcSlot, AmplifierId, HcoId, HcoPair, I2cBus, PerAmplifier, PerSensorSlot, PerTpdoKind, PerValve, SensorSlot,
-    ValveId,
+use crate::index::{HcoId, I2cBus, PdoSensorChannel, PerSensorSlot, PerTpdoKind, PerValve, SensorSlot, ValveId};
+
+pub use relief::ReliefConfig;
+pub use sensors::{
+    AMPLIFIER_ADDRESSES, ENCODER_ADDRESS, ENCODER_FULL_SCALE, ENCODER_MAGNET_OK_BIT, ENCODER_PRESENT_BIT,
+    NUM_ADC_SLOTS, NUM_AMPLIFIERS, NUM_PDO_SENSOR_CHANNELS, NUM_SENSOR_SLOTS, Quantity, SensorCalib, SensorKind,
+    SensorSlotConfig, SensorSource, Unit, UnitPrefix,
 };
+pub use valves::{FallbackAction, NUM_HCO, NUM_VALVES, PROMILLE_MAX, ValveConfig, ValveKind};
 
-/// Sizes of the fixed domains. Each is the count of the matching id type in [`crate::index`] —
-/// kept as plain constants only for the places that genuinely want a number (a CANopen array's
-/// entry count, a log line), never as the basis for an index.
-pub const NUM_VALVES: usize = ValveId::COUNT;
-pub const NUM_HCO: usize = HcoId::COUNT;
-pub const NUM_SENSOR_SLOTS: usize = SensorSlot::COUNT;
+use valves::shares_output;
+
+/// Size of the one fixed domain that is not a valve or a sensor.
+///
+/// The `NUM_*` constants are each the count of the matching id type in [`crate::index`] — kept as
+/// plain numbers only for the places that genuinely want one (a CANopen array's entry count, a log
+/// line), never as the basis for an index.
 pub const NUM_I2C_BUSES: usize = I2cBus::COUNT;
-
-/// ADC101C027 amplifier addresses, in scan order. Everything that talks about an "amplifier
-/// index" means an [`AmplifierId`], never a raw I2C address — the index is what travels over CAN,
-/// so that a 9-entry bitmap fits one u16 per bus.
-pub const AMPLIFIER_ADDRESSES: PerAmplifier<u8> = PerAmplifier::new([
-    0b101_0000, // floating, floating
-    0b101_0001, // floating, gnd
-    0b101_0010, // floating, vcc
-    0b101_0100, // gnd, floating
-    0b101_0101, // gnd, gnd
-    0b101_0110, // gnd, vcc
-    0b101_1000, // vcc, floating
-    0b101_1001, // vcc, gnd
-    0b101_1010, // vcc, vcc
-]);
-
-pub const NUM_AMPLIFIERS: usize = AmplifierId::COUNT;
-/// Every probe-able amplifier slot on the board: both buses, all nine straps.
-pub const NUM_ADC_SLOTS: usize = AdcSlot::COUNT;
 
 /// Number of fixed TPDO kinds. Defined in `iocan-proto` (the wire protocol crate) so `TpdoKind`
 /// and this array size can never drift apart; re-exported here since so much of the object
 /// dictionary (0x3040's `array_size` among it) is sized against it.
 pub use iocan_proto::ids::NUM_TPDO_KINDS;
-
-/// A valve position, 0 = fully closed, 1000 = fully open.
-pub const PROMILLE_MAX: u16 = 1000;
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug, defmt::Format)]
-#[repr(u8)]
-pub enum ValveKind {
-    /// No valve fitted on this slot. Commands to it are rejected.
-    None = 0,
-    /// On/off coil on a single output. Any non-zero promille energises it.
-    Solenoid = 1,
-    /// Hobby-style servo on a PWM output, optionally with a separate power output that lets us
-    /// take it to [`crate::valves::ValveStatus::Unpowered`].
-    Servo = 2,
-}
-
-impl ValveKind {
-    pub const fn from_u8(v: u8) -> Option<Self> {
-        match v {
-            0 => Some(Self::None),
-            1 => Some(Self::Solenoid),
-            2 => Some(Self::Servo),
-            _ => None,
-        }
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug, defmt::Format)]
-#[repr(u8)]
-pub enum SensorKind {
-    None = 0,
-    /// Linear pressure transducer through an instrumentation amplifier.
-    Pressure = 1,
-    /// Pt1000 RTD in a Wheatstone bridge, fixed conversion.
-    Pt1000 = 2,
-}
-
-impl SensorKind {
-    pub const fn from_u8(v: u8) -> Option<Self> {
-        match v {
-            0 => Some(Self::None),
-            1 => Some(Self::Pressure),
-            2 => Some(Self::Pt1000),
-            _ => None,
-        }
-    }
-}
-
-/// How to scale a slot's physical value into the signed 16-bit number that goes on the bus.
-///
-/// A fixed unit cannot serve every sensor: a 400 bar transducer overflows i16 centibar, while
-/// centibar is the natural resolution for a 40 bar one. So each slot declares its own, and the
-/// codes are mirrored read-only into 0x2005 so a master can decode 0x2004 without reading config.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, defmt::Format)]
-#[repr(u8)]
-pub enum Unit {
-    /// 0.01 bar per count. Range +-327.67 bar.
-    CentiBar = 0,
-    /// 0.1 bar per count. For transducers above 300 bar.
-    DeciBar = 1,
-    /// 0.01 degrees Celsius per count.
-    CentiCelsius = 2,
-    /// Uncalibrated ADC counts, passed through. Useful while calibrating.
-    RawCounts = 3,
-}
-
-impl Unit {
-    pub const fn from_u8(v: u8) -> Option<Self> {
-        match v {
-            0 => Some(Self::CentiBar),
-            1 => Some(Self::DeciBar),
-            2 => Some(Self::CentiCelsius),
-            3 => Some(Self::RawCounts),
-            _ => None,
-        }
-    }
-}
-
-/// What a valve should do when a fallback stage fires.
-#[derive(Clone, Copy, Debug, defmt::Format)]
-pub struct FallbackAction {
-    pub position: u16,
-    /// Drop the power output once the position is reached and the settle time has elapsed.
-    pub unpower: bool,
-}
-
-#[derive(Clone, Copy, Debug, defmt::Format)]
-pub struct ValveConfig {
-    pub kind: ValveKind,
-    /// High current output that powers the valve, if it has a separate one.
-    pub power_hco: Option<HcoId>,
-    /// High current output carrying the signal: PWM for a servo, the coil for a solenoid. A valve
-    /// with no signal output is effectively unmapped.
-    pub signal_hco: Option<HcoId>,
-    pub closed_us: u16,
-    pub open_us: u16,
-    /// Time for a full 0 -> 1000 promille sweep, used to estimate measured position and to set
-    /// the settle deadline.
-    pub travel_ms: u16,
-    /// Rail current above which a moving valve counts as stalled. 0 disables stall detection,
-    /// which is also the only correct setting on rev2 (no on-board current sensing).
-    pub stall_ma: u16,
-    pub stall_ms: u16,
-    /// How long to keep driving after arriving before an unpower is allowed.
-    pub settle_ms: u16,
-    pub min_promille: u16,
-    pub max_promille: u16,
-    pub fallback_a: FallbackAction,
-    pub fallback_b: FallbackAction,
-}
-
-impl ValveConfig {
-    pub const fn unmapped() -> Self {
-        Self {
-            kind: ValveKind::None,
-            power_hco: None,
-            signal_hco: None,
-            closed_us: 2000,
-            open_us: 1000,
-            travel_ms: 1000,
-            stall_ma: 0,
-            stall_ms: 500,
-            settle_ms: 500,
-            min_promille: 0,
-            max_promille: PROMILLE_MAX,
-            fallback_a: FallbackAction {
-                position: 0,
-                unpower: true,
-            },
-            fallback_b: FallbackAction {
-                position: PROMILLE_MAX,
-                unpower: true,
-            },
-        }
-    }
-
-    /// A servo on an HCO pair wired the way the vehicle harness does it: the lower output of the
-    /// pair carries power, the upper one carries the signal. Which output is which is
-    /// [`HcoPair`]'s to say, so the `pair * 2` / `pair * 2 + 1` arithmetic no longer appears here.
-    pub const fn servo_on_pair(pair: HcoPair, closed_us: u16, open_us: u16, travel_ms: u16) -> Self {
-        Self {
-            kind: ValveKind::Servo,
-            power_hco: Some(pair.power()),
-            signal_hco: Some(pair.signal()),
-            closed_us,
-            open_us,
-            travel_ms,
-            ..Self::unmapped()
-        }
-    }
-
-    pub const fn solenoid_on(hco: HcoId) -> Self {
-        Self {
-            kind: ValveKind::Solenoid,
-            power_hco: None,
-            signal_hco: Some(hco),
-            ..Self::unmapped()
-        }
-    }
-
-    /// Linear interpolation from promille open to servo pulse width.
-    ///
-    /// Correct when `open_us < closed_us`, which is the common case here: several of the vehicle
-    /// valves open counter-clockwise.
-    pub fn pulse_width_us(&self, promille: u16) -> u16 {
-        let promille = promille.min(PROMILLE_MAX) as i32;
-        let closed = self.closed_us as i32;
-        let delta = self.open_us as i32 - closed;
-        (closed + (delta * promille) / PROMILLE_MAX as i32) as u16
-    }
-
-    pub fn clamp(&self, promille: u16) -> u16 {
-        promille.min(PROMILLE_MAX).clamp(self.min_promille, self.max_promille.min(PROMILLE_MAX))
-    }
-
-    pub fn is_mapped(&self) -> bool {
-        self.kind != ValveKind::None && self.signal_hco.is_some()
-    }
-}
-
-/// Fixed-point linear calibration for one pressure transducer.
-///
-/// The bench calibration for these sensors is defined as
-///
-/// ```text
-///   pressure_bar = (adc_reading - offset) * linear_factor
-/// ```
-///
-/// which is what [`PressureCalib::from_bar_per_count`] expresses. Some transducers are instead
-/// characterised against ambient and want a constant added afterwards (1.013 bar, to report
-/// absolute rather than gauge pressure); that is [`PressureCalib::with_constant_bar`]. Keeping
-/// the constant as a configurable term rather than baking one in means both conventions are
-/// expressible, and which one a slot uses is visible in its calibration rather than implied by
-/// the firmware version.
-///
-/// Kept in integers on purpose. The STM32F105 is a Cortex-M3 without an FPU, so a float in the
-/// hot sensor path pulls the soft-float runtime into a tight flash budget. The human-readable
-/// constants stay floats in [`crate::zenith_mapping::sensors`] and are folded down by the `const
-/// fn` constructors at compile time.
-#[derive(Clone, Copy, Debug, defmt::Format)]
-pub struct PressureCalib {
-    /// Zero offset in milli ADC counts.
-    pub offset_milli_counts: i32,
-    /// Slope in nanobar per ADC count.
-    pub slope_nanobar: i32,
-    /// Constant added after the linear part, in millibar. Zero for the plain
-    /// `(reading - offset) * factor` form.
-    pub constant_millibar: i32,
-}
-
-impl PressureCalib {
-    /// `pressure_bar = (adc_reading - offset) * linear_factor`.
-    ///
-    /// `const`, so the float arithmetic happens in the compiler and never reaches the target.
-    pub const fn from_bar_per_count(offset_counts: f32, bar_per_count: f32) -> Self {
-        Self {
-            offset_milli_counts: (offset_counts * 1000.0) as i32,
-            slope_nanobar: (bar_per_count * 1_000_000_000.0) as i32,
-            constant_millibar: 1_000,
-        }
-    }
-
-    /// Add a constant term: `pressure_bar = (reading - offset) * factor + constant`.
-    ///
-    /// Use `1.013` for a transducer calibrated against ambient that should report absolute
-    /// pressure.
-    pub const fn with_constant_bar(self, bar: f32) -> Self {
-        Self {
-            constant_millibar: (bar * 1000.0) as i32,
-            ..self
-        }
-    }
-
-    pub const ZERO: Self = Self {
-        offset_milli_counts: 0,
-        slope_nanobar: 0,
-        constant_millibar: 0,
-    };
-
-    /// Apply the calibration to a raw 10-bit conversion result.
-    ///
-    /// `millibar = (raw * 1000 - offset) * slope / 1e9 + constant`. Widest intermediate is about
-    /// 9e14, which is why this is i64.
-    pub fn to_millibar(&self, raw: u16) -> i32 {
-        let counts = raw as i64 * 1000 - self.offset_milli_counts as i64;
-        let millibar = (counts * self.slope_nanobar as i64) / 1_000_000_000 + self.constant_millibar as i64;
-        millibar.clamp(i32::MIN as i64, i32::MAX as i64) as i32
-    }
-}
-
-#[derive(Clone, Copy, Debug, defmt::Format)]
-pub struct SensorSlotConfig {
-    pub kind: SensorKind,
-    /// Which I2C bus, or `None` for an unused slot.
-    pub bus: Option<I2cBus>,
-    /// Which address strap, i.e. which entry of [`AMPLIFIER_ADDRESSES`].
-    pub amplifier: AmplifierId,
-    pub unit: Unit,
-    pub calib: PressureCalib,
-}
-
-impl SensorSlotConfig {
-    pub const fn unused() -> Self {
-        Self {
-            kind: SensorKind::None,
-            bus: None,
-            amplifier: AmplifierId::Amp0,
-            unit: Unit::CentiBar,
-            calib: PressureCalib::ZERO,
-        }
-    }
-
-    pub const fn pressure(bus: I2cBus, amplifier: AmplifierId, unit: Unit, calib: PressureCalib) -> Self {
-        Self {
-            kind: SensorKind::Pressure,
-            bus: Some(bus),
-            amplifier,
-            unit,
-            calib,
-        }
-    }
-
-    pub const fn pt1000(bus: I2cBus, amplifier: AmplifierId) -> Self {
-        Self {
-            kind: SensorKind::Pt1000,
-            bus: Some(bus),
-            amplifier,
-            unit: Unit::CentiCelsius,
-            calib: PressureCalib::ZERO,
-        }
-    }
-
-    /// Which probe-able amplifier position this slot reads, or `None` when it is unused.
-    ///
-    /// Both halves are already known-in-range, so unlike the old flat-index version there is no
-    /// bounds check left to get wrong — the only remaining question is whether a bus is set.
-    pub const fn adc_slot(&self) -> Option<AdcSlot> {
-        match self.bus {
-            Some(bus) => Some(AdcSlot::new(bus, self.amplifier)),
-            None => None,
-        }
-    }
-}
 
 /// Default TPDO periods in milliseconds, indexed by `TpdoKind`. 0 disables a kind.
 ///
@@ -428,7 +127,29 @@ impl Config {
         self
     }
 
+    /// Fit a sensor and, unless it already claims one, broadcast it on the TPDO channel matching
+    /// its own slot number.
+    ///
+    /// That default is what keeps the first twelve slots behaving as they always have: slot *n*
+    /// lands in channel *n* of the `Sensor0`/`Sensor1`/`Sensor3` frames. Slots past the twelfth
+    /// have no matching channel and get none, so putting a sensor there is a deliberate decision
+    /// to read it over SDO — or to give it a channel by hand with
+    /// [`SensorSlotConfig::on_channel`].
     pub const fn with_sensor(mut self, slot: SensorSlot, config: SensorSlotConfig) -> Self {
+        let mut config = config;
+        if config.pdo_channel.is_none() {
+            config.pdo_channel = PdoSensorChannel::from_index(slot.index());
+        }
+        self.sensors = self.sensors.with_at(slot.index(), config);
+        self
+    }
+
+    /// Fit a sensor that is never broadcast: sampled, calibrated and readable at 0x2004, but off
+    /// the process data plane. For the slow and the merely diagnostic, which is most of what the
+    /// slots past the twelfth are for.
+    pub const fn with_quiet_sensor(mut self, slot: SensorSlot, config: SensorSlotConfig) -> Self {
+        let mut config = config;
+        config.pdo_channel = None;
         self.sensors = self.sensors.with_at(slot.index(), config);
         self
     }
@@ -449,6 +170,10 @@ impl Config {
 
     /// Reject configurations that would misbehave rather than silently running with them. Called
     /// after a load from NOR and after every SDO write that could break an invariant.
+    ///
+    /// This is the one place that gets to look across the sub-domains at once, which is why it
+    /// lives here rather than in any of them: every check below is about two things disagreeing —
+    /// a valve and the sensor it trusts, two valves and one output, two sensors and one channel.
     pub fn sanity_check(&self) -> Result<(), ConfigError> {
         if self.master_node_id > 0x0F {
             return Err(ConfigError::NodeIdOutOfRange);
@@ -466,10 +191,40 @@ impl Config {
             if v.kind == ValveKind::Servo && v.travel_ms == 0 {
                 return Err(ConfigError::ZeroTravelTime(id));
             }
+            // A valve told to trust a sensor that reports something other than promille would
+            // take a pressure reading as a position. Better to refuse the config than to drive a
+            // valve against a number that means nothing to it.
+            if let Some(slot) = v.position_sensor {
+                let sensor = &self.sensors[slot];
+                if sensor.kind == SensorKind::None {
+                    return Err(ConfigError::PositionSensorUnmapped(id, slot));
+                }
+                if sensor.unit != Unit::Promille {
+                    return Err(ConfigError::PositionSensorUnit(id, slot));
+                }
+            }
             // Two valves sharing an output would fight each other every control tick.
             for (other, w) in self.valves.iter().skip(id.index() + 1) {
                 if w.is_mapped() && shares_output(v, w) {
                     return Err(ConfigError::OutputShared(id, other));
+                }
+            }
+        }
+
+        for (id, s) in self.sensors.iter() {
+            if s.kind == SensorKind::None {
+                continue;
+            }
+            // Every kind is read over I2C, so a configured slot without a bus reads nothing at
+            // all while looking configured — the same silent-failure shape as an armed relief
+            // loop pointing at an unfitted valve.
+            if s.bus.is_none() {
+                return Err(ConfigError::SensorBusUnset(id));
+            }
+            // Two slots on one channel means one of them silently never reaches the bus.
+            for (other, t) in self.sensors.iter().skip(id.index() + 1) {
+                if s.pdo_channel.is_some() && s.pdo_channel == t.pdo_channel {
+                    return Err(ConfigError::PdoChannelShared(id, other));
                 }
             }
         }
@@ -520,77 +275,9 @@ impl Config {
     }
 }
 
-fn shares_output(a: &ValveConfig, b: &ValveConfig) -> bool {
-    let a_outs = [a.signal_hco, a.power_hco];
-    let b_outs = [b.signal_hco, b.power_hco];
-    a_outs.iter().flatten().any(|x| b_outs.iter().flatten().any(|y| x == y))
-}
-
 impl Default for Config {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-/// Local overpressure relief.
-///
-/// At most one loop per node. because more is not required at the moment and I'm lazy.
-/// See [`crate::relief`] for the state machine.
-#[derive(Clone, Copy, Debug, defmt::Format)]
-pub struct ReliefConfig {
-    pub enabled: bool,
-    /// Valve to open. `None` disables the loop regardless of `enabled`.
-    pub valve: Option<ValveId>,
-    /// The sensor slot to watch.
-    pub sensor: SensorSlot,
-    /// Open when the reading goes strictly above this, in that slot's own unit (0x2005) — so a
-    /// slot reporting centibar takes 6000 for 60 bar.
-    pub threshold: i16,
-    /// How far to open while relieving, promille.
-    pub position: u16,
-    pub pulse_ms: u16,
-    /// Settling time after a pulse before the threshold is looked at again.
-    pub cooldown_ms: u16,
-}
-
-impl ReliefConfig {
-    /// Off, and with a threshold that cannot be reached — so a node that has never been
-    /// configured for relief cannot start venting because some unrelated slot reads high.
-    pub const fn disabled() -> Self {
-        Self {
-            enabled: false,
-            valve: None,
-            sensor: SensorSlot::Slot0,
-            threshold: i16::MAX,
-            position: PROMILLE_MAX,
-            pulse_ms: 500,
-            cooldown_ms: 500,
-        }
-    }
-
-    /// Watch `sensor` and pulse `valve` open when it goes above `threshold`, in the sensor's unit.
-    pub const fn new(valve: ValveId, sensor: SensorSlot, threshold: i16) -> Self {
-        Self {
-            enabled: true,
-            valve: Some(valve),
-            sensor,
-            threshold,
-            ..Self::disabled()
-        }
-    }
-
-    pub const fn with_pulse_ms(mut self, pulse_ms: u16) -> Self {
-        self.pulse_ms = pulse_ms;
-        self
-    }
-
-    pub const fn with_cooldown_ms(mut self, cooldown_ms: u16) -> Self {
-        self.cooldown_ms = cooldown_ms;
-        self
-    }
-
-    pub fn is_armed(&self) -> bool {
-        self.enabled && self.valve.is_some()
     }
 }
 
@@ -615,9 +302,91 @@ pub enum ConfigError {
     ClampInverted(ValveId),
     ZeroTravelTime(ValveId),
     OutputShared(ValveId, ValveId),
+    /// A valve's position sensor points at a slot with nothing configured on it.
+    PositionSensorUnmapped(ValveId, SensorSlot),
+    /// A valve's position sensor reports something other than promille.
+    PositionSensorUnit(ValveId, SensorSlot),
+    /// A configured sensor slot has no I2C bus to read from.
+    SensorBusUnset(SensorSlot),
+    /// Two sensor slots claim the same TPDO channel.
+    PdoChannelShared(SensorSlot, SensorSlot),
     /// Relief is armed against a valve that is not fitted.
     ReliefValveUnmapped(ValveId),
     /// Relief is armed against a sensor slot that is not configured.
     ReliefSensorUnmapped(SensorSlot),
     ReliefPulseZero,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::index::{AmplifierId, HcoPair};
+
+    fn with_encoder_on(valve: ValveId, slot: SensorSlot) -> Config {
+        Config::new()
+            .with_valve(valve, ValveConfig::servo_on_pair(HcoPair::A, 2000, 1000, 1000).with_position_sensor(slot))
+            .with_sensor(slot, SensorSlotConfig::encoder(I2cBus::Bus0, 0, 1024))
+    }
+
+    #[test]
+    fn a_valve_may_take_its_position_from_an_encoder_slot() {
+        assert!(with_encoder_on(ValveId::Valve0, SensorSlot::Slot0).sanity_check().is_ok());
+    }
+
+    /// The failure this check exists for: a slot reporting centibar would hand a valve a pressure
+    /// and the valve would drive against it as though it were a position.
+    #[test]
+    fn a_position_sensor_reporting_the_wrong_unit_is_refused() {
+        let mut cfg = with_encoder_on(ValveId::Valve0, SensorSlot::Slot0);
+        cfg.sensors[SensorSlot::Slot0].unit = Unit::CentiBar;
+        assert!(matches!(cfg.sanity_check(), Err(ConfigError::PositionSensorUnit(ValveId::Valve0, SensorSlot::Slot0))));
+    }
+
+    /// Pointing a valve at an empty slot looks configured while doing nothing, which is the
+    /// silent-failure shape the relief checks already refuse.
+    #[test]
+    fn a_position_sensor_on_an_empty_slot_is_refused() {
+        let mut cfg = with_encoder_on(ValveId::Valve0, SensorSlot::Slot0);
+        cfg.sensors[SensorSlot::Slot0] = SensorSlotConfig::unused();
+        assert!(matches!(
+            cfg.sanity_check(),
+            Err(ConfigError::PositionSensorUnmapped(ValveId::Valve0, SensorSlot::Slot0))
+        ));
+    }
+
+    /// Two slots on one channel means one of them silently never reaches the bus, and which one
+    /// wins would depend on iteration order.
+    #[test]
+    fn two_slots_may_not_claim_the_same_pdo_channel() {
+        let cfg = Config::new()
+            .with_sensor(SensorSlot::Slot0, SensorSlotConfig::pt1000(I2cBus::Bus0, AmplifierId::Amp0))
+            .with_sensor(
+                SensorSlot::Slot5,
+                SensorSlotConfig::pt1000(I2cBus::Bus0, AmplifierId::Amp1).on_channel(PdoSensorChannel::Ch0),
+            );
+        assert!(matches!(cfg.sanity_check(), Err(ConfigError::PdoChannelShared(SensorSlot::Slot0, SensorSlot::Slot5))));
+    }
+
+    #[test]
+    fn a_configured_slot_without_a_bus_is_refused() {
+        let mut cfg =
+            Config::new().with_sensor(SensorSlot::Slot0, SensorSlotConfig::pt1000(I2cBus::Bus0, AmplifierId::Amp0));
+        cfg.sensors[SensorSlot::Slot0].bus = None;
+        assert!(matches!(cfg.sanity_check(), Err(ConfigError::SensorBusUnset(SensorSlot::Slot0))));
+    }
+
+    /// The default that keeps the first twelve slots behaving as they always have.
+    #[test]
+    fn with_sensor_defaults_a_slot_to_its_own_channel() {
+        let cfg = Config::new()
+            .with_sensor(SensorSlot::Slot3, SensorSlotConfig::pt1000(I2cBus::Bus0, AmplifierId::Amp0))
+            // Past the twelfth there is no matching channel, so this one stays off the bus.
+            .with_sensor(SensorSlot::Slot13, SensorSlotConfig::pt1000(I2cBus::Bus0, AmplifierId::Amp1))
+            .with_quiet_sensor(SensorSlot::Slot4, SensorSlotConfig::pt1000(I2cBus::Bus0, AmplifierId::Amp2));
+
+        assert_eq!(cfg.sensors[SensorSlot::Slot3].pdo_channel, Some(PdoSensorChannel::Ch3));
+        assert_eq!(cfg.sensors[SensorSlot::Slot13].pdo_channel, None);
+        assert_eq!(cfg.sensors[SensorSlot::Slot4].pdo_channel, None);
+        assert!(cfg.sanity_check().is_ok());
+    }
 }
