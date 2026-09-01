@@ -11,8 +11,9 @@ use crate::index::{HcoId, HcoPair, SensorSlot};
 pub const NUM_VALVES: usize = crate::index::ValveId::COUNT;
 pub const NUM_HCO: usize = HcoId::COUNT;
 
-/// A valve position, 0 = fully closed, 1000 = fully open.
-pub const PROMILLE_MAX: u16 = 1000;
+/// A valve position, 0 = fully closed, 1000 = fully open. Wire format, so it is defined in
+/// [`iocan_proto::valve`].
+pub use iocan_proto::valve::PROMILLE_MAX;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, defmt::Format)]
 #[repr(u8)]

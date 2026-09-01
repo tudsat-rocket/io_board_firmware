@@ -125,6 +125,13 @@ id_domain!(
     ]
 );
 
+/// More slots than channels is the whole point of splitting the two domains: a sensor that is
+/// read and published at [`crate::store::od::SENSOR_VALUE`] need not be on the bus every tick.
+/// Shrinking the slot domain back to the channel count would make the assignment at
+/// [`crate::store::od::SENSOR_PDO_CHANNEL`] pointless rather than wrong, so it is worth catching
+/// at compile time.
+const _: () = assert!(SensorSlot::COUNT > PdoSensorChannel::COUNT);
+
 id_domain!(
     /// One of the two I2C buses. Two is a hardware fact: only COM1 and COM2 are I2C-capable.
     I2cBus, PerI2cBus, 2, [Bus0, Bus1]
@@ -443,13 +450,6 @@ mod tests {
     #[test]
     fn pdo_sensor_channels_match_the_protocol() {
         assert_eq!(PdoSensorChannel::COUNT, iocan_proto::NUM_PROTOCOL_SENSOR_SLOTS);
-    }
-
-    /// More slots than channels is the whole point of splitting the two domains: a sensor that
-    /// is read and published at 0x2004 need not be on the bus every tick.
-    #[test]
-    fn there_are_more_sensor_slots_than_pdo_channels() {
-        assert!(SensorSlot::COUNT > PdoSensorChannel::COUNT);
     }
 
     #[test]

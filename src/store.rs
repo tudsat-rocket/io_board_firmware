@@ -5,8 +5,11 @@
 //! ([`crate::control`]) is the sole owner of the high current outputs. That is what makes the
 //! valve state machine authoritative: nothing can move an output behind its back.
 //!
-//! The index layout mirrors `device-conf/can-io.toml` exactly. When you add an object, add it in
-//! both places.
+//! The dictionary itself — which index means what, in what unit, with which coded values — is
+//! defined in [`iocan_proto::od`], re-exported below as [`od`]. What lives here is the *state*
+//! those indices name and the read/write arms that serve them. Adding an object means adding a
+//! constant there, a summary line in `device-conf/can-io.toml` so `zencan-build` can generate the
+//! EDS, and an arm in each direction here.
 //!
 //! Locking discipline: hold [`STORE`] for a short, `await`-free critical section. Never call into
 //! I2C, SPI or CAN while holding it.
@@ -36,14 +39,11 @@ pub static CONTROL_WAKE: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 /// waiter — sharing one between the control and persistence tasks would lose wakeups.
 pub static PERSIST_WAKE: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 
-/// A raw ADC slot that did not answer during the last sweep.
-pub const RAW_INVALID: u16 = u16::MAX;
-/// A sensor slot with no usable reading.
-pub const SENSOR_INVALID: i16 = i16::MIN;
-
-/// Magic values for 0x1010 / 0x1011, as CANopen defines them: ASCII, little-endian.
-pub const SIGNATURE_SAVE: u32 = 0x6576_6173; // "save"
-pub const SIGNATURE_LOAD: u32 = 0x6461_6F6C; // "load"
+/// Object dictionary indices and the wire sentinels that go with them. Defined in
+/// [`iocan_proto::od`], which is where an object's meaning is documented; re-exported here
+/// because the whole firmware reaches for them through the store.
+pub use iocan_proto::od;
+pub use iocan_proto::od::{NO_INDEX, RAW_INVALID, SENSOR_INVALID, SIGNATURE_LOAD, SIGNATURE_SAVE};
 
 /// 0x2032. How the node currently sees the master.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, defmt::Format)]
@@ -215,82 +215,6 @@ impl Default for Store {
     fn default() -> Self {
         Self::new()
     }
-}
-
-/// Object dictionary indices. Mirrors `device-conf/can-io.toml`.
-pub mod od {
-    pub const STORE_PARAMETERS: u16 = 0x1010;
-    pub const RESTORE_DEFAULTS: u16 = 0x1011;
-    pub const HEARTBEAT_PERIOD: u16 = 0x1017;
-
-    pub const RAW_ADC_BUS0: u16 = 0x2000;
-    pub const RAW_ADC_BUS1: u16 = 0x2001;
-    pub const I2C_PRESENT: u16 = 0x2002;
-    pub const I2C_SWEEPS: u16 = 0x2003;
-    pub const SENSOR_VALUE: u16 = 0x2004;
-    pub const SENSOR_UNIT: u16 = 0x2005;
-    pub const RAW_ENCODER: u16 = 0x2006;
-
-    pub const VALVE_COMMANDED: u16 = 0x2010;
-    pub const VALVE_TARGET: u16 = 0x2011;
-    pub const VALVE_MEASURED: u16 = 0x2012;
-    pub const VALVE_STATUS: u16 = 0x2013;
-    pub const VALVE_CURRENT: u16 = 0x2014;
-    pub const RELIEF_STATE: u16 = 0x2015;
-
-    pub const HCO_DIGITAL: u16 = 0x2020;
-    pub const HCO_PWM_US: u16 = 0x2021;
-    pub const HCO_OWNER: u16 = 0x2022;
-
-    pub const LEDS: u16 = 0x2030;
-    pub const RAW_DEBUG_MODE: u16 = 0x2031;
-    pub const LINK_STATE: u16 = 0x2032;
-    pub const MS_SINCE_HEARTBEAT: u16 = 0x2033;
-    pub const RAIL_CURRENT: u16 = 0x2040;
-    pub const RAIL_VOLTAGE: u16 = 0x2041;
-
-    pub const MASTER_NODE_ID: u16 = 0x3000;
-    pub const FALLBACK_A_MS: u16 = 0x3001;
-    pub const FALLBACK_B_MS: u16 = 0x3002;
-    pub const FALLBACK_A_POSITION: u16 = 0x3003;
-    pub const FALLBACK_B_POSITION: u16 = 0x3004;
-    pub const FALLBACK_A_UNPOWER: u16 = 0x3005;
-    pub const FALLBACK_B_UNPOWER: u16 = 0x3006;
-    pub const FALLBACK_ENABLED: u16 = 0x3007;
-
-    pub const VALVE_KIND: u16 = 0x3010;
-    pub const VALVE_POWER_HCO: u16 = 0x3011;
-    pub const VALVE_SIGNAL_HCO: u16 = 0x3012;
-    pub const VALVE_CLOSED_US: u16 = 0x3013;
-    pub const VALVE_OPEN_US: u16 = 0x3014;
-    pub const VALVE_TRAVEL_MS: u16 = 0x3015;
-    pub const VALVE_STALL_MA: u16 = 0x3016;
-    pub const VALVE_STALL_MS: u16 = 0x3017;
-    pub const VALVE_SETTLE_MS: u16 = 0x3018;
-    pub const VALVE_MIN_PROMILLE: u16 = 0x3019;
-    pub const VALVE_MAX_PROMILLE: u16 = 0x301A;
-    pub const VALVE_POSITION_SENSOR: u16 = 0x301B;
-
-    pub const SENSOR_BUS: u16 = 0x3020;
-    pub const SENSOR_AMPLIFIER: u16 = 0x3021;
-    pub const SENSOR_KIND: u16 = 0x3022;
-    pub const SENSOR_OFFSET: u16 = 0x3023;
-    pub const SENSOR_SLOPE: u16 = 0x3024;
-    pub const SENSOR_UNIT_CFG: u16 = 0x3025;
-    pub const SENSOR_CONSTANT: u16 = 0x3026;
-    pub const SENSOR_PDO_CHANNEL: u16 = 0x3027;
-
-    pub const SENSOR_INTERVAL_MS: u16 = 0x3030;
-    pub const SCAN_INTERVAL_MS: u16 = 0x3031;
-    pub const TPDO_INTERVAL_MS: u16 = 0x3040;
-
-    pub const RELIEF_ENABLED: u16 = 0x3050;
-    pub const RELIEF_VALVE: u16 = 0x3051;
-    pub const RELIEF_SENSOR: u16 = 0x3052;
-    pub const RELIEF_THRESHOLD: u16 = 0x3053;
-    pub const RELIEF_POSITION: u16 = 0x3054;
-    pub const RELIEF_PULSE_MS: u16 = 0x3055;
-    pub const RELIEF_COOLDOWN_MS: u16 = 0x3056;
 }
 
 /// A value read out of the dictionary, sized for an expedited SDO payload.
@@ -477,14 +401,6 @@ fn hco_from_wire(v: u8) -> Result<Option<HcoId>, AbortCode> {
         _ => HcoId::from_u8(v - 1).map(Some).ok_or(AbortCode::InvalidValue),
     }
 }
-
-/// Wire sentinel for an optional id that is currently unset.
-///
-/// Everything except [`HcoId`] uses this rather than 0-means-none: an HCO's wire form is
-/// 1-indexed to match the silkscreen, but a sensor slot or a PDO channel is numbered from zero on
-/// the wire as it is in the firmware, so zero is a real value and the sentinel has to sit at the
-/// far end.
-pub const NO_INDEX: u8 = 0xFF;
 
 /// Read an optional id off the wire, rejecting anything that is neither [`NO_INDEX`] nor a valid
 /// index of the domain. The counterpart of `map_or(NO_INDEX, ..)` on the read side.

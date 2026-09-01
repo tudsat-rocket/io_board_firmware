@@ -16,42 +16,16 @@
 //!
 //! # Unpowered
 //!
-//! A servo valve can be *unpowered* (msb of the position word)
-//! ```text
-//!   bit 15    bits 14..0
-//!   +------+--------------+
-//!   | !pwr | promille     |   0..=1000
-//!   +------+--------------+
-//! ```
+//! A servo valve can be *unpowered*, which is the msb of the position word all three layers use.
+//! That word is wire format, so it lives in [`iocan_proto::valve`] along with the reasoning
+//! behind it; the helpers are re-exported here because this is where they are used.
 
 use embassy_time::Instant;
 
 use crate::config::{PROMILLE_MAX, ValveConfig, ValveKind};
 use crate::index::ValveId;
 
-/// Bit 15 of a position word: this valve is not being driven.
-///
-/// Only meaningful for a servo with a separate power output; a solenoid has nothing to release,
-/// so for one this simply reads as de-energized, i.e. closed.
-pub const UNPOWERED_FLAG: u16 = 0x8000;
-
-/// The promille field of a position word.
-pub const POSITION_MASK: u16 = 0x7FFF;
-
-/// Is this position word asking for (or reporting) a released drive?
-pub const fn is_unpowered(word: u16) -> bool {
-    word & UNPOWERED_FLAG != 0
-}
-
-/// The promille part of a position word, with the flag stripped.
-pub const fn position_of(word: u16) -> u16 {
-    word & POSITION_MASK
-}
-
-/// Build a position word that reports `position` but says the drive is released.
-pub const fn unpowered_at(position: u16) -> u16 {
-    (position & POSITION_MASK) | UNPOWERED_FLAG
-}
+pub use iocan_proto::valve::{POSITION_MASK, UNPOWERED_FLAG, is_unpowered, position_of, unpowered_at};
 
 /// 0x2013.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, defmt::Format)]

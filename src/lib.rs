@@ -14,8 +14,9 @@
 //!                             config::persist  --> external NOR flash
 //! ```
 //!
-//! [`store`] is the only shared state, and it *is* the object dictionary described in
-//! `device-conf/can-io.toml`. Tasks communicate by reading and writing it, never directly.
+//! [`store`] is the only shared state, and it *is* the object dictionary — the one defined in
+//! [`iocan_proto::od`], which is where each index's meaning lives. Tasks communicate by reading
+//! and writing it, never directly.
 //! [`control`] is the only task that touches an output, which is what makes the valve model's
 //! measured position mean anything.
 //!

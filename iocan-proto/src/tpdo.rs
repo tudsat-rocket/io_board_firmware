@@ -13,8 +13,9 @@
 //! because a listener wants all three in the same breath). A couple pack tighter still, trading
 //! a fixed byte offset for bit-fields, because the values genuinely don't need a whole byte each
 //! ([`TpdoFrame::HcoState`]'s digital/PWM merge, [`TpdoFrame::ValveStatus`]'s nibble-packed
-//! status/ownership, [`TpdoFrame::SensorUnits`]'s 2-bit-per-slot unit codes). Each variant's doc
-//! comment says which `device-conf/can-io.toml` object(s) it mirrors.
+//! status/ownership, [`TpdoFrame::SensorUnits`]'s nibble-per-channel unit codes). Each variant's
+//! doc comment says which object(s) in [`crate::od`] it mirrors, and that is where the meaning of
+//! the values lives — a status code or a unit code is documented once, at its object.
 
 use crate::ids::TpdoKind;
 
@@ -23,7 +24,11 @@ use crate::ids::TpdoKind;
 ///
 /// A channel is a position in those three frames, not a node's sensor slot. A node may have more
 /// slots than there are channels — it does today — and decides for itself which slot, if any,
-/// occupies each channel; a channel nothing claims reads as `i16::MIN`.
+/// occupies each channel ([`crate::od::SENSOR_PDO_CHANNEL`]); a channel nothing claims reads as
+/// [`crate::od::SENSOR_INVALID`].
+///
+/// A node that has not been reconfigured maps slot *n* to channel *n*, so it looks on the bus
+/// exactly as it did before there were more slots than channels.
 pub const NUM_PROTOCOL_SENSOR_SLOTS: usize = 12;
 
 /// One high current output's state, as packed into [`TpdoFrame::HcoState`].
@@ -65,13 +70,14 @@ impl HcoOutput {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum TpdoFrame {
-    /// Mirrors 0x2010, one entry per valve.
+    /// Mirrors [`crate::od::VALVE_COMMANDED`], one [`crate::valve`] position word per valve.
     ValveCommanded([u16; 4]),
-    /// Mirrors 0x2011, one entry per valve.
+    /// Mirrors [`crate::od::VALVE_TARGET`], one position word per valve.
     ValveTarget([u16; 4]),
-    /// Mirrors 0x2012, one entry per valve.
+    /// Mirrors [`crate::od::VALVE_MEASURED`], one position word per valve.
     ValveMeasured([u16; 4]),
-    /// `status` mirrors 0x2013, `hco_owner` mirrors 0x2022, `relief_state` mirrors 0x2015 —
+    /// `status` mirrors [`crate::od::VALVE_STATUS`], `hco_owner` mirrors [`crate::od::HCO_OWNER`],
+    /// `relief_state` mirrors [`crate::od::RELIEF_STATE`] —
     /// packed together so a listener never has to correlate three frames to answer "is this
     /// valve stalled, what does it own, and is relief active". `status` and `hco_owner` are each
     /// nibble-packed (every value fits in 4 bits: 5 `ValveStatus` variants, and `hco_owner`'s
@@ -84,37 +90,41 @@ pub enum TpdoFrame {
     },
     /// Merges what used to be two separate frames (digital level and PWM width) into one: each
     /// output's [`HcoOutput`] already says whether it's driven digitally or by PWM, so there's
-    /// nothing left for a second frame to add. Mirrors 0x2020/0x2021.
+    /// nothing left for a second frame to add. Mirrors [`crate::od::HCO_DIGITAL`] and
+    /// [`crate::od::HCO_PWM_US`].
     HcoState([HcoOutput; 4]),
-    /// A window of 0x2000 (I2C bus 0): amplifier indices 0..4.
+    /// A window of [`crate::od::RAW_ADC_BUS0`]: amplifier indices 0..4.
     RawBus0A([u16; 4]),
-    /// A window of 0x2000 (I2C bus 0): amplifier indices 4..8.
+    /// A window of [`crate::od::RAW_ADC_BUS0`]: amplifier indices 4..8.
     RawBus0B([u16; 4]),
-    /// A window of 0x2001 (I2C bus 1): amplifier indices 0..4.
+    /// A window of [`crate::od::RAW_ADC_BUS1`]: amplifier indices 0..4.
     RawBus1A([u16; 4]),
-    /// A window of 0x2001 (I2C bus 1): amplifier indices 4..8.
+    /// A window of [`crate::od::RAW_ADC_BUS1`]: amplifier indices 4..8.
     RawBus1B([u16; 4]),
-    /// Calibrated values for sensor channels 0..4. Which slot feeds a channel is the node's own
-    /// choice (0x3027); an unclaimed channel is `i16::MIN`.
+    /// Calibrated values for sensor channels 0..4, from [`crate::od::SENSOR_VALUE`]. Which slot
+    /// feeds a channel is the node's own choice ([`crate::od::SENSOR_PDO_CHANNEL`]); an unclaimed
+    /// channel is [`crate::od::SENSOR_INVALID`].
     Sensor0([i16; 4]),
     /// Calibrated values for sensor channels 4..8.
     Sensor1([i16; 4]),
     /// Calibrated values for sensor channels 8..12.
     Sensor3([i16; 4]),
-    /// The unit code each sensor channel reports its value in, 4 bits per channel (16 possible
-    /// units) so all 12 channels fit in 6 of the 8 bytes.
+    /// The unit code each sensor channel reports its value in, from [`crate::od::SENSOR_UNIT`]:
+    /// 4 bits per channel (16 possible units) so all 12 channels fit in 6 of the 8 bytes.
     SensorUnits([u8; NUM_PROTOCOL_SENSOR_SLOTS]),
-    /// `present` mirrors 0x2002, `sweeps` mirrors 0x2003 (truncated to 16 bits). The remaining 2
-    /// bytes are unused padding.
+    /// `present` mirrors [`crate::od::I2C_PRESENT`], `sweeps` mirrors [`crate::od::I2C_SWEEPS`]
+    /// (truncated to 16 bits). The remaining 2 bytes are unused padding.
     I2cScan { present: [u16; 2], sweeps: u16 },
-    /// The logic, HCO1+2 and HCO3+4 rail voltages (0x2041). The remaining 2 bytes are unused
-    /// padding.
+    /// The logic, HCO1+2 and HCO3+4 rail voltages ([`crate::od::RAIL_VOLTAGE`]). The remaining 2
+    /// bytes are unused padding.
     RailVoltage([u16; 3]),
-    /// The logic, HCO1+2 and HCO3+4 rail currents (0x2040). The remaining 2 bytes are unused
-    /// padding.
+    /// The logic, HCO1+2 and HCO3+4 rail currents ([`crate::od::RAIL_CURRENT`]). The remaining 2
+    /// bytes are unused padding.
     RailCurrent([u16; 3]),
-    /// `link_state` mirrors 0x2032, `raw_debug` mirrors 0x2031, `ms_since_heartbeat` mirrors
-    /// 0x2033. `stalled_mask` (bit i set = valve i stalled) has no single-object mirror; it
+    /// `link_state` mirrors [`crate::od::LINK_STATE`], `raw_debug` mirrors
+    /// [`crate::od::RAW_DEBUG_MODE`], `ms_since_heartbeat` mirrors
+    /// [`crate::od::MS_SINCE_HEARTBEAT`]. `stalled_mask` (bit i set = valve i stalled) has no
+    /// single-object mirror; it
     /// exists only here. Relief state moved to [`Self::ValveStatus`], since a listener wants it
     /// next to which valve relief is acting on, not next to the link state.
     Status {
@@ -123,7 +133,7 @@ pub enum TpdoFrame {
         stalled_mask: u8,
         ms_since_heartbeat: u32,
     },
-    /// Mirrors 0x2014, one entry per valve.
+    /// Mirrors [`crate::od::VALVE_CURRENT`], one entry per valve.
     ValveCurrent([u16; 4]),
 }
 

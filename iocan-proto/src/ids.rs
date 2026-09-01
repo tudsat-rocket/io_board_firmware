@@ -11,7 +11,8 @@
 //!   0x700 + node_id                   heartbeat
 //! ```
 //!
-//! The 4-bit node field is what caps the bus at 16 nodes, which matches the vehicle.
+//! The 4-bit node field is what caps the bus at 16 nodes, which matches the vehicle. See
+//! [`crate`] for the three planes those ranges make up.
 
 /// Base of the process data range.
 pub const PDO_BASE: u16 = 0x200;
@@ -24,15 +25,17 @@ pub const HEARTBEAT_BASE: u16 = 0x700;
 
 pub const NODE_ID_MASK: u16 = 0x000F;
 
-/// Number of fixed TPDO kinds. Must agree with `TpdoKind` and with `array_size` of 0x3040 in
-/// `device-conf/can-io.toml`.
+/// Number of fixed TPDO kinds. Must agree with [`TpdoKind`] and with the array size of
+/// [`crate::od::TPDO_INTERVAL_MS`], which carries one period per kind.
 pub const NUM_TPDO_KINDS: usize = 18;
 
-/// The fixed TPDO table. The discriminant is the `kind` field of the identifier and the index
-/// into a node's `tpdo_interval_ms` (0x3040), so the three never drift apart.
+/// The fixed TPDO table. The discriminant is the `kind` field of the identifier *and* the index
+/// into a node's broadcast periods ([`crate::od::TPDO_INTERVAL_MS`], at sub-index `kind + 1`), so
+/// the three never drift apart.
 ///
 /// Kept fixed rather than runtime-mappable: a master that has to read a PDO mapping before it can
-/// decode a frame is exactly the complexity this protocol is avoiding.
+/// decode a frame is exactly the complexity this protocol is avoiding. The payload each kind
+/// carries is [`crate::TpdoFrame`]'s matching variant, whose doc says which objects it mirrors.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[repr(u8)]

@@ -5,12 +5,11 @@
 //! means a period changed over SDO takes effect on the next tick with no task restart, and adding
 //! a kind costs one match arm instead of another future in a `select_array`.
 //!
-//! Layouts are fixed and documented in `device-conf/can-io.toml`. Everything is little-endian and
-//! every frame is a full 8 bytes, so a master can decode by offset without a length check. The
-//! byte-level encoding itself lives in [`iocan_proto::TpdoFrame`] — a separate, dependency-light
-//! crate — so anything else that needs to build or parse these frames does not have to pull in
-//! this firmware to do it. What stays here is firmware-only: which `Store` fields feed which kind,
-//! and the scheduling below.
+//! Layouts are fixed, and both they and their meaning live in [`iocan_proto::tpdo`] — a separate,
+//! dependency-light crate — so anything else that needs to build or parse these frames does not
+//! have to pull in this firmware to do it. Everything is little-endian and every frame is a full
+//! 8 bytes, so a master can decode by offset without a length check. What stays here is
+//! firmware-only: which `Store` fields feed which kind, and the scheduling below.
 //!
 //! A frame that is byte-identical to the last one actually sent for its kind is skipped at its
 //! due time rather than resent — most of the bus load here is slowly-changing state (sensor
