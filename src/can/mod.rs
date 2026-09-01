@@ -17,8 +17,10 @@ pub mod sdo;
 pub mod tpdo;
 
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-use embassy_sync::pubsub::{PubSubChannel, Publisher, Subscriber};
+use embassy_sync::pubsub::{PubSubChannel, Publisher, Subscriber, WaitResult};
 use heapless::Vec;
+
+use crate::errors::{ErrorCounter, bump_by};
 
 const CAN_QUEUE_SIZE: usize = 32;
 const NUM_CAN_SUB: usize = 3;
@@ -34,6 +36,31 @@ pub type CanRxPub = Publisher<'static, CriticalSectionRawMutex, CanFrame, CAN_QU
 pub type CanOutChannel = PubSubChannel<CriticalSectionRawMutex, CanFrame, CAN_QUEUE_SIZE, NUM_CAN_SUB, NUM_CAN_PUBS>;
 pub type CanTxPub = Publisher<'static, CriticalSectionRawMutex, CanFrame, CAN_QUEUE_SIZE, NUM_CAN_SUB, NUM_CAN_PUBS>;
 pub type CanTxSub = Subscriber<'static, CriticalSectionRawMutex, CanFrame, CAN_QUEUE_SIZE, NUM_CAN_SUB, NUM_CAN_PUBS>;
+
+/// The next frame for this subscriber, counting anything the fan-out dropped on the way.
+///
+/// `Subscriber::next_message_pure` does the same thing but throws the lag away, which is how a
+/// task that cannot keep up looks identical to one that has nothing to do. The number is worth
+/// keeping: it is the difference between "the master went quiet" and "we stopped listening", and
+/// those have opposite fixes.
+///
+/// `lost` is which counter the drop belongs to, because both directions run through the same
+/// channel type — [`CanRxSub`] and [`CanTxSub`] are the same subscriber, and only the caller
+/// knows whether the frames that went missing were arriving or leaving.
+///
+/// The lag is counted, not acted on: there is nothing useful to do about frames that are already
+/// gone, and stalling here to catch up would only widen the gap.
+pub async fn next_frame(sub: &mut CanRxSub, lost: ErrorCounter) -> CanFrame {
+    loop {
+        match sub.next_message().await {
+            WaitResult::Message(frame) => return frame,
+            WaitResult::Lagged(n) => {
+                bump_by(lost, n.try_into().unwrap_or(u32::MAX));
+                defmt::warn!("can: subscriber fell behind, {} frames dropped", n);
+            }
+        }
+    }
+}
 
 #[cfg(feature = "hardware")]
 mod hw;

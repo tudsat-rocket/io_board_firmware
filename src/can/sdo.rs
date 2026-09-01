@@ -21,6 +21,8 @@ use crate::can::ids::{HEARTBEAT_BASE, SDO_REQUEST_BASE, SDO_RESPONSE_BASE};
 #[cfg(any(feature = "hardware", test))]
 use crate::can::{CanRxSub, CanTxPub};
 #[cfg(any(feature = "hardware", test))]
+use crate::errors::{ErrorCounter, bump};
+#[cfg(any(feature = "hardware", test))]
 use crate::safety;
 #[cfg(any(feature = "hardware", test))]
 use crate::store::{self, CONTROL_WAKE, PERSIST_WAKE, STORE};
@@ -44,7 +46,7 @@ impl SdoServer {
 
     pub async fn run(&mut self) -> ! {
         loop {
-            let (cob_id, body) = self.rx.next_message_pure().await;
+            let (cob_id, body) = crate::can::next_frame(&mut self.rx, ErrorCounter::CanRxDropped).await;
 
             // The master's node id is runtime-configurable, so which heartbeat matters is read
             // from the store rather than fixed at build time.
@@ -64,6 +66,7 @@ impl SdoServer {
                     // The command byte is enough to tell a malformed request from an unsupported one,
                     // and printing it avoids dragging core::fmt in through Debug2Format.
                     let _ = e;
+                    bump(ErrorCounter::SdoRequestInvalid);
                     defmt::warn!("sdo: undecodable request, command byte {=u8:#04x}", body[0]);
                     continue;
                 }
@@ -100,15 +103,18 @@ impl SdoServer {
             } => {
                 if !e {
                     // Segmented download: the dictionary has nothing that needs it.
+                    bump(ErrorCounter::SdoRequestInvalid);
                     return SdoResponse::abort(index, sub, AbortCode::UnsupportedAccess);
                 }
                 // `n` counts the unused bytes only when the size is flagged valid; without the
                 // flag we cannot know the width, and guessing would let a 1-byte write land in a
                 // 2-byte object.
                 if !s {
+                    bump(ErrorCounter::SdoRequestInvalid);
                     return SdoResponse::abort(index, sub, AbortCode::DataTypeMismatch);
                 }
                 if n > 3 {
+                    bump(ErrorCounter::SdoRequestInvalid);
                     return SdoResponse::abort(index, sub, AbortCode::DataTypeMismatchLengthLow);
                 }
 
@@ -130,6 +136,7 @@ impl SdoServer {
                 match result {
                     Ok(()) => SdoResponse::download_acknowledge(index, sub),
                     Err(code) => {
+                        bump(ErrorCounter::SdoWriteRejected);
                         defmt::warn!("sdo: write {=u16:#06x}.{} rejected, abort {=u32:#010x}", index, sub, code as u32);
                         SdoResponse::abort(index, sub, code)
                     }
@@ -139,6 +146,7 @@ impl SdoServer {
             // Block and segmented transfers, and anything else the framing can express.
             other => {
                 let _ = other;
+                bump(ErrorCounter::SdoRequestInvalid);
                 defmt::warn!("sdo: only expedited transfers are supported");
                 SdoResponse::abort(0, 0, AbortCode::UnsupportedAccess)
             }
@@ -148,6 +156,7 @@ impl SdoServer {
     async fn reply(&mut self, response: SdoResponse) {
         let cob_id = SDO_RESPONSE_BASE + self.node_id as u16;
         let Ok(body) = heapless::Vec::from_slice(&response.to_bytes()) else {
+            bump(ErrorCounter::SdoResponseDropped);
             defmt::error!("sdo: response did not fit a frame, dropping");
             return;
         };

@@ -14,6 +14,7 @@ use embedded_storage_async::nor_flash::NorFlash;
 use super::{
     Config, FallbackAction, ReliefConfig, SensorCalib, SensorKind, SensorSlotConfig, Unit, ValveConfig, ValveKind,
 };
+use crate::errors::{ErrorCounter, bump};
 use crate::index::{AmplifierId, HcoId, I2cBus, Id, PdoSensorChannel, SensorSlot, ValveId};
 
 const MAGIC: u32 = 0x4249_4F43; // "COIB", little-endian "IOCB"
@@ -46,6 +47,14 @@ const SLOT_OFFSETS: [u32; 2] = [0, SECTOR_LEN];
 const NONE_U8: u8 = 0xFF;
 
 const CRC: crc::Crc<u32> = crc::Crc::<u32>::new(&crc::CRC_32_ISO_HDLC);
+
+/// The `map_err` for every flash operation here: the driver's error types differ between
+/// operations and none of them says anything we can act on, so all this does is count the failure
+/// and forget what it was.
+fn flash_failed<E>(_: E) -> PersistError {
+    bump(ErrorCounter::ConfigFlashError);
+    PersistError::Flash
+}
 
 #[derive(Clone, Copy, Debug, defmt::Format)]
 pub enum PersistError {
@@ -385,6 +394,7 @@ impl<F: NorFlash> NorConfigStore<F> {
         for (slot, offset) in SLOT_OFFSETS.iter().enumerate() {
             if self.flash.read(*offset, &mut buf).await.is_err() {
                 // A read failure on one slot should not hide a good record in the other.
+                bump(ErrorCounter::ConfigFlashError);
                 defmt::warn!("config: read of slot {} failed", slot);
                 continue;
             }
@@ -401,6 +411,7 @@ impl<F: NorFlash> NorConfigStore<F> {
         };
 
         if let Err(e) = cfg.sanity_check() {
+            bump(ErrorCounter::ConfigInvalid);
             defmt::error!("config: stored record is not usable: {}", e);
             return Err(PersistError::Invalid);
         }
@@ -417,6 +428,7 @@ impl<F: NorFlash> NorConfigStore<F> {
     /// A no-op if `cfg` serializes to exactly what is already stored — see `last_body`.
     pub async fn save(&mut self, cfg: &Config) -> Result<(), PersistError> {
         cfg.sanity_check().map_err(|e| {
+            bump(ErrorCounter::ConfigInvalid);
             defmt::error!("config: refusing to persist an invalid config: {}", e);
             PersistError::Invalid
         })?;
@@ -434,8 +446,8 @@ impl<F: NorFlash> NorConfigStore<F> {
         let mut buf = [0u8; BUF_LEN];
         let len = write_record(cfg, sequence, &mut buf);
 
-        self.flash.erase(offset, offset + SECTOR_LEN).await.map_err(|_| PersistError::Flash)?;
-        self.flash.write(offset, &buf[..len]).await.map_err(|_| PersistError::Flash)?;
+        self.flash.erase(offset, offset + SECTOR_LEN).await.map_err(flash_failed)?;
+        self.flash.write(offset, &buf[..len]).await.map_err(flash_failed)?;
 
         self.last_sequence = Some(sequence);
         self.last_slot = slot;
@@ -447,7 +459,7 @@ impl<F: NorFlash> NorConfigStore<F> {
     /// Erase both slots so the next boot comes up on the compile-time factory defaults.
     pub async fn erase_all(&mut self) -> Result<(), PersistError> {
         for offset in SLOT_OFFSETS {
-            self.flash.erase(offset, offset + SECTOR_LEN).await.map_err(|_| PersistError::Flash)?;
+            self.flash.erase(offset, offset + SECTOR_LEN).await.map_err(flash_failed)?;
         }
         self.last_sequence = None;
         self.last_slot = 1;

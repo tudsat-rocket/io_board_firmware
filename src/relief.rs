@@ -77,6 +77,10 @@ impl Relief {
                 return Some(cfg.position);
             }
             if !self.warned_invalid {
+                // `warned_invalid` already debounces this to once per entry into the state, which
+                // is also the right granularity for the counter: a sensor that stays dead is one
+                // event, not one per tick.
+                crate::errors::bump(crate::errors::ErrorCounter::ReliefInhibited);
                 defmt::error!("overpressure relief inhibited: sensor slot {} has no valid reading", cfg.sensor.as_u8());
                 self.warned_invalid = true;
             }

@@ -84,6 +84,7 @@ async fn run_watchdog(mut iwdg: IndependentWatchdog<'static, embassy_stm32::peri
         let now = embassy_time::Instant::now();
         let late = (now - last).as_millis().saturating_sub(WATCHDOG_PET_INTERVAL.as_millis());
         if late > 20 {
+            crate::errors::bump(crate::errors::ErrorCounter::WatchdogLate);
             defmt::warn!("watchdog: pet {} ms late, executor stalled", late);
         }
         last = now;
@@ -141,6 +142,7 @@ pub async fn init_board(spawner: Spawner) -> Board {
         Ok(()) => Some(NorConfigStore::new(nor)),
         Err(e) => {
             // use compile-time defaults
+            crate::errors::bump(crate::errors::ErrorCounter::ConfigFlashError);
             defmt::error!("no usable config flash ({}), running on compile-time defaults", e);
             None
         }

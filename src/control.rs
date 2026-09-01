@@ -222,6 +222,10 @@ impl<R: RailSensing> Control<R> {
         if let Some(leds) = outcome.leds {
             store.leds = leds.as_byte();
         }
+        // Mirrored here rather than from a task of its own: the counters are bumped from places
+        // that cannot take this lock, and this is the one place that holds it periodically
+        // anyway. On a healthy board it is a single atomic load.
+        store.refresh_error_counters();
     }
 
     /// The whole per-tick arbitration decision: apply pending direct writes, resolve

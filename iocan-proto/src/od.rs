@@ -255,6 +255,144 @@ pub const RAIL_CURRENT: u16 = 0x2040;
 /// Rail voltages in millivolts: logic, HCO1+2, HCO3+4. `uint16[3]`, read-only. rev3 only.
 pub const RAIL_VOLTAGE: u16 = 0x2041;
 
+/// Error counters, one per failure kind. `uint32[NUM_ERROR_COUNTERS]`, read-only.
+///
+/// Sub-index *n + 1* is the counter named by [`ErrorCounter`] with discriminant *n*. Everything
+/// here is a hardware fault, a wiring fault or a firmware bug; nothing that happens in normal
+/// operation is counted.
+///
+/// # How to read them
+///
+/// Free-running, monotonic, and they wrap at `u32`. Poll periodically and look at the
+/// *difference* between reads: an absolute value means nothing without knowing the node's uptime,
+/// and a wrap is just another difference. Only a reset of the board clears them, which makes an
+/// unexpected return to zero its own signal — the node rebooted between your two reads.
+///
+/// Most count discrete events; a few count *samples*, climbing once per tick for as long as a
+/// condition holds. [`ErrorCounter`] says which is which, and the distinction matters: an event
+/// counter answers "how often did this happen", a sample counter answers "is it happening now".
+pub const ERROR_COUNTERS: u16 = 0x2050;
+
+/// Number of counters at [`ERROR_COUNTERS`], and the array size of that object.
+pub const NUM_ERROR_COUNTERS: usize = 22;
+
+/// What each sub-index of [`ERROR_COUNTERS`] counts.
+///
+/// The discriminant is the sub-index minus one, so **this list is append-only**: inserting a
+/// variant renumbers every counter after it and silently changes what a master is trending.
+/// Retiring one leaves a hole rather than removing the variant.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[repr(u8)]
+pub enum ErrorCounter {
+    /// An I2C transfer did not complete inside its timeout — a held SDA, a missing pull-up, or a
+    /// device stretching the clock forever. Not a NACK.
+    I2cTimeout = 0,
+    /// The I2C peripheral reported arbitration loss, a bus error or an overrun.
+    I2cBusError = 1,
+    /// A device believed present did not acknowledge. Never the normal NACK from an empty
+    /// address, which is not counted at all.
+    I2cNack = 2,
+    /// A device that had been answering stopped, and was dropped from [`I2C_PRESENT`]. One count
+    /// per disappearance, not per failed read.
+    I2cDeviceLost = 3,
+    /// A read of an ADC101C027 believed present came back empty.
+    AmplifierReadFailed = 4,
+    /// An amplifier raised its own ALERT flag: its window comparator tripped.
+    AmplifierAlert = 5,
+    /// A read of an AS5600 believed present came back empty.
+    EncoderReadFailed = 6,
+    /// An AS5600's magnet went missing or out of range. The part still answers, and the angle it
+    /// answers with is wrong — so this is the only warning that a position reading is a lie.
+    EncoderMagnetLost = 7,
+    /// **Sample counter.** A configured sensor slot was sampled while its device was absent.
+    /// Nonzero from boot, with nothing having disappeared, is the signature of a sensor
+    /// configured onto a bus or address it is not wired to.
+    SensorSourceMissing = 8,
+    /// The bxCAN receive FIFO overran: frames were dropped by the peripheral before software saw
+    /// them.
+    CanRxOverrun = 9,
+    /// The CAN receiver returned an error — a bus fault, or a malformed frame.
+    CanRxError = 10,
+    /// The node's internal fan-out lagged and a task missed frames that did arrive. Incremented
+    /// by the number of messages lost. Distinct from [`Self::CanRxOverrun`]: that is the hardware
+    /// giving up, this is a task not keeping up.
+    CanRxDropped = 11,
+    /// A frame waiting in a transmit mailbox was evicted before it went out. Nothing retries it.
+    CanTxDropped = 12,
+    /// The node tried to transmit something that is not a legal frame. Always a firmware bug.
+    CanTxInvalid = 13,
+    /// An SDO request could not be decoded, or asked for a transfer type this server does not
+    /// implement (anything but expedited).
+    SdoRequestInvalid = 14,
+    /// An SDO write was refused with an abort code. Usually a master with a stale idea of this
+    /// node's dictionary.
+    SdoWriteRejected = 15,
+    /// An SDO response did not fit in a frame and was dropped, leaving the master waiting. A
+    /// firmware bug — every object here is expedited-sized.
+    SdoResponseDropped = 16,
+    /// A valve latched a stall ([`VALVE_STALL_MA`]). One count per stall, not per tick spent
+    /// stalled.
+    ValveStall = 17,
+    /// Relief was armed but its watched slot had no valid reading, so it could not act. See
+    /// [`RELIEF_ENABLED`] for why that inhibits rather than vents.
+    ReliefInhibited = 18,
+    /// A read, erase or write of the config NOR flash failed, including at boot when the part did
+    /// not identify itself.
+    ConfigFlashError = 19,
+    /// A config failed its sanity check — one read back from flash, or one a master asked to
+    /// persist. Neither is applied.
+    ConfigInvalid = 20,
+    /// The watchdog pet ran measurably late: something blocked the executor.
+    ///
+    /// This is the near miss, and deliberately the only counter about the executor. A watchdog
+    /// reset, a panic and a HardFault all end in a reset that clears every counter here, so none
+    /// of them can be counted in RAM — catching those needs a region the reset does not touch,
+    /// which this object does not have.
+    WatchdogLate = 21,
+}
+
+impl ErrorCounter {
+    /// All of them, in sub-index order.
+    pub const ALL: [Self; NUM_ERROR_COUNTERS] = [
+        Self::I2cTimeout,
+        Self::I2cBusError,
+        Self::I2cNack,
+        Self::I2cDeviceLost,
+        Self::AmplifierReadFailed,
+        Self::AmplifierAlert,
+        Self::EncoderReadFailed,
+        Self::EncoderMagnetLost,
+        Self::SensorSourceMissing,
+        Self::CanRxOverrun,
+        Self::CanRxError,
+        Self::CanRxDropped,
+        Self::CanTxDropped,
+        Self::CanTxInvalid,
+        Self::SdoRequestInvalid,
+        Self::SdoWriteRejected,
+        Self::SdoResponseDropped,
+        Self::ValveStall,
+        Self::ReliefInhibited,
+        Self::ConfigFlashError,
+        Self::ConfigInvalid,
+        Self::WatchdogLate,
+    ];
+
+    /// The counter at sub-index `sub` of [`ERROR_COUNTERS`], for decoding a captured read.
+    pub const fn from_sub(sub: u8) -> Option<Self> {
+        if sub == 0 || sub as usize > NUM_ERROR_COUNTERS {
+            return None;
+        }
+        Some(Self::ALL[sub as usize - 1])
+    }
+
+    /// The sub-index this counter is read at.
+    pub const fn sub(self) -> u8 {
+        self as u8 + 1
+    }
+}
+
 // ===========================================================================
 // 0x3000 — configuration. Read/write, persisted on request.
 // ===========================================================================
@@ -594,6 +732,21 @@ mod tests {
         assert_eq!(SIGNATURE_LOAD.to_le_bytes(), *b"load");
     }
 
+    /// The sub-index a master polls is the discriminant plus one, so a reordering is a silent
+    /// protocol break rather than a compile error.
+    #[test]
+    fn the_error_counter_order_is_pinned() {
+        assert_eq!(ErrorCounter::ALL.len(), NUM_ERROR_COUNTERS);
+        for (index, counter) in ErrorCounter::ALL.iter().enumerate() {
+            assert_eq!(*counter as usize, index, "ALL must stay in discriminant order");
+            assert_eq!(counter.sub() as usize, index + 1);
+            assert_eq!(ErrorCounter::from_sub(counter.sub()), Some(*counter));
+        }
+        // Sub 0 is the array length in CANopen, never a counter.
+        assert_eq!(ErrorCounter::from_sub(0), None);
+        assert_eq!(ErrorCounter::from_sub(NUM_ERROR_COUNTERS as u8 + 1), None);
+    }
+
     /// Indices are the wire, so a duplicate or a typo'd digit is a silent aliasing bug rather
     /// than a compile error.
     #[test]
@@ -624,6 +777,7 @@ mod tests {
             MS_SINCE_HEARTBEAT,
             RAIL_CURRENT,
             RAIL_VOLTAGE,
+            ERROR_COUNTERS,
             MASTER_NODE_ID,
             FALLBACK_A_MS,
             FALLBACK_B_MS,

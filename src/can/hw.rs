@@ -14,6 +14,7 @@ use cancan::{CHANNEL_DEPTH, CanCan, CanCanRx, CanCanTx};
 use static_cell::StaticCell;
 
 use super::{CanOutChannel, CanRxChannel, CanRxPub, CanTxSub};
+use crate::errors::{ErrorCounter, bump};
 
 pub static CAN_IN: StaticCell<CanRxChannel> = StaticCell::new();
 pub static CAN_OUT: StaticCell<CanOutChannel> = StaticCell::new();
@@ -102,6 +103,13 @@ pub async fn spawn(
     spawner.spawn(run_rx(can_rx, cancan_rx, publisher).unwrap());
 }
 
+/// The next frame to transmit, counting anything the outbound queue dropped because this task
+/// fell behind — the same loss [`ErrorCounter::CanTxDropped`] covers on the mailbox side, since
+/// either way a frame this node meant to send never went out.
+async fn next_tx_frame(subscriber: &mut CanTxSub) -> super::CanFrame {
+    super::next_frame(subscriber, ErrorCounter::CanTxDropped).await
+}
+
 #[embassy_executor::task]
 async fn run_tx(
     can_tx: &'static mut CanTx<'static>,
@@ -110,15 +118,19 @@ async fn run_tx(
 ) -> ! {
     info!("Can TX task started.");
     loop {
-        let frame = match select(cancan_tx.recv(), subscriber.next_message_pure()).await {
+        let frame = match select(cancan_tx.recv(), next_tx_frame(&mut subscriber)).await {
             Either::First(frame) => frame,
             Either::Second((address, data)) => {
                 let Some(sid) = StandardId::new(address) else {
+                    // Both of these are us building a frame we cannot send, which is a firmware
+                    // bug rather than anything the bus did.
+                    bump(ErrorCounter::CanTxInvalid);
                     defmt::warn!("Invalid CAN ID: {}", address);
                     continue;
                 };
 
                 let Ok(frame) = Frame::new_data(sid, &data) else {
+                    bump(ErrorCounter::CanTxInvalid);
                     defmt::warn!("Invalid frame.");
                     continue;
                 };
@@ -130,6 +142,7 @@ async fn run_tx(
         if let Some(dropped) = can_tx.write(&frame).await.dequeued_frame()
             && let Id::Standard(sid) = dropped.id()
         {
+            bump(ErrorCounter::CanTxDropped);
             defmt::warn!("can_tx: evicted pending frame {=u16:#05x}, this should not happen", sid.as_raw());
         }
     }
@@ -145,6 +158,9 @@ async fn run_rx(
     loop {
         use embassy_stm32::pac::CAN1;
         if CAN1.rfr(0).read().fovr() {
+            // The peripheral gave up before software ever saw the frames. One count per time we
+            // notice the flag, not per frame — bxCAN does not say how many it lost.
+            bump(ErrorCounter::CanRxOverrun);
             defmt::error!("bxCAN RX FIFO0 overrun");
             CAN1.rfr(0).modify(|v| v.set_fovr(true));
         }
@@ -178,6 +194,7 @@ async fn run_rx(
 
             Err(e) => {
                 //TODO: ratelimiting
+                bump(ErrorCounter::CanRxError);
                 defmt::error!("can_rx: Failed to read envelope: {:?}", defmt::Debug2Format(&e))
             }
         }

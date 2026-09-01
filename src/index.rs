@@ -280,6 +280,31 @@ impl Id for AdcSlot {
 /// An array with one entry per [`AdcSlot`]: both buses, all nine straps.
 pub type PerAdcSlot<T> = Per<AdcSlot, T, { AdcSlot::COUNT }>;
 
+// Like `TpdoKind` below: the error taxonomy is part of the wire (the discriminant is the
+// sub-index at 0x2050), so it is defined in `iocan-proto` and given an `Id` impl here rather than
+// being declared twice.
+impl Id for iocan_proto::od::ErrorCounter {
+    const COUNT: usize = iocan_proto::od::NUM_ERROR_COUNTERS;
+    const ALL: &'static [Self] = &iocan_proto::od::ErrorCounter::ALL;
+
+    #[inline]
+    fn index(self) -> usize {
+        self as usize
+    }
+
+    #[inline]
+    fn from_index(index: usize) -> Option<Self> {
+        if index < <Self as Id>::COUNT {
+            Some(iocan_proto::od::ErrorCounter::ALL[index])
+        } else {
+            None
+        }
+    }
+}
+
+/// An array with one entry per [`iocan_proto::od::ErrorCounter`].
+pub type PerErrorCounter<T> = Per<iocan_proto::od::ErrorCounter, T, { iocan_proto::od::NUM_ERROR_COUNTERS }>;
+
 // The TPDO table is already a dense enum in the wire-protocol crate, and its discriminant is
 // defined to be the index into `tpdo_interval_ms` (0x3040). Giving it an `Id` impl here lets that
 // object use `Per` like everything else, without `iocan-proto` having to know this module exists.

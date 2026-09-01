@@ -39,6 +39,8 @@ use crate::config::Config;
 use crate::config::{ENCODER_ADDRESS, ENCODER_MAGNET_OK_BIT, ENCODER_PRESENT_BIT, SensorSource};
 use crate::config::{ENCODER_FULL_SCALE, SensorKind, SensorSlotConfig, Unit};
 #[cfg(any(feature = "hardware", test))]
+use crate::errors::{ErrorCounter, bump};
+#[cfg(any(feature = "hardware", test))]
 use crate::index::{AdcSlot, I2cBus, PerAdcSlot, PerI2cBus, PerSensorSlot};
 use crate::store::SENSOR_INVALID;
 #[cfg(any(feature = "hardware", test))]
@@ -284,6 +286,11 @@ impl<I0: I2c, I1: I2c> Sensors<I0, I1> {
         if was == present {
             return;
         }
+        if !present {
+            // Counted on the transition, not per failed read: a connector that opens once counts
+            // once, and one that chatters counts every time it goes.
+            bump(ErrorCounter::I2cDeviceLost);
+        }
         match target {
             ProbeTarget::Amplifier(slot) => {
                 let address = AMPLIFIER_ADDRESSES[slot.amplifier()];
@@ -326,6 +333,7 @@ impl<I0: I2c, I1: I2c> Sensors<I0, I1> {
             *mask &= !ENCODER_MAGNET_OK_BIT;
         }
         if was != ok && !ok {
+            bump(ErrorCounter::EncoderMagnetLost);
             defmt::warn!("as5600 on bus {}: magnet missing or out of range, angle is not usable", bus.as_u8());
         }
     }
@@ -355,6 +363,7 @@ impl<I0: I2c, I1: I2c> Sensors<I0, I1> {
                 Some(reading) => {
                     self.raw[slot] = reading.value;
                     if reading.alert {
+                        bump(ErrorCounter::AmplifierAlert);
                         defmt::warn!("amplifier ALERT: bus {} addr {=u8:#04x}", slot.bus().as_u8(), address);
                     }
                 }
@@ -362,6 +371,11 @@ impl<I0: I2c, I1: I2c> Sensors<I0, I1> {
                     // A device that stops answering is gone as far as we are concerned; the scan
                     // will find it again if it comes back. This is what makes a cable knocked
                     // loose during assembly visible instead of silently freezing a reading.
+                    //
+                    // The underlying bus fault is already counted in `ext_adc`; this says which
+                    // device it cost us, which is what turns "the bus is unhappy" into "amplifier
+                    // 3 on bus 1 is unhappy".
+                    bump(ErrorCounter::AmplifierReadFailed);
                     self.raw[slot] = RAW_INVALID;
                     self.set_present(ProbeTarget::Amplifier(slot), false);
                 }
@@ -379,6 +393,7 @@ impl<I0: I2c, I1: I2c> Sensors<I0, I1> {
                     self.set_magnet_ok(bus, reading.magnet_detected && !reading.magnet_out_of_range);
                 }
                 None => {
+                    bump(ErrorCounter::EncoderReadFailed);
                     self.raw_angle[bus] = RAW_INVALID;
                     self.set_present(ProbeTarget::Encoder(bus), false);
                     self.set_magnet_ok(bus, false);
@@ -414,12 +429,23 @@ impl<I0: I2c, I1: I2c> Sensors<I0, I1> {
     }
 
     /// The raw reading feeding a slot, or `None` when its device is absent or it has no source.
+    ///
+    /// A configured slot whose device is not there is counted on every sample rather than once,
+    /// which is what makes the two ways of being absent distinguishable: a device that vanished
+    /// also shows up as an [`ErrorCounter::I2cDeviceLost`] event, while one that was never there
+    /// at all — a sensor configured onto a bus or address it is not wired to — shows up only
+    /// here, climbing steadily from boot.
     fn raw_for(&self, slot: &SensorSlotConfig) -> Option<u16> {
+        // An unconfigured slot has no device to be missing, so it is not counted below.
         let raw = match slot.source()? {
             SensorSource::Adc(adc) => self.raw[adc],
             SensorSource::Encoder(bus) => self.raw_angle[bus],
         };
-        (raw != RAW_INVALID).then_some(raw)
+        if raw == RAW_INVALID {
+            bump(ErrorCounter::SensorSourceMissing);
+            return None;
+        }
+        Some(raw)
     }
 
     async fn publish(&mut self, config: &Config) {
@@ -460,11 +486,13 @@ mod tests {
         responses: HashMap<u8, [u8; 2]>,
     }
 
+    /// What a real bus reports for an address with nothing on it. The kind matters: it is what
+    /// tells [`ext_adc::I2cFault`] a probe found nothing rather than that the bus is broken.
     #[derive(Debug)]
     struct Nack;
     impl I2cError for Nack {
         fn kind(&self) -> ErrorKind {
-            ErrorKind::Other
+            ErrorKind::NoAcknowledge(embedded_hal_async::i2c::NoAcknowledgeSource::Address)
         }
     }
 
@@ -611,6 +639,71 @@ mod tests {
         block_on(sensors.scan_step(&cfg, Instant::from_millis(1)));
 
         assert!(!sensors.is_present(AdcSlot::new(I2cBus::Bus0, AmplifierId::Amp0)), "the interval has not elapsed yet");
+    }
+
+    /// The distinction the whole classification exists for: a presence sweep walks addresses that
+    /// are *supposed* to be empty, so if a NACK counted as an error a healthy board would clock
+    /// up thousands an hour and the counter would mean nothing.
+    #[test]
+    fn probing_an_empty_address_is_not_an_error() {
+        let _guard = crate::errors::test_lock();
+        crate::errors::reset_all();
+
+        let mut sensors = sensors_with(MockI2c::new(), MockI2c::new());
+        let cfg = Config::new();
+        block_on(sensors.scan_step(&cfg, Instant::from_millis(cfg.scan_interval_ms as u64)));
+
+        assert_eq!(crate::errors::count(ErrorCounter::I2cNack), 0);
+        assert_eq!(crate::errors::count(ErrorCounter::I2cBusError), 0);
+        assert_eq!(crate::errors::count(ErrorCounter::I2cTimeout), 0);
+    }
+
+    /// The same NACK from a device the presence bitmap says is there is a real failure, and has
+    /// to be counted at both levels: the bus fault, and which device it cost us.
+    #[test]
+    fn a_device_that_stops_answering_is_counted() {
+        let _guard = crate::errors::test_lock();
+        crate::errors::reset_all();
+
+        let mut sensors = sensors_with(MockI2c::new(), MockI2c::new());
+        sensors.set_present(ProbeTarget::Amplifier(AdcSlot::new(I2cBus::Bus0, AmplifierId::Amp0)), true);
+
+        block_on(sensors.sample(&Config::new()));
+
+        assert_eq!(crate::errors::count(ErrorCounter::I2cNack), 1);
+        assert_eq!(crate::errors::count(ErrorCounter::AmplifierReadFailed), 1);
+        assert_eq!(crate::errors::count(ErrorCounter::I2cDeviceLost), 1, "and it left the presence bitmap");
+
+        // Sampling again must not count another loss: it is already gone.
+        block_on(sensors.sample(&Config::new()));
+        assert_eq!(crate::errors::count(ErrorCounter::I2cDeviceLost), 1);
+    }
+
+    /// A sensor pointed at hardware that is not there never transitions, so nothing event-based
+    /// would ever fire — this is the counter that catches a board wired differently from its
+    /// config.
+    #[test]
+    fn a_sensor_configured_onto_absent_hardware_counts_every_sample() {
+        let _guard = crate::errors::test_lock();
+        crate::errors::reset_all();
+
+        let mut sensors = sensors_with(MockI2c::new(), MockI2c::new());
+        let config = Config::new().with_sensor(
+            crate::index::SensorSlot::Slot0,
+            SensorSlotConfig::pressure(I2cBus::Bus0, AmplifierId::Amp0, Unit::CentiBar, SensorCalib::UNITY),
+        );
+
+        block_on(sensors.publish(&config));
+        assert_eq!(crate::errors::count(ErrorCounter::SensorSourceMissing), 1);
+
+        block_on(sensors.publish(&config));
+        assert_eq!(crate::errors::count(ErrorCounter::SensorSourceMissing), 2, "a sample counter, not an event one");
+
+        assert_eq!(
+            crate::errors::count(ErrorCounter::I2cDeviceLost),
+            0,
+            "nothing was ever there to be lost, which is what distinguishes this from a cable falling out"
+        );
     }
 
     #[test]

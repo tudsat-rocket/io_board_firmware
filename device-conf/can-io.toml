@@ -258,6 +258,20 @@ access_type = "ro"
 array_size = 3
 default_value = [0, 0, 0]
 
+# One free-running counter per failure kind, sub n+1 = iocan_proto::od::ErrorCounter n. Poll and
+# difference; only a reset clears them.
+[[objects]]
+index = 0x2050
+parameter_name = "error counters since boot"
+object_type = "array"
+data_type = "uint32"
+access_type = "ro"
+array_size = 22
+default_value = [
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+]
+
 # ============================================================================
 # 0x3000 — runtime configuration. Read/write, persisted to NOR on 0x1010.
 # Defaults below are the generic ones; per-node factory defaults live in

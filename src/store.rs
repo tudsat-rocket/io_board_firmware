@@ -21,8 +21,8 @@ use zencan_common::sdo::AbortCode;
 
 use crate::config::{Config, SensorKind, SensorSlotConfig, Unit, ValveKind};
 use crate::index::{
-    AmplifierId, HcoId, I2cBus, Id, PdoSensorChannel, PerAdcSlot, PerHco, PerI2cBus, PerPdoSensor, PerRail,
-    PerSensorSlot, PerValve, SensorSlot, ValveId,
+    AmplifierId, HcoId, I2cBus, Id, PdoSensorChannel, PerAdcSlot, PerErrorCounter, PerHco, PerI2cBus, PerPdoSensor,
+    PerRail, PerSensorSlot, PerValve, SensorSlot, ValveId,
 };
 use crate::valves::position_of;
 
@@ -134,6 +134,13 @@ pub struct Store {
     pub rail_current_ma: PerRail<u16>,
     pub rail_voltage_mv: PerRail<u16>,
 
+    /// Mirror of [`crate::errors`]'s atomics, refreshed on the control tick.
+    ///
+    /// A copy rather than a read-through because the atomics are bumped from places that cannot
+    /// take the store's lock — an I2C error path, the CAN receive loop, the panic handler. See
+    /// [`Self::refresh_error_counters`].
+    pub error_counts: PerErrorCounter<u32>,
+
     // --- 0x3000 runtime config ----------------------------------------------
     pub config: Config,
 
@@ -169,6 +176,7 @@ impl Store {
             ms_since_heartbeat: 0,
             rail_current_ma: PerRail::splat(0),
             rail_voltage_mv: PerRail::splat(0),
+            error_counts: PerErrorCounter::splat(0),
             config: Config::new(),
             pending: Pending {
                 valves: PerValve::splat(false),
@@ -190,6 +198,17 @@ impl Store {
             *unit = self.config.sensors[slot].unit as u8;
         }
         self.refresh_pdo_sensors();
+    }
+
+    /// Copy [`crate::errors`]'s counters in, if any of them has moved since the last call.
+    ///
+    /// Called from the control tick, which already holds the lock to write its own observations —
+    /// so on a healthy board this costs one atomic load and nothing else, and on an unhealthy one
+    /// it costs a whole array copy at the tick rate. Neither is worth a task of its own.
+    pub fn refresh_error_counters(&mut self) {
+        if let Some(counts) = crate::errors::take_if_changed() {
+            self.error_counts = counts;
+        }
     }
 
     /// Gather the slots that claim a TPDO channel into the by-channel arrays the broadcaster
@@ -344,6 +363,7 @@ pub fn read(store: &Store, index: u16, sub: u8) -> Result<OdValue, AbortCode> {
         MS_SINCE_HEARTBEAT => scalar(OdValue::u32(store.ms_since_heartbeat)),
         RAIL_CURRENT => read_array(store.rail_current_ma.as_slice(), sub, OdValue::u16),
         RAIL_VOLTAGE => read_array(store.rail_voltage_mv.as_slice(), sub, OdValue::u16),
+        ERROR_COUNTERS => read_array(store.error_counts.as_slice(), sub, OdValue::u32),
 
         MASTER_NODE_ID => scalar(OdValue::u8(cfg.master_node_id)),
         FALLBACK_A_MS => scalar(OdValue::u32(cfg.fallback_a_ms)),

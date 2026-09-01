@@ -292,6 +292,9 @@ impl Valve {
             // suspected stall would drop a partially open valve in a vehicle; that call belongs to
             // the master, which can set the unpowered flag if it wants the servo released.
             if self.status != ValveStatus::Stalled {
+                // Guarded by the status check, so this counts stalls rather than the ticks spent
+                // in one — a valve stuck against an obstruction for a minute is one event.
+                crate::errors::bump(crate::errors::ErrorCounter::ValveStall);
                 defmt::error!(
                     "valve stall: {} mA over threshold {} mA for {} ms, holding at {} promille",
                     current_ma,
