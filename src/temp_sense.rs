@@ -10,24 +10,50 @@
 
 use crate::index::PerTemp;
 use crate::rail_sense::NoRails;
-use crate::store::TEMPERATURE_INVALID;
+use crate::store::{RAW_INVALID, TEMPERATURE_INVALID};
+
+/// One sweep of the on-board temperature channels.
+///
+/// Carries the raw conversion results next to the temperatures they were turned into, for the
+/// same reason 0x2000/0x2001 carry the amplifier counts next to the calibrated sensor values in
+/// 0x2004: when a reading looks wrong, the only question worth asking first is whether the number
+/// coming off the ADC is wrong or the maths applied to it is, and that is not answerable from the
+/// calibrated value alone.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Temperatures {
+    /// Millidegrees Celsius per [`crate::index::TempSensorId`], [`TEMPERATURE_INVALID`] for a
+    /// channel with no usable reading.
+    pub milli_c: PerTemp<i32>,
+    /// The 12-bit conversion behind each entry above, [`RAW_INVALID`] where there was none.
+    /// Published at 0x2043.
+    pub raw: PerTemp<u16>,
+}
+
+impl Temperatures {
+    /// What a board with no on-board sensing reports: nothing, in both forms.
+    pub const fn none() -> Self {
+        Self {
+            milli_c: PerTemp::splat(TEMPERATURE_INVALID),
+            raw: PerTemp::splat(RAW_INVALID),
+        }
+    }
+}
 
 #[allow(async_fn_in_trait)]
 pub trait TemperatureSensing {
-    /// This tick's board and MCU temperatures in millidegrees Celsius, indexed by
-    /// [`crate::index::TempSensorId`].
+    /// This tick's board and MCU temperatures, indexed by [`crate::index::TempSensorId`].
     ///
-    /// Per-entry rather than one `Option` for the pair, because the two sensors fail
+    /// Per-entry sentinels rather than one `Option` for the pair, because the two sensors fail
     /// independently: the MCU die sensor cannot go missing, while the board thermistor can read
-    /// open or shorted. An entry with no usable reading is [`TEMPERATURE_INVALID`].
-    async fn read_temperatures(&mut self) -> PerTemp<i32>;
+    /// open or shorted.
+    async fn read_temperatures(&mut self) -> Temperatures;
 }
 
 /// rev2 has no on-board sensing at all, so it reports neither temperature. It still publishes the
 /// frame — a node that says "I don't know" is easier to tell from a dead one than silence is.
 impl TemperatureSensing for NoRails {
-    async fn read_temperatures(&mut self) -> PerTemp<i32> {
-        PerTemp::splat(TEMPERATURE_INVALID)
+    async fn read_temperatures(&mut self) -> Temperatures {
+        Temperatures::none()
     }
 }
 

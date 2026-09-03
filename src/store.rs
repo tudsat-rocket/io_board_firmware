@@ -163,6 +163,12 @@ pub struct Store {
     /// 0x2042. [`TEMPERATURE_INVALID`] per entry until a reading lands, and permanently so on
     /// rev2 and for a thermistor that reads open or shorted.
     pub temperature_milli_c: PerTemp<i32>,
+    /// 0x2043: the raw conversions behind 0x2042, [`RAW_INVALID`] where there was none.
+    ///
+    /// Exposed for the same reason the amplifier counts at 0x2000/0x2001 are, next to the
+    /// calibrated values at 0x2004: a temperature that looks wrong is either a wrong conversion
+    /// or wrong maths applied to a right one, and only the raw count tells you which.
+    pub temperature_raw: PerTemp<u16>,
 
     /// Mirror of [`crate::errors`]'s atomics, refreshed on the control tick.
     ///
@@ -214,6 +220,7 @@ impl Store {
             rail_voltage_mv: PerRail::splat(0),
             error_counts: PerErrorCounter::splat(0),
             temperature_milli_c: PerTemp::splat(TEMPERATURE_INVALID),
+            temperature_raw: PerTemp::splat(RAW_INVALID),
             config: Config::new(),
             pending: Pending {
                 valves: PerValve::splat(false),
@@ -425,6 +432,7 @@ pub fn read(store: &Store, index: u16, sub: u8) -> Result<OdValue, AbortCode> {
         RAIL_VOLTAGE => read_array(store.rail_voltage_mv.as_slice(), sub, OdValue::u16),
         ERROR_COUNTERS => read_array(store.error_counts.as_slice(), sub, OdValue::u32),
         TEMPERATURE => read_array(store.temperature_milli_c.as_slice(), sub, OdValue::i32),
+        TEMPERATURE_RAW => read_array(store.temperature_raw.as_slice(), sub, OdValue::u16),
 
         MASTER_NODE_ID => scalar(OdValue::u8(cfg.master_node_id)),
         FALLBACK_A_MS => scalar(OdValue::u32(cfg.fallback_a_ms)),
@@ -961,7 +969,7 @@ pub fn write(store: &mut Store, index: u16, sub: u8, data: &[u8]) -> Result<(), 
         // Everything else in the 0x2000 block is process data we produce.
         RAW_ADC_BUS0 | RAW_ADC_BUS1 | RAW_ENCODER | I2C_PRESENT | I2C_SWEEPS | SENSOR_VALUE | SENSOR_UNIT
         | VALVE_TARGET | VALVE_MEASURED | VALVE_STATUS | VALVE_CURRENT | RELIEF_STATE | HEATER | HCO_OWNER
-        | LINK_STATE | MS_SINCE_HEARTBEAT | RAIL_CURRENT | RAIL_VOLTAGE | TEMPERATURE => {
+        | LINK_STATE | MS_SINCE_HEARTBEAT | RAIL_CURRENT | RAIL_VOLTAGE | TEMPERATURE | TEMPERATURE_RAW => {
             return Err(AbortCode::ReadOnly);
         }
 

@@ -14,7 +14,7 @@ use embassy_time::Instant;
 use crate::config::{Config, ValveConfig};
 use crate::hco::{HcoState, Level, State};
 use crate::heater::{Heater, HeaterConfig, HeaterMode, HeaterSensing};
-use crate::index::{HcoId, PerHco, PerSensorSlot, PerStepper, PerTemp, PerValve, ValveId};
+use crate::index::{HcoId, PerHco, PerSensorSlot, PerStepper, PerValve, ValveId};
 use crate::leds::{LedsState, StateLedPub};
 use crate::outputs::{Outputs, digital, pwm};
 use crate::rail_sense::{NoRails, RailSensing, Rails};
@@ -22,7 +22,7 @@ use crate::relief::Relief;
 use crate::safety::{self, FallbackLatch};
 use crate::stepper::{StepCommand, StepPort, Stepper};
 use crate::store::{CONTROL_WAKE, LinkState, SENSOR_INVALID, STORE};
-use crate::temp_sense::TemperatureSensing;
+use crate::temp_sense::{TemperatureSensing, Temperatures};
 use crate::valves::{
     NoFeedback, PositionFeedback, Valve, ValveDrive, ValveStatus, is_unpowered, position_of, unpowered_at,
 };
@@ -295,7 +295,8 @@ impl<R: RailSensing + HeaterSensing + TemperatureSensing> Control<R> {
             store.rail_voltage_mv = rails.voltage_mv;
         }
         if let Some(temperatures) = temperatures {
-            store.temperature_milli_c = temperatures;
+            store.temperature_milli_c = temperatures.milli_c;
+            store.temperature_raw = temperatures.raw;
         }
         if let Some(leds) = outcome.leds {
             store.leds = leds.as_byte();
@@ -578,7 +579,7 @@ impl<R: RailSensing + HeaterSensing + TemperatureSensing> Control<R> {
     /// slow channel does not blink in and out of validity between samples. A board with no
     /// sensing reports [`crate::store::TEMPERATURE_INVALID`] per entry instead, which is a
     /// different statement and travels as one.
-    async fn sample_temperatures(&mut self, now: Instant) -> Option<PerTemp<i32>> {
+    async fn sample_temperatures(&mut self, now: Instant) -> Option<Temperatures> {
         if let Some(last) = self.last_temperature
             && now.saturating_duration_since(last) < TEMPERATURE_INTERVAL
         {

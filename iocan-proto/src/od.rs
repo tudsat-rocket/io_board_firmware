@@ -324,6 +324,14 @@ pub const RAIL_VOLTAGE: u16 = 0x2041;
 /// Sampled once a second and broadcast as [`crate::TpdoFrame::Temperature`].
 pub const TEMPERATURE: u16 = 0x2042;
 
+/// The raw 12-bit conversions behind [`TEMPERATURE`], in the same order. `uint16[2]`, read-only.
+///
+/// [`RAW_INVALID`] for a channel that has not been read. Exposed for the same reason
+/// [`RAW_ADC_BUS0`] sits next to [`SENSOR_VALUE`]: when a temperature looks wrong, this says
+/// whether the conversion is wrong or the maths applied to it is. Sub 1 is the `TH_sense` divider
+/// (5k1 upper leg, 10k NTC to ground, so counts fall as it warms), sub 2 the MCU die channel.
+pub const TEMPERATURE_RAW: u16 = 0x2043;
+
 /// Error counters, one per failure kind. `uint32[NUM_ERROR_COUNTERS]`, read-only.
 ///
 /// Sub-index *n + 1* is the counter named by [`ErrorCounter`] with discriminant *n*. Everything
@@ -935,6 +943,7 @@ mod tests {
             RAIL_CURRENT,
             RAIL_VOLTAGE,
             TEMPERATURE,
+            TEMPERATURE_RAW,
             ERROR_COUNTERS,
             MASTER_NODE_ID,
             FALLBACK_A_MS,

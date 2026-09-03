@@ -189,24 +189,41 @@ impl crate::rail_sense::RailSensing for OnboardSensRev3 {
 }
 
 impl crate::temp_sense::TemperatureSensing for OnboardSensRev3 {
-    async fn read_temperatures(&mut self) -> crate::index::PerTemp<i32> {
-        use crate::temp_sense::{mcu_sense_uv_to_milli_c, ntc_counts_to_milli_c};
+    async fn read_temperatures(&mut self) -> crate::temp_sense::Temperatures {
+        use crate::temp_sense::{Temperatures, mcu_sense_uv_to_milli_c, ntc_counts_to_milli_c};
 
-        // The thermistor is read as raw counts, not millivolts: the divider hangs off the same
-        // +3.3V that feeds the ADC reference, so counts already carry the ratio the beta equation
-        // wants and VDDA cancels. Going through `reading_to_mv` would put VREFINT's own error
-        // into a reading that does not need it. See `NTC_CURVE`.
-        let board = self.adc.read(&mut self.pins.v_temp, Self::TEMPERATURE_SAMPLE_TIME).await;
+        // The thermistor is read as raw counts, not millivolts: the divider hangs off +3.3V and
+        // the ADC reference is +3.3VA, the filtered version of the same rail, so counts already
+        // carry the ratio the beta equation wants and VDDA cancels. Going through
+        // `reading_to_mv` would put VREFINT's own error into a reading that does not need it.
+        // See `NTC_CURVE`.
+        let board_raw = self.adc.read(&mut self.pins.v_temp, Self::TEMPERATURE_SAMPLE_TIME).await;
 
         // The die sensor is the opposite case: its output is an absolute voltage compared against
         // a fixed datasheet reference, so it does need VREFINT to escape VDDA.
-        let mcu = self.adc.read(&mut self.temperature, Self::TEMPERATURE_SAMPLE_TIME).await;
+        let mcu_raw = self.adc.read(&mut self.temperature, Self::TEMPERATURE_SAMPLE_TIME).await;
+
+        let milli_c = crate::index::PerTemp::new([
+            ntc_counts_to_milli_c(board_raw),
+            mcu_sense_uv_to_milli_c(self.reading_to_uv(mcu_raw)),
+        ]);
+
+        // Once a second, and the fastest way to tell a frozen conversion from a frozen
+        // calculation when a board is on a bench with a probe attached.
+        defmt::debug!(
+            "temp: ntc {} counts -> {} mC, die {} counts -> {} mC (vref {})",
+            board_raw,
+            milli_c[crate::index::TempSensorId::Board],
+            mcu_raw,
+            milli_c[crate::index::TempSensorId::Mcu],
+            self.vref_sample,
+        );
 
         // In `TempSensorId` order: Board, Mcu.
-        crate::index::PerTemp::new([
-            ntc_counts_to_milli_c(board),
-            mcu_sense_uv_to_milli_c(self.reading_to_uv(mcu)),
-        ])
+        Temperatures {
+            milli_c,
+            raw: crate::index::PerTemp::new([board_raw, mcu_raw]),
+        }
     }
 }
 

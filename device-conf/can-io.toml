@@ -298,6 +298,16 @@ access_type = "ro"
 array_size = 2
 default_value = [-2147483648, -2147483648]
 
+# Raw 12-bit conversions behind 0x2042, same order; 65535 = not read.
+[[objects]]
+index = 0x2043
+parameter_name = "raw temperature adc counts (board ntc, mcu die)"
+object_type = "array"
+data_type = "uint16"
+access_type = "ro"
+array_size = 2
+default_value = [65535, 65535]
+
 # One free-running counter per failure kind, sub n+1 = iocan_proto::od::ErrorCounter n. Poll and
 # difference; only a reset clears them.
 [[objects]]
