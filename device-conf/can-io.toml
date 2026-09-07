@@ -127,6 +127,68 @@
 # normally a solenoid. The firmware warns at boot if that looks wrong.
 #
 # ---------------------------------------------------------------------------
+# The clock/direction stepper
+# ---------------------------------------------------------------------------
+#
+# A node may carry UP TO TWO stepper actuators (Nanotec PD2-C, or any other
+# driver taking a step clock and a direction level), configured at
+# 0x3060..0x3065 — each of those is a 2-entry array, one per actuator. Both
+# board revisions; on rev2 the high current output software PWM was moved to
+# TIM5 to free TIM2, whose CH3/CH4 are the only timer channels the board has
+# left on pins it can reach.
+#
+# The pinout depends on how many are fitted, and is fixed at BUILD time (pin
+# muxing happens long before any configuration is read):
+#
+#   one actuator          PA2 step, PA3 direction         (COM4 / COM3)
+#   two (`dual-stepper`)  PA2 step 0, PA3 step 1,
+#                         PC10 direction 0, PA5 direction 1
+#
+# Both step clocks are channels of one timer, so WHILE BOTH ARE MOVING they
+# move at the same rate — the lower of the two planned rates. Targets, step
+# counters and directions are fully independent, an actuator that arrives stops
+# on its own, and whenever only one is moving it runs at its own planned rate.
+#
+# A config mapping actuator 1 on a firmware built without `dual-stepper` is a
+# build mistake, not a bus one: the node logs an error at boot and that
+# actuator never moves.
+#
+# THE MASTER DOES NOT HAVE TO KNOW. A stepper occupies an ordinary valve slot
+# with kind 3 (0x3010) and is commanded exactly like a servo: promille to
+# 0x2010, target back at 0x2011, position at 0x2012, status at 0x2013. Nothing
+# about the data plane changes.
+#
+# What differs underneath:
+#
+#  * NO HIGH CURRENT OUTPUT.  Its 0x3011/0x3012 are both 0 ("none") and it never
+#    appears in 0x2022, so all four outputs stay available for other valves.
+#    0x2014 reads 0 for it — the shunts only cover the outputs — so stall
+#    detection (0x3016) is not available and must stay at 0.
+#  * 0x2012 IS EXACT.  The pulses are counted in hardware, so the reported
+#    position is measured rather than integrated from 0x3015 (travel time),
+#    which is ignored for a stepper.
+#  * THE UNPOWERED FLAG IS ACCEPTED AND IGNORED.  ENABLE is strapped to 5 V, so
+#    the motor holds torque whenever it has power and there is nothing to
+#    release. 0x2012 never comes back with bit 15 set for a stepper, and the
+#    fallback unpower flags (0x3005/0x3006) do nothing — the firmware warns at
+#    boot if they are set.
+#
+# HOMING is 0x2016, per actuator. There is no home switch and the driver's own encoder is not
+# wired back, so the step count is relative to power-on. Reading 0x2016 gives
+# the raw signed count; WRITING it declares the shaft to physically be at that
+# count WITHOUT MOVING IT. The procedure is to drive the actuator to a known
+# mechanical stop and then write the step count for that stop. Unlike 0x2012,
+# 0x2016 is not clamped into the configured travel, so it is also how you tell
+# that the actuator has walked off the end.
+#
+# Travel is 0x3061 (closed) to 0x3062 (open), in steps. The SIGN of their
+# difference picks the direction of rotation — there is no separate invert flag
+# to disagree with the endpoints. Speeds are 0x3063 (traverse), 0x3064 (pull-in,
+# the rate the motor can start and stop at without losing steps) and 0x3065
+# (ramp). The firmware plans a trapezoid between them and holds the approach
+# down to the pull-in rate, so arriving never loses a step.
+#
+# ---------------------------------------------------------------------------
 # Persistence
 # ---------------------------------------------------------------------------
 #
@@ -306,6 +368,21 @@ object_type = "var"
 data_type = "uint8"
 access_type = "ro"
 default_value = 4
+
+# Pulses the stepper has emitted since boot, direction-signed. NOT clamped into
+# the configured travel, unlike 0x2012 — this is the raw count, and reading it
+# outside 0x3061..0x3062 is how an actuator that has walked off the end shows
+# up. Writing it declares the shaft to be at that count without moving it,
+# which is the only homing this actuator has. Rejected with
+# ResourceNotAvailable on a node with no stepper configured.
+[[objects]]
+index = 0x2016
+parameter_name = "stepper position, steps since boot"
+object_type = "array"
+data_type = "int32"
+access_type = "rw"
+array_size = 2
+default_value = [0, 0]
 
 # --- direct high current output control ----------------------------------
 
@@ -781,3 +858,85 @@ object_type = "var"
 data_type = "uint16"
 access_type = "rw"
 default_value = 500
+
+# ============================================================================
+# 0x3060 — the clock/direction stepper. See the section at the top of this file.
+#
+# Two entries each, one per actuator. At most two per node: TIM2 CH3/CH4 on
+# PA2/PA3 are the only timer channels the board has left on reachable pins.
+# ============================================================================
+
+# Index of the valve slot this actuator is, or 0xFF for none. That slot's kind
+# (0x3010) must be 3 (stepper), and the two actuators may not name the same
+# slot. Both directions are checked on save, because a mismatch would either
+# accept commands that move nothing or plan moves for a valve that drives an
+# output pair.
+[[objects]]
+index = 0x3060
+parameter_name = "stepper valve index (0xFF = none)"
+object_type = "array"
+data_type = "uint8"
+access_type = "rw"
+array_size = 2
+default_value = [255, 255]
+
+# Step count at 0 promille.
+[[objects]]
+index = 0x3061
+parameter_name = "stepper step count at fully closed"
+object_type = "array"
+data_type = "int32"
+access_type = "rw"
+array_size = 2
+default_value = [0, 0]
+
+# Step count at 1000 promille. MAY BE BELOW 0x3061: the sign of the difference
+# is what picks the direction of rotation, so a reversed actuator is expressed
+# by swapping the endpoints rather than by a separate invert flag. Equal
+# endpoints are rejected on save — the actuator could never move.
+[[objects]]
+index = 0x3062
+parameter_name = "stepper step count at fully open"
+object_type = "array"
+data_type = "int32"
+access_type = "rw"
+array_size = 2
+default_value = [0, 0]
+
+# Traverse speed: the ceiling the ramp accelerates toward. The firmware clamps
+# to 20 kHz, well inside the PD2-C's 1 MHz limit — the update interrupt runs
+# once per step, and the period has to stay long enough to give a direction
+# change the 35 us the driver wants to settle.
+[[objects]]
+index = 0x3063
+parameter_name = "stepper traverse speed, steps per second"
+object_type = "array"
+data_type = "uint32"
+access_type = "rw"
+array_size = 2
+default_value = [0, 0]
+
+# Pull-in rate: the speed the motor can start AND stop at without losing steps,
+# which for a 42 mm frame is a few hundred steps per second. Every move begins
+# here and the braking curve never falls below it, so the hard stop on arrival
+# costs nothing. Zero is rejected on save: it means "never start", not
+# "disabled".
+[[objects]]
+index = 0x3064
+parameter_name = "stepper pull-in rate, steps per second"
+object_type = "array"
+data_type = "uint32"
+access_type = "rw"
+array_size = 2
+default_value = [0, 0]
+
+# Ramp rate. 0 is legal and means no ramp at all: every move runs the whole way
+# at the pull-in rate, which is safe but slow. The firmware says so at boot.
+[[objects]]
+index = 0x3065
+parameter_name = "stepper acceleration, steps per second squared"
+object_type = "array"
+data_type = "uint32"
+access_type = "rw"
+array_size = 2
+default_value = [0, 0]

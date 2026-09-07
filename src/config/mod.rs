@@ -18,9 +18,10 @@
 pub mod persist;
 
 use crate::index::{
-    AdcSlot, AmplifierId, HcoId, HcoPair, I2cBus, PerAmplifier, PerSensorSlot, PerTpdoKind, PerValve, SensorSlot,
-    ValveId,
+    AdcSlot, AmplifierId, HcoId, HcoPair, I2cBus, PerAmplifier, PerSensorSlot, PerStepper, PerTpdoKind, PerValve,
+    SensorSlot, StepperId, ValveId,
 };
+pub use crate::stepper::StepperConfig;
 
 /// Sizes of the fixed domains. Each is the count of the matching id type in [`crate::index`] —
 /// kept as plain constants only for the places that genuinely want a number (a CANopen array's
@@ -67,6 +68,10 @@ pub enum ValveKind {
     /// Hobby-style servo on a PWM output, optionally with a separate power output that lets us
     /// take it to [`crate::valves::ValveStatus::Unpowered`].
     Servo = 2,
+    /// Clock/direction stepper on the COM port, driven by [`crate::stepper`]. Uses no high
+    /// current output at all, so `power_hco` and `signal_hco` stay `None` and the rest of the
+    /// board's output arbitration never sees it.
+    Stepper = 3,
 }
 
 impl ValveKind {
@@ -75,6 +80,7 @@ impl ValveKind {
             0 => Some(Self::None),
             1 => Some(Self::Solenoid),
             2 => Some(Self::Servo),
+            3 => Some(Self::Stepper),
             _ => None,
         }
     }
@@ -204,6 +210,37 @@ impl ValveConfig {
         }
     }
 
+    /// The board's clock/direction stepper, as a valve slot.
+    ///
+    /// Everything about the actuator itself — travel in steps, speeds — lives in
+    /// [`StepperConfig`] rather than here, because there is only one of it per board. What this
+    /// slot contributes is the part every valve has: the command layer, the input clamp and the
+    /// fallback actions.
+    ///
+    /// `travel_ms` is left at the [`Self::unmapped`] default and never used: a stepper reports its
+    /// real position back through [`crate::valves::PositionFeedback`], so there is nothing to
+    /// estimate. It stays non-zero only because `sanity_check` insists on it for servos and a
+    /// single rule is easier to keep true than two.
+    pub const fn stepper() -> Self {
+        Self {
+            kind: ValveKind::Stepper,
+            power_hco: None,
+            signal_hco: None,
+            // Both stages keep the drive: ENABLE is strapped to 5 V and there is no output to
+            // drop, so an `unpower: true` here would be a promise the hardware cannot keep. The
+            // default is the truth rather than the inherited servo behaviour.
+            fallback_a: FallbackAction {
+                position: 0,
+                unpower: false,
+            },
+            fallback_b: FallbackAction {
+                position: PROMILLE_MAX,
+                unpower: false,
+            },
+            ..Self::unmapped()
+        }
+    }
+
     pub const fn solenoid_on(hco: HcoId) -> Self {
         Self {
             kind: ValveKind::Solenoid,
@@ -228,8 +265,17 @@ impl ValveConfig {
         promille.min(PROMILLE_MAX).clamp(self.min_promille, self.max_promille.min(PROMILLE_MAX))
     }
 
+    /// Is there something on this slot that can actually be commanded?
+    ///
+    /// A stepper is the one kind that is mapped without owning an output — its actuator hangs off
+    /// the COM port, and whether that port is configured is [`StepperConfig::is_mapped`]'s
+    /// question, cross-checked against this one in [`Config::sanity_check`].
     pub fn is_mapped(&self) -> bool {
-        self.kind != ValveKind::None && self.signal_hco.is_some()
+        match self.kind {
+            ValveKind::None => false,
+            ValveKind::Stepper => true,
+            ValveKind::Solenoid | ValveKind::Servo => self.signal_hco.is_some(),
+        }
     }
 }
 
@@ -399,6 +445,9 @@ pub struct Config {
     pub scan_interval_ms: u16,
     pub tpdo_interval_ms: PerTpdoKind<u16>,
     pub relief: ReliefConfig,
+    /// The board's clock/direction actuators. At most two, because PA2/PA3 carry the only timer
+    /// channels left on pins this board can reach.
+    pub steppers: PerStepper<StepperConfig>,
 }
 
 impl Config {
@@ -415,12 +464,31 @@ impl Config {
             scan_interval_ms: 500,
             tpdo_interval_ms: DEFAULT_TPDO_MS,
             relief: ReliefConfig::disabled(),
+            steppers: PerStepper::splat(StepperConfig::disabled()),
         }
     }
 
     pub const fn with_relief(mut self, relief: ReliefConfig) -> Self {
         self.relief = relief;
         self
+    }
+
+    /// Fit one clock/direction actuator, and give its valve slot the matching kind.
+    ///
+    /// Both halves in one call on purpose: a `StepperConfig` naming a valve that is not a
+    /// [`ValveKind::Stepper`], or a stepper valve with no actuator behind it, is exactly the
+    /// mismatch `sanity_check` rejects — so the ordinary way in cannot produce one.
+    pub const fn with_stepper(mut self, id: StepperId, stepper: StepperConfig) -> Self {
+        if let Some(valve) = stepper.valve {
+            self.valves = self.valves.with_at(valve.index(), ValveConfig::stepper());
+        }
+        self.steppers = self.steppers.with_at(id.index(), stepper);
+        self
+    }
+
+    /// Which actuator, if any, answers to a given valve slot.
+    pub fn stepper_for(&self, valve: ValveId) -> Option<StepperId> {
+        self.steppers.iter().find_map(|(id, s)| (s.valve == Some(valve)).then_some(id))
     }
 
     pub const fn with_valve(mut self, valve: ValveId, config: ValveConfig) -> Self {
@@ -466,10 +534,41 @@ impl Config {
             if v.kind == ValveKind::Servo && v.travel_ms == 0 {
                 return Err(ConfigError::ZeroTravelTime(id));
             }
+            // A stepper valve with no actuator behind it has nothing to drive: it would accept
+            // commands over the bus and move nothing at all.
+            if v.kind == ValveKind::Stepper && self.stepper_for(id).is_none() {
+                return Err(ConfigError::StepperUnmapped(id));
+            }
             // Two valves sharing an output would fight each other every control tick.
             for (other, w) in self.valves.iter().skip(id.index() + 1) {
                 if w.is_mapped() && shares_output(v, w) {
                     return Err(ConfigError::OutputShared(id, other));
+                }
+            }
+        }
+
+        for (id, stepper) in self.steppers.iter() {
+            let Some(valve) = stepper.valve else {
+                continue;
+            };
+            // The mirror of the check above: an actuator pointing at a slot that is not a stepper
+            // would have the control task planning moves for a valve driving an HCO pair.
+            if self.valves[valve].kind != ValveKind::Stepper {
+                return Err(ConfigError::StepperValveKind(valve));
+            }
+            if stepper.span() == 0 {
+                return Err(ConfigError::StepperZeroTravel(id));
+            }
+            // Zero here is not "disabled", it is "never start", and the actuator would sit
+            // reporting Moving forever without emitting a pulse.
+            if stepper.start_step_hz == 0 || stepper.max_step_hz == 0 {
+                return Err(ConfigError::StepperZeroSpeed(id));
+            }
+            // Two actuators on one valve slot would both plan moves for it, from two different
+            // step counters, and fight over the same reported position.
+            for (other, w) in self.steppers.iter().skip(id.index() + 1) {
+                if w.valve == Some(valve) {
+                    return Err(ConfigError::StepperValveShared(id, other));
                 }
             }
         }
@@ -497,6 +596,36 @@ impl Config {
     /// Configuration that is legal but probably not what was meant. Logged once at boot rather
     /// than rejected, because each of these has a defensible use.
     pub fn log_warnings(&self) {
+        for (id, stepper) in self.steppers.iter() {
+            let Some(valve) = stepper.valve else {
+                continue;
+            };
+            let cfg = &self.valves[valve];
+            // With ENABLE strapped to 5 V there is no drive to drop, so a stepper holds its
+            // position through a fallback whatever the stage asked for. Configuring an unpower
+            // reads as "this will go limp" and it will not.
+            if cfg.fallback_a.unpower || cfg.fallback_b.unpower {
+                defmt::warn!(
+                    "valve {} is stepper {}: its fallback unpower flags (0x3005/0x3006) do \
+                     nothing, the motor holds torque as long as it has power",
+                    valve,
+                    id
+                );
+            }
+            if stepper.start_step_hz > stepper.max_step_hz {
+                defmt::warn!(
+                    "stepper {} pull-in rate {} Hz is above the traverse speed {} Hz, so the \
+                     traverse speed has no effect",
+                    id,
+                    stepper.start_step_hz,
+                    stepper.max_step_hz
+                );
+            }
+            if stepper.accel_hz_per_s == 0 {
+                defmt::warn!("stepper {} acceleration is 0: every move runs at the pull-in rate", id);
+            }
+        }
+
         if !self.relief.is_armed() {
             return;
         }
@@ -615,6 +744,16 @@ pub enum ConfigError {
     ClampInverted(ValveId),
     ZeroTravelTime(ValveId),
     OutputShared(ValveId, ValveId),
+    /// A valve is configured as a stepper, but the board's actuator does not answer to it.
+    StepperUnmapped(ValveId),
+    /// The actuator names a valve slot that is not a [`ValveKind::Stepper`].
+    StepperValveKind(ValveId),
+    /// Closed and open are the same step count, so the actuator can never move.
+    StepperZeroTravel(StepperId),
+    /// A pulse rate of zero: the actuator would never take a step.
+    StepperZeroSpeed(StepperId),
+    /// Both actuators point at the same valve slot.
+    StepperValveShared(StepperId, StepperId),
     /// Relief is armed against a valve that is not fitted.
     ReliefValveUnmapped(ValveId),
     /// Relief is armed against a sensor slot that is not configured.

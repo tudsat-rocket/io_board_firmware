@@ -12,9 +12,10 @@
 use embedded_storage_async::nor_flash::NorFlash;
 
 use super::{
-    Config, FallbackAction, PressureCalib, ReliefConfig, SensorKind, SensorSlotConfig, Unit, ValveConfig, ValveKind,
+    Config, FallbackAction, PressureCalib, ReliefConfig, SensorKind, SensorSlotConfig, StepperConfig, Unit,
+    ValveConfig, ValveKind,
 };
-use crate::index::{AmplifierId, HcoId, I2cBus, Id, SensorSlot, ValveId};
+use crate::index::{AmplifierId, HcoId, I2cBus, Id, SensorSlot, StepperId, ValveId};
 
 const MAGIC: u32 = 0x4249_4F43; // "COIB", little-endian "IOCB"
 
@@ -24,16 +25,18 @@ const MAGIC: u32 = 0x4249_4F43; // "COIB", little-endian "IOCB"
 ///
 /// 2: pressure calibration gained a constant term (`PressureCalib::constant_millibar`).
 /// 3: added the overpressure relief loop (`ReliefConfig`).
-const VERSION: u16 = 3;
+/// 4: added the clock/direction stepper (`StepperConfig`).
+/// 5: a second stepper — the block is now one per `StepperId`.
+const VERSION: u16 = 5;
 
 const HEADER_LEN: usize = 12;
-const BODY_LEN: usize = 291;
+const BODY_LEN: usize = 333;
 #[cfg(test)]
 const RECORD_LEN: usize = HEADER_LEN + BODY_LEN + 4;
 
 /// Padded to a comfortable margin over `RECORD_LEN` so a future field does not force a format
 /// bump just to fit.
-const BUF_LEN: usize = 320;
+const BUF_LEN: usize = 384;
 
 const SECTOR_LEN: u32 = 4096;
 const SLOT_OFFSETS: [u32; 2] = [0, SECTOR_LEN];
@@ -206,6 +209,15 @@ fn write_body(cfg: &Config, out: &mut [u8]) -> usize {
     w.u16(cfg.relief.pulse_ms);
     w.u16(cfg.relief.cooldown_ms);
 
+    for stepper in cfg.steppers.values() {
+        w.opt_id(stepper.valve);
+        w.i32(stepper.closed_steps);
+        w.i32(stepper.open_steps);
+        w.u32(stepper.max_step_hz);
+        w.u32(stepper.start_step_hz);
+        w.u32(stepper.accel_hz_per_s);
+    }
+
     w.pos
 }
 
@@ -284,6 +296,17 @@ fn read_body(body: &[u8]) -> Option<Config> {
         pulse_ms: r.u16(),
         cooldown_ms: r.u16(),
     };
+
+    for id in StepperId::ALL {
+        cfg.steppers[id] = StepperConfig {
+            valve: r.opt_id().ok()?,
+            closed_steps: r.i32(),
+            open_steps: r.i32(),
+            max_step_hz: r.u32(),
+            start_step_hz: r.u32(),
+            accel_hz_per_s: r.u32(),
+        };
+    }
 
     Some(cfg)
 }
@@ -507,6 +530,51 @@ mod tests {
 
         assert_eq!(back.sensors[SensorSlot::Slot0].calib.constant_millibar, 1013);
         assert_eq!(back.sensors[SensorSlot::Slot1].calib.constant_millibar, 0);
+    }
+
+    /// The step counts *are* the actuator's calibration — losing them across a save would leave
+    /// the board driving the wrong distance with no way to notice.
+    #[test]
+    fn the_stepper_survives_a_round_trip() {
+        let cfg = Config::new()
+            .with_stepper(
+                StepperId::Stepper0,
+                crate::stepper::StepperConfig::new(ValveId::Valve2, -250, 1_750).with_speed(3_000, 450, 9_000),
+            )
+            .with_stepper(
+                StepperId::Stepper1,
+                crate::stepper::StepperConfig::new(ValveId::Valve3, 0, -400).with_speed(1_000, 200, 2_000),
+            );
+
+        let mut buf = [0u8; BUF_LEN];
+        write_record(&cfg, 1, &mut buf);
+        let (_, back) = read_record(&buf).expect("record should validate");
+
+        let first = back.steppers[StepperId::Stepper0];
+        assert_eq!(first.valve, Some(ValveId::Valve2));
+        assert_eq!(first.closed_steps, -250, "a negative endpoint has to survive as one");
+        assert_eq!(first.open_steps, 1_750);
+        assert_eq!(first.max_step_hz, 3_000);
+        assert_eq!(first.start_step_hz, 450);
+        assert_eq!(first.accel_hz_per_s, 9_000);
+        assert_eq!(back.valves[ValveId::Valve2].kind as u8, ValveKind::Stepper as u8);
+
+        // The two are independent records, not one written twice.
+        let second = back.steppers[StepperId::Stepper1];
+        assert_eq!(second.valve, Some(ValveId::Valve3));
+        assert_eq!(second.open_steps, -400, "a reversed actuator alongside a forward one");
+        assert_eq!(second.max_step_hz, 1_000);
+        assert_eq!(back.valves[ValveId::Valve3].kind as u8, ValveKind::Stepper as u8);
+    }
+
+    #[test]
+    fn a_board_without_a_stepper_round_trips_as_one() {
+        let mut buf = [0u8; BUF_LEN];
+        write_record(&Config::new(), 1, &mut buf);
+        let (_, back) = read_record(&buf).expect("record should validate");
+        for id in StepperId::ALL {
+            assert_eq!(back.steppers[id].valve, None);
+        }
     }
 
     #[test]

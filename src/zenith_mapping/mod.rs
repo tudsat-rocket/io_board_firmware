@@ -6,8 +6,8 @@
 //! rebuild; this file is the fallback, and the place to record a configuration once it has been
 //! proven.
 
-use crate::config::{Config, NodeSettings, ReliefConfig, SensorSlotConfig, ValveConfig};
-use crate::index::{AmplifierId::*, HcoId, HcoPair, I2cBus::*, SensorSlot::*, ValveId::*};
+use crate::config::{Config, FallbackAction, NodeSettings, ReliefConfig, SensorSlotConfig, ValveConfig};
+use crate::index::{AmplifierId::*, HcoId, HcoPair, I2cBus::*, SensorSlot::*, StepperId, ValveId::*};
 use crate::zenith_mapping::sensors::Transducer;
 
 pub mod sensors;
@@ -95,3 +95,70 @@ pub const NODE8_REG: NodeSettings = NodeSettings::new(
             ReliefConfig::new(Valve0, Slot0, RELIEF_THRESHOLD_60_BAR).with_pulse_ms(500).with_cooldown_ms(500),
         ),
 );
+
+/// Node 9 — the stepper node: a clock/direction actuator on COM4.
+///
+/// A Nanotec PD2-C411L18-E-65-01 replaces a servo on a valve that needs more travel resolution
+/// and more torque than a hobby servo has. It is commanded exactly like every other valve on this
+/// bus — promille to 0x2010, promille back from 0x2012 — and none of the master's code has to
+/// know it is a stepper. What changes is underneath: no high current output is involved at all,
+/// so all four stay free for solenoids, and the reported position is a real step count rather
+/// than a travel-time estimate. See [`crate::stepper`] and `board::stepper`.
+///
+/// # Wiring
+///
+/// COM4 pin 1 (PA2) is the step clock and pin 2 (PA3) the direction — COM3 on a rev2 board, same
+/// two pins — both through a 5 V buffer:
+/// the driver's inputs are not guaranteed to read a 3.3 V high. ENABLE (X3 pin 4) is strapped to
+/// 5 V for now, which means the motor is energised and holding whenever it has power. Two things
+/// follow: the fallback stages cannot release it (their unpower flags are `false` here and
+/// [`Config::log_warnings`] complains if anyone sets them), and the step count survives a
+/// firmware reset but not a power cycle — re-home with 0x2016 after one.
+///
+/// # Order matters
+///
+/// [`Config::with_stepper`] installs [`ValveConfig::stepper`] on the named slot, so the
+/// `with_valve` that narrows the fallback comes after it.
+///
+/// A throttle closes on a lost master rather than opening: both stages drive to 0, unlike the
+/// vent-shaped default the other nodes inherit.
+pub const NODE9_STEPPER: NodeSettings = NodeSettings::new(
+    9,
+    Config::new()
+        .with_stepper(StepperId::Stepper0, valves::placeholder_stepper(Valve0))
+        .with_valve(Valve0, throttle_stepper())
+        // Chamber pressure, so the actuator has something local to be judged against.
+        .with_sensor(Slot0, pressure(Bus0, Amp0, sensors::COMB_CHAMBER_1_P)),
+);
+
+/// Node 10 — two clock/direction actuators on one board.
+///
+/// The same arrangement as [`NODE9_STEPPER`] with a second actuator on valve 1. Only buildable
+/// with the `dual-stepper` feature, which is what puts a step clock on PA3 and moves both
+/// direction lines onto plain GPIO — see `board::stepper` for the pinout and for why the two
+/// share a step rate while both are moving.
+///
+/// All four high current outputs stay free and fully PWM-capable: the actuators cost two timer
+/// channels and two GPIOs, and no output.
+pub const NODE10_DUAL_STEPPER: NodeSettings = NodeSettings::new(
+    10,
+    Config::new()
+        .with_stepper(StepperId::Stepper0, valves::placeholder_stepper(Valve0))
+        .with_stepper(StepperId::Stepper1, valves::placeholder_stepper(Valve1))
+        .with_valve(Valve0, throttle_stepper())
+        .with_valve(Valve1, throttle_stepper())
+        .with_sensor(Slot0, pressure(Bus0, Amp0, sensors::COMB_CHAMBER_1_P))
+        .with_sensor(Slot1, pressure(Bus1, Amp0, sensors::COMB_CHAMBER_2_P)),
+);
+
+/// A stepper valve that closes on a lost master rather than opening, which is what a throttle or
+/// metering valve wants — unlike the vent-shaped default the other nodes inherit.
+const fn throttle_stepper() -> ValveConfig {
+    ValveConfig {
+        fallback_b: FallbackAction {
+            position: 0,
+            unpower: false,
+        },
+        ..ValveConfig::stepper()
+    }
+}

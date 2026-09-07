@@ -79,6 +79,9 @@ pub enum ValveDrive {
     Solenoid(bool),
     /// Power output on, signal output at this pulse width.
     Servo { pulse_us: u16 },
+    /// Move the board's clock/direction actuator to this position. Touches no high current
+    /// output — [`crate::stepper`] turns it into a step target and a pulse rate.
+    Stepper { promille: u16 },
 }
 
 /// A real position sensor, once one is fitted.
@@ -206,8 +209,16 @@ impl Valve {
             return ValveDrive::Released;
         }
 
-        let released = is_unpowered(target);
         let position = position_of(target);
+
+        // A stepper has nothing to release: ENABLE is strapped to 5 V, so the motor holds torque
+        // for as long as it has power and cannot be made to go limp from here. The flag is
+        // accepted rather than rejected — a master that sets it is not wrong, it just gets a
+        // valve that stays where it is — and then dropped, so that the flag appearing and
+        // disappearing at a fixed position is not mistaken for a new target.
+        let stepper = cfg.kind == ValveKind::Stepper;
+        let released = is_unpowered(target) && !stepper;
+        let target = if stepper { position } else { target };
 
         // A solenoid has no separate power output and no travel time worth modelling: it is at
         // its commanded position as far as anything here can tell. Releasing one just means
@@ -255,6 +266,10 @@ impl Valve {
                 self.arrived_at = None;
                 ValveStatus::Moving
             };
+        }
+
+        if stepper {
+            return ValveDrive::Stepper { promille: position };
         }
 
         ValveDrive::Servo {

@@ -34,13 +34,18 @@ pub unsafe fn safe_outputs() {
 
     #[cfg(feature = "rev2")]
     {
-        // HCO1 = PC0, HCO2 = PC15, driven directly by the TIM2 software PWM ISR.
+        // HCO1 = PC0, HCO2 = PC15, driven directly by the TIM5 software PWM ISR.
         // Interrupts are already off, so nothing can set them high again.
         pac::GPIOC.bsrr().write(|w| {
             w.set_br(0, true);
             w.set_br(15, true);
         });
     }
+
+    // TIM2 clocks the stepper driver on both revisions, and would keep clocking it with the CPU
+    // stopped — the same failure this whole module exists to prevent, just on the COM port
+    // instead of an output. The actuator holds wherever the last completed pulse left it.
+    unsafe { crate::board::stepper::stop_pulses() };
 
     // CCR has preload enabled, so force the shadow registers to take the new value now
     // instead of at the next update event (up to 20ms at 50Hz).

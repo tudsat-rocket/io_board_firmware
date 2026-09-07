@@ -109,6 +109,15 @@ id_domain!(
 );
 
 id_domain!(
+    /// One of the two clock/direction actuators.
+    ///
+    /// Two is also a hardware fact, and a tighter one than it looks: the step clocks are TIM2
+    /// CH3 and CH4 on PA2/PA3, the only timer channels this board has left on pins it can reach.
+    /// See `board::stepper`.
+    StepperId, PerStepper, 2, [Stepper0, Stepper1]
+);
+
+id_domain!(
     /// An index into [`crate::config::AMPLIFIER_ADDRESSES`] — an address strap combination, never
     /// a raw I2C address. The index is what travels over CAN, so a nine-entry bitmap fits a `u16`.
     AmplifierId, PerAmplifier, 9, [Amp0, Amp1, Amp2, Amp3, Amp4, Amp5, Amp6, Amp7, Amp8]

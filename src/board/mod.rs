@@ -21,7 +21,12 @@ pub use high_current_outputs::*;
 
 pub mod ext_flash;
 pub mod leds;
+/// The clock/direction stepper port, on both revisions. rev2 used to spend TIM2 on its high
+/// current output software PWM; that moved to TIM5 so this could have PA2/PA3, which are the only
+/// COM pins with timer channels behind them. See [`HcoControllerRev2::new`].
+pub mod stepper;
 pub use leds::{LedsState, StateLedPub};
+pub use stepper::StepperPortTim2;
 mod hw;
 
 use crate::config::persist::NorConfigStore;
@@ -59,6 +64,10 @@ pub struct Board {
     pub can1: embassy_stm32::can::Can<'static>,
     #[cfg(feature = "rev3")]
     pub onboard_sens: OnboardSensRev3,
+    /// PA2 step, PA3 direction — COM4 on the rev3 silkscreen, COM3 on rev2's. Always
+    /// constructed: the pins are otherwise unused on both revisions, and the port stays idle
+    /// unless a node's config actually maps a stepper valve.
+    pub stepper: StepperPortTim2,
     /// `None` when the NOR flash did not identify itself, in which case the node runs on its
     /// compile-time factory defaults and refuses to persist. Both revisions populate the chip.
     pub config_store: Option<ConfigStore>,
@@ -157,10 +166,21 @@ pub async fn init_board(spawner: Spawner) -> Board {
     let hco_initial = HcoState::default();
 
     #[cfg(feature = "rev2")]
-    let hco_controller = HcoControllerRev2::new(p.PC0, p.PC15, p.PB0, p.PB1, p.TIM2, p.TIM3, hco_initial).await;
+    let hco_controller = HcoControllerRev2::new(p.PC0, p.PC15, p.PB0, p.PB1, p.TIM5, p.TIM3, hco_initial).await;
 
     #[cfg(feature = "rev3")]
     let hco_controller = HcoControllerRev3::new(p.PA7, p.PA8, p.PB0, p.PB1, p.TIM1, p.TIM3, hco_initial).await;
+
+    // PA2/PA3 are the only COM pins on this board with timer channels behind them, which is what
+    // makes them the step clock and direction line. Same two pins on both revisions; only the
+    // silkscreen differs (COM4 on rev3, COM3 on rev2). See `board::stepper`.
+    #[cfg(not(feature = "dual-stepper"))]
+    let stepper = StepperPortTim2::new(p.PA2, p.PA3, p.TIM2);
+    // With two actuators PA3 becomes the second step clock and both direction lines move onto
+    // plain GPIO. PC10 and PA5 are unused by the firmware on both revisions; they are the two
+    // pins to check against the schematic, and the only two that can move without consequence.
+    #[cfg(feature = "dual-stepper")]
+    let stepper = StepperPortTim2::new(p.PA2, p.PA3, p.PC10, p.PA5, p.TIM2);
 
     // let can_open_interface =
     //     CanOpenInterface::new((can_out.publisher().unwrap(), can_in.subscriber().unwrap()), hco_controller);
@@ -202,6 +222,7 @@ pub async fn init_board(spawner: Spawner) -> Board {
         can1,
         #[cfg(feature = "rev3")]
         onboard_sens,
+        stepper,
         config_store,
         // for cancan's A/B image handling
         flash_peri: p.FLASH,

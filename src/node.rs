@@ -39,6 +39,7 @@ static HCO_CONTROLLER: StaticCell<HcoControllerRev2> = StaticCell::new();
 static HCO_CONTROLLER: StaticCell<HcoControllerRev3> = StaticCell::new();
 
 static CONTROL: StaticCell<BoardControl> = StaticCell::new();
+static STEPPER: StaticCell<crate::board::StepperPortTim2> = StaticCell::new();
 static SENSORS: StaticCell<BoardSensors> = StaticCell::new();
 /// The compile-time defaults, kept so a restore (0x1011) has something to revert to without a
 /// reboot.
@@ -85,6 +86,19 @@ pub async fn spawn_node(spawner: Spawner, settings: NodeSettings) {
     let config = defaults.clone();
     // Legal but probably-unintended settings, complained about once rather than rejected.
     config.log_warnings();
+    // The one mismatch `Config` cannot check for itself: it has no idea how many step clocks this
+    // *build* actually put on pins. A node whose config maps the second actuator but was built
+    // without `dual-stepper` would accept commands for it and never move it.
+    for (id, stepper) in config.steppers.iter() {
+        if stepper.is_mapped() && id.index() >= crate::board::stepper::CHANNELS {
+            defmt::error!(
+                "stepper {} is configured but this firmware has only {} step clock(s): rebuild \
+                 with the `dual-stepper` feature or the actuator will never move",
+                id,
+                crate::board::stepper::CHANNELS
+            );
+        }
+    }
     {
         let mut store = STORE.lock().await;
         store.config = config;
@@ -103,7 +117,10 @@ pub async fn spawn_node(spawner: Spawner, settings: NodeSettings) {
     #[cfg(feature = "rev2")]
     let rails = crate::rail_sense::NoRails;
 
-    let control = CONTROL.init(BoardControl::new(outputs, rails, board.leds));
+    // Handed over unconditionally: the port costs two otherwise-unused pins and a timer, and
+    // stays silent until a config maps a stepper valve onto it.
+    let control = BoardControl::new(outputs, rails, board.leds).with_stepper(STEPPER.init(board.stepper));
+    let control = CONTROL.init(control);
     spawner.spawn(run_control(control).unwrap());
 
     // --- sensors ------------------------------------------------------------

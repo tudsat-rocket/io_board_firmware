@@ -13,12 +13,13 @@ use embassy_time::Instant;
 
 use crate::config::{Config, ValveConfig};
 use crate::hco::{HcoState, Level, State};
-use crate::index::{HcoId, PerHco, PerSensorSlot, PerValve, ValveId};
+use crate::index::{HcoId, PerHco, PerSensorSlot, PerStepper, PerValve, ValveId};
 use crate::leds::{LedsState, StateLedPub};
 use crate::outputs::{Outputs, digital, pwm};
 use crate::rail_sense::{NoRails, RailSensing, Rails};
 use crate::relief::Relief;
 use crate::safety::{self, FallbackLatch};
+use crate::stepper::{StepCommand, StepPort, Stepper};
 use crate::store::{CONTROL_WAKE, LinkState, STORE};
 use crate::valves::{
     NoFeedback, PositionFeedback, Valve, ValveDrive, ValveStatus, is_unpowered, position_of, unpowered_at,
@@ -47,6 +48,16 @@ pub struct Control<R: RailSensing = NoRails> {
     /// Toggled once a second so the white LED shows the executor is still running.
     blink: bool,
     last_blink: Instant,
+    /// The board's clock/direction actuators, or `None` on a node with no step port at all. One
+    /// object for both, because both are channels of one timer. A `&'static mut dyn` rather than a
+    /// generic parameter, the same way [`Outputs`] holds its `HcoControl`: making `Control`
+    /// generic a second time would spread through every `BoardControl` alias and host test for
+    /// nothing.
+    stepper: Option<&'static mut dyn StepPort>,
+    /// Speed ramp per actuator. Lives here rather than in the port because it is a decision, not
+    /// hardware — and so it is exercised by the host tests along with everything else.
+    planners: PerStepper<Stepper>,
+    last_tick: Instant,
 }
 
 /// The concrete `Control` the firmware spawns, monomorphised per revision so it can cross an
@@ -92,6 +103,8 @@ struct TickOutcome {
     statuses: PerValve<u8>,
     currents: PerValve<u16>,
     relief_state: u8,
+    /// Where each actuator's step counter stands, for 0x2016. 0 on a board without a step port.
+    stepper_position_steps: PerStepper<i32>,
     link: LinkState,
     /// `Some` only when the LED state actually changed this tick, which is what keeps the `STORE`
     /// write and the pubsub publish conditional. Packing into 0x2030's byte happens at the store
@@ -115,7 +128,17 @@ impl<R: RailSensing> Control<R> {
             last_link: LinkState::NeverSeen,
             blink: false,
             last_blink: now,
+            stepper: None,
+            planners: PerStepper::splat(Stepper::new()),
+            last_tick: now,
         }
+    }
+
+    /// Attach the board's clock/direction actuators. Nodes without a step port simply never call
+    /// this and the whole stepper path stays inert.
+    pub fn with_stepper(mut self, port: &'static mut dyn StepPort) -> Self {
+        self.stepper = Some(port);
+        self
     }
 
     pub async fn run(&mut self) -> ! {
@@ -174,6 +197,7 @@ impl<R: RailSensing> Control<R> {
         store.valve_status = outcome.statuses;
         store.valve_current_ma = outcome.currents;
         store.relief_state = outcome.relief_state;
+        store.stepper_position_steps = outcome.stepper_position_steps;
         store.link_state = outcome.link;
         store.ms_since_heartbeat = since_heartbeat;
         for (id, state) in hco.iter() {
@@ -202,6 +226,9 @@ impl<R: RailSensing> Control<R> {
     /// fallback/relief/clamp per valve, drive the valve model, push to `outputs`, and decide the
     /// LED state.
     fn decide(&mut self, inputs: TickInputs) -> TickOutcome {
+        let elapsed_ms = (inputs.now - self.last_tick).as_millis();
+        self.last_tick = inputs.now;
+
         self.apply_pending(&inputs.pending, inputs.direct_writes, inputs.raw_debug, &inputs.config);
 
         let link = safety::evaluate(&inputs.config, inputs.raw_debug, inputs.seen, inputs.since_heartbeat);
@@ -218,8 +245,15 @@ impl<R: RailSensing> Control<R> {
         let reading = inputs.sensor_value[inputs.config.relief.sensor];
         let relief_position = self.relief.update(&inputs.config.relief, reading, inputs.now);
 
+        // The actuators' own step counters, read once and used twice: as this tick's position
+        // feedback for their valves, and as the positions the planners plan from. Reading them
+        // here rather than inside the loop keeps the borrow of `self.stepper` off the valve
+        // iteration.
+        let stepper_steps = self.stepper.as_ref().map(|port| PerStepper::from_fn(|id| port.position_steps(id)));
+
         // --- run each valve -------------------------------------------------
         let mut desired = self.direct;
+        let mut stepper_targets: PerStepper<Option<u16>> = PerStepper::splat(None);
         let mut targets = PerValve::splat(0u16);
         let mut measured = PerValve::splat(0u16);
         let mut statuses = PerValve::splat(0u8);
@@ -242,8 +276,18 @@ impl<R: RailSensing> Control<R> {
             };
             targets[valve] = target;
 
-            let feedback = self.feedback.position(valve);
+            // A stepper knows exactly where it is, so it feeds its real position in as if it
+            // were a fitted sensor and the travel-time estimator steps aside. That is the whole
+            // reason `PositionFeedback` existed before there was anything to put behind it.
+            let driven_by = inputs.config.stepper_for(valve);
+            let feedback = match (driven_by, stepper_steps.as_ref()) {
+                (Some(id), Some(steps)) => Some(inputs.config.steppers[id].promille_at(steps[id])),
+                _ => self.feedback.position(valve),
+            };
             let drive = self.valves[valve].tick(cfg, target, inputs.now, current_ma, feedback);
+            if let (ValveDrive::Stepper { promille }, Some(id)) = (drive, driven_by) {
+                stepper_targets[id] = Some(promille);
+            }
             apply_drive(&mut desired, cfg, drive);
 
             measured[valve] = self.valves[valve].measured_word();
@@ -251,6 +295,7 @@ impl<R: RailSensing> Control<R> {
         }
 
         self.outputs.drive(desired);
+        let stepper_position_steps = self.drive_steppers(&inputs.config, stepper_targets, stepper_steps, elapsed_ms);
 
         let leds = self.decide_leds(link, inputs.raw_debug, &statuses, inputs.now);
 
@@ -260,9 +305,47 @@ impl<R: RailSensing> Control<R> {
             statuses,
             currents,
             relief_state: self.relief.state() as u8,
+            stepper_position_steps,
             link,
             leds,
         }
+    }
+
+    /// Turn this tick's stepper valve positions into pulse-rate commands, and report where the
+    /// counters ended up.
+    ///
+    /// A `None` target is an actuator no valve resolved to a stepper drive for — an unmapped slot,
+    /// or a channel this build does not have — and it is told to hold where it is rather than left
+    /// running whatever the last command was.
+    fn drive_steppers(
+        &mut self,
+        config: &Config,
+        targets: PerStepper<Option<u16>>,
+        position_steps: Option<PerStepper<i32>>,
+        elapsed_ms: u64,
+    ) -> PerStepper<i32> {
+        let (Some(port), Some(positions)) = (self.stepper.as_mut(), position_steps) else {
+            return PerStepper::splat(0);
+        };
+
+        let mut cmds = PerStepper::splat(StepCommand::HOLD);
+        for (id, target) in targets.iter() {
+            let position = positions[id];
+            cmds[id] = match target {
+                Some(promille) => self.planners[id].plan(&config.steppers[id], *promille, position, elapsed_ms),
+                None => {
+                    self.planners[id].reset();
+                    StepCommand {
+                        target_steps: position,
+                        step_hz: 0,
+                    }
+                }
+            };
+        }
+        // One call for both: the two channels share a timer, so reconciling their rates is the
+        // port's job. See `StepPort::command`.
+        port.command(cmds);
+        positions
     }
 
     /// Act on writes that landed since the last tick.
@@ -280,6 +363,23 @@ impl<R: RailSensing> Control<R> {
             defmt::info!("control: configuration changed, re-deriving outputs");
             self.direct = HcoState::splat(State::Digital(Level::Low));
             self.outputs.all_off();
+            // The ramps are only meaningful against the speeds they were planned with.
+            for planner in self.planners.values_mut() {
+                planner.reset();
+            }
+        }
+
+        // A re-zero (0x2016) declares where a shaft physically is without moving it, which is the
+        // only homing these actuators have. Applying it before the valves run means this tick
+        // already plans from the corrected position.
+        if let Some(port) = self.stepper.as_mut() {
+            for (id, steps) in pending.stepper_zero.iter() {
+                if let Some(steps) = steps {
+                    defmt::warn!("stepper {} position re-declared as {} steps", id, steps);
+                    port.set_position_steps(id, *steps);
+                    self.planners[id].reset();
+                }
+            }
         }
 
         if let Some(writes) = direct_writes {
@@ -425,6 +525,8 @@ fn apply_drive(desired: &mut HcoState, cfg: &ValveConfig, drive: ValveDrive) {
             set(desired, cfg.power_hco, digital(true));
             set(desired, cfg.signal_hco, pwm(pulse_us));
         }
+        // The actuator is on the COM port, not on an output. `Control::drive_stepper` has it.
+        ValveDrive::Stepper { .. } => {}
     }
 }
 
@@ -440,10 +542,11 @@ mod tests {
     use embassy_sync::pubsub::PubSubChannel;
 
     use super::*;
-    use crate::config::{FallbackAction, ReliefConfig};
+    use crate::config::{FallbackAction, ReliefConfig, StepperConfig};
     use crate::hco::{HcoControl, PwmMicros};
-    use crate::index::{HcoPair, SensorSlot};
+    use crate::index::{HcoPair, SensorSlot, StepperId};
     use crate::store::Pending;
+    use crate::valves::unpowered_at;
 
     /// Records nothing of its own: every assertion below reads back through
     /// `Outputs::current()`, which already mirrors the last state actually pushed. This just
@@ -482,6 +585,77 @@ mod tests {
         let channel: &'static PubSubChannel<CriticalSectionRawMutex, LedsState, 4, 1, 1> =
             Box::leak(Box::new(PubSubChannel::new()));
         Control::new(outputs, NoRails, channel.publisher().unwrap())
+    }
+
+    /// A [`StepPort`] whose "hardware" the test drives by hand: `move_to` is the actuator
+    /// arriving somewhere, and `last` is what the control task asked of it.
+    ///
+    /// Shared through an `Arc` rather than a raw pointer because `Control` needs a
+    /// `&'static mut dyn StepPort` and the test still has to look at it afterwards. `Arc`/`Mutex`
+    /// are `std`, available under `cfg(test)` and never linked into firmware — the same trick
+    /// `test_control`'s `Box::leak` already relies on.
+    #[derive(Clone, Default)]
+    struct MockStepPort(std::sync::Arc<std::sync::Mutex<StepState>>);
+
+    #[derive(Default)]
+    struct StepState {
+        position: PerStepper<i32>,
+        last: Option<PerStepper<StepCommand>>,
+        rezeroed: PerStepper<Option<i32>>,
+    }
+
+    impl MockStepPort {
+        /// Actuator `id` has arrived at `steps`.
+        fn move_to(&self, id: StepperId, steps: i32) {
+            self.0.lock().unwrap().position[id] = steps;
+        }
+
+        fn last(&self, id: StepperId) -> StepCommand {
+            self.0.lock().unwrap().last.expect("the port should have been commanded")[id]
+        }
+
+        fn rezeroed(&self, id: StepperId) -> Option<i32> {
+            self.0.lock().unwrap().rezeroed[id]
+        }
+    }
+
+    impl StepPort for MockStepPort {
+        fn position_steps(&self, id: StepperId) -> i32 {
+            self.0.lock().unwrap().position[id]
+        }
+
+        fn set_position_steps(&mut self, id: StepperId, steps: i32) {
+            let mut state = self.0.lock().unwrap();
+            state.position[id] = steps;
+            state.rezeroed[id] = Some(steps);
+        }
+
+        fn command(&mut self, cmds: PerStepper<StepCommand>) {
+            self.0.lock().unwrap().last = Some(cmds);
+        }
+    }
+
+    /// A control task with an actuator attached, and a handle onto that actuator.
+    fn test_control_with_stepper() -> (Control<NoRails>, MockStepPort) {
+        let port = MockStepPort::default();
+        let owned: &'static mut MockStepPort = Box::leak(Box::new(port.clone()));
+        (test_control().with_stepper(owned), port)
+    }
+
+    /// 800 steps of travel on valve 0, ramping between 400 and 2000 steps/s.
+    fn stepper_config() -> Config {
+        Config::new().with_stepper(
+            StepperId::Stepper0,
+            StepperConfig::new(ValveId::Valve0, 0, 800).with_speed(2_000, 400, 8_000),
+        )
+    }
+
+    /// The same, plus a second actuator on valve 1 travelling the other way.
+    fn dual_stepper_config() -> Config {
+        stepper_config().with_stepper(
+            StepperId::Stepper1,
+            StepperConfig::new(ValveId::Valve1, 0, -400).with_speed(2_000, 400, 8_000),
+        )
     }
 
     fn inputs(config: Config, commanded: [u16; 4], now: Instant) -> TickInputs {
@@ -659,5 +833,180 @@ mod tests {
         let outcome = ctl.decide(over_pressure);
 
         assert_eq!(outcome.targets[ValveId::Valve0], 1000, "relief must win over the fallback stage");
+    }
+
+    /// The whole point of the integration: a stepper is commanded in promille like every other
+    /// valve, and none of the master's code has to know what is underneath.
+    #[test]
+    fn a_stepper_valve_is_commanded_in_promille_and_planned_in_steps() {
+        let (mut ctl, port) = test_control_with_stepper();
+        let cfg = stepper_config();
+
+        let outcome = ctl.decide(inputs(cfg, [1000, 0, 0, 0], Instant::from_millis(20)));
+
+        assert_eq!(outcome.targets[ValveId::Valve0], 1000);
+        assert_eq!(port.last(StepperId::Stepper0).target_steps, 800, "1000 promille is the open end of the travel");
+        assert_eq!(port.last(StepperId::Stepper0).step_hz, 400, "and the first tick of a move is the pull-in rate");
+
+        // No high current output is involved at all, which is what leaves all four free.
+        for hco in HcoId::ALL {
+            assert_eq!(ctl.outputs.current()[hco], State::Digital(Level::Low));
+        }
+    }
+
+    /// `measured` for a stepper is the step counter, not the travel-time estimate — so it is
+    /// right even though `travel_ms` was never characterised for this valve.
+    #[test]
+    fn the_step_counter_is_the_measured_position() {
+        let (mut ctl, port) = test_control_with_stepper();
+        let cfg = stepper_config();
+
+        ctl.decide(inputs(cfg.clone(), [1000, 0, 0, 0], Instant::from_millis(20)));
+
+        port.move_to(StepperId::Stepper0, 400);
+        let outcome = ctl.decide(inputs(cfg, [1000, 0, 0, 0], Instant::from_millis(40)));
+
+        assert_eq!(outcome.measured[ValveId::Valve0], 500, "400 of 800 steps is half open");
+        assert_eq!(outcome.statuses[ValveId::Valve0], ValveStatus::Moving as u8);
+        assert_eq!(outcome.stepper_position_steps[StepperId::Stepper0], 400, "and the raw count is reported at 0x2016");
+    }
+
+    #[test]
+    fn arriving_stops_the_pulse_train_and_holds() {
+        let (mut ctl, port) = test_control_with_stepper();
+        let cfg = stepper_config();
+
+        ctl.decide(inputs(cfg.clone(), [1000, 0, 0, 0], Instant::from_millis(20)));
+        port.move_to(StepperId::Stepper0, 800);
+        let outcome = ctl.decide(inputs(cfg, [1000, 0, 0, 0], Instant::from_millis(40)));
+
+        assert_eq!(outcome.measured[ValveId::Valve0], 1000);
+        assert_eq!(outcome.statuses[ValveId::Valve0], ValveStatus::Holding as u8);
+        assert_eq!(port.last(StepperId::Stepper0).step_hz, 0, "nothing left to travel, so nothing left to pulse");
+    }
+
+    /// ENABLE is strapped to 5 V, so there is no drive to drop. A release has to leave the valve
+    /// holding rather than reporting an unpowered position nobody can act on.
+    #[test]
+    fn releasing_a_stepper_does_not_pretend_it_went_limp() {
+        let (mut ctl, port) = test_control_with_stepper();
+        let cfg = stepper_config();
+
+        ctl.decide(inputs(cfg.clone(), [1000, 0, 0, 0], Instant::from_millis(20)));
+        port.move_to(StepperId::Stepper0, 800);
+        ctl.decide(inputs(cfg.clone(), [1000, 0, 0, 0], Instant::from_millis(40)));
+
+        let outcome = ctl.decide(inputs(cfg, [unpowered_at(1000), 0, 0, 0], Instant::from_millis(60)));
+
+        assert_eq!(outcome.statuses[ValveId::Valve0], ValveStatus::Holding as u8);
+        assert!(!is_unpowered(outcome.measured[ValveId::Valve0]), "the position is still trustworthy");
+        assert_eq!(position_of(outcome.measured[ValveId::Valve0]), 1000);
+    }
+
+    /// A fallback stage moves a stepper like any other valve. It cannot release it afterwards,
+    /// which is why `ValveConfig::stepper` defaults both stages to `unpower: false`.
+    #[test]
+    fn a_fallback_stage_drives_the_stepper_to_its_position() {
+        let (mut ctl, port) = test_control_with_stepper();
+        // Explicitly armed: `Config::new()` ships the fallback disabled, so a test that assumes
+        // the default would only ever see `LinkState::Suspended`.
+        let cfg = Config {
+            fallback_enabled: true,
+            ..stepper_config()
+        };
+        assert!(!cfg.valves[ValveId::Valve0].fallback_a.unpower);
+
+        ctl.decide(inputs(cfg.clone(), [1000, 0, 0, 0], Instant::from_millis(20)));
+        port.move_to(StepperId::Stepper0, 800);
+        ctl.decide(inputs(cfg.clone(), [1000, 0, 0, 0], Instant::from_millis(40)));
+
+        let mut timed_out = inputs(cfg, [1000, 0, 0, 0], Instant::from_millis(3_020));
+        timed_out.since_heartbeat = 3_020;
+        let outcome = ctl.decide(timed_out);
+
+        assert_eq!(outcome.link, LinkState::FallbackA);
+        assert_eq!(outcome.targets[ValveId::Valve0], 0, "stage A closes it");
+        assert_eq!(port.last(StepperId::Stepper0).target_steps, 0);
+        assert!(port.last(StepperId::Stepper0).step_hz > 0, "and it is actually being driven there");
+    }
+
+    /// The only homing this actuator has: 0x2016 declares where the shaft is, and the very same
+    /// tick has to plan from the corrected number rather than the stale one.
+    #[test]
+    fn a_re_zero_is_applied_before_the_tick_plans() {
+        let (mut ctl, port) = test_control_with_stepper();
+        let cfg = stepper_config();
+
+        let mut rezero = inputs(cfg, [1000, 0, 0, 0], Instant::from_millis(20));
+        rezero.pending.stepper_zero[StepperId::Stepper0] = Some(800);
+        let outcome = ctl.decide(rezero);
+
+        assert_eq!(port.rezeroed(StepperId::Stepper0), Some(800));
+        assert_eq!(outcome.measured[ValveId::Valve0], 1000, "declared open, so it reads open");
+        assert_eq!(port.last(StepperId::Stepper0).step_hz, 0, "and there is nothing left to travel");
+    }
+
+    /// A board with an actuator wired up but no stepper valve configured must leave it alone,
+    /// rather than inheriting whatever the last command was.
+    #[test]
+    fn an_unconfigured_actuator_is_told_to_hold() {
+        let (mut ctl, port) = test_control_with_stepper();
+        let cfg = Config::new().with_valve(ValveId::Valve0, ValveConfig::servo_on_pair(HcoPair::A, 2000, 1000, 500));
+
+        ctl.decide(inputs(cfg, [1000, 0, 0, 0], Instant::from_millis(20)));
+
+        assert_eq!(port.last(StepperId::Stepper0).step_hz, 0);
+    }
+
+    /// Two actuators are two independent valves: separate targets, separate counters, separate
+    /// reported positions. Nothing about commanding one leaks into the other.
+    #[test]
+    fn two_actuators_track_two_valves_independently() {
+        let (mut ctl, port) = test_control_with_stepper();
+        let cfg = dual_stepper_config();
+
+        ctl.decide(inputs(cfg.clone(), [1000, 1000, 0, 0], Instant::from_millis(20)));
+
+        assert_eq!(port.last(StepperId::Stepper0).target_steps, 800);
+        assert_eq!(port.last(StepperId::Stepper1).target_steps, -400, "the reversed one goes the other way");
+
+        // Only the second one has moved so far.
+        port.move_to(StepperId::Stepper1, -200);
+        let outcome = ctl.decide(inputs(cfg, [1000, 1000, 0, 0], Instant::from_millis(40)));
+
+        assert_eq!(outcome.measured[ValveId::Valve0], 0, "valve 0's actuator has not moved");
+        assert_eq!(outcome.measured[ValveId::Valve1], 500, "valve 1's is halfway");
+        assert_eq!(outcome.stepper_position_steps[StepperId::Stepper1], -200);
+    }
+
+    /// One actuator arriving must not stop the other: they share a timer, not a move.
+    #[test]
+    fn one_actuator_arriving_leaves_the_other_running() {
+        let (mut ctl, port) = test_control_with_stepper();
+        let cfg = dual_stepper_config();
+
+        ctl.decide(inputs(cfg.clone(), [1000, 1000, 0, 0], Instant::from_millis(20)));
+        port.move_to(StepperId::Stepper1, -400);
+        let outcome = ctl.decide(inputs(cfg, [1000, 1000, 0, 0], Instant::from_millis(40)));
+
+        assert_eq!(outcome.statuses[ValveId::Valve1], ValveStatus::Holding as u8);
+        assert_eq!(port.last(StepperId::Stepper1).step_hz, 0, "the arrived one stops");
+        assert!(port.last(StepperId::Stepper0).step_hz > 0, "the other keeps going");
+    }
+
+    /// A re-zero addresses one actuator, not both.
+    #[test]
+    fn a_re_zero_only_moves_the_counter_it_names() {
+        let (mut ctl, port) = test_control_with_stepper();
+        let cfg = dual_stepper_config();
+
+        let mut rezero = inputs(cfg, [1000, 1000, 0, 0], Instant::from_millis(20));
+        rezero.pending.stepper_zero[StepperId::Stepper1] = Some(-400);
+        let outcome = ctl.decide(rezero);
+
+        assert_eq!(port.rezeroed(StepperId::Stepper1), Some(-400));
+        assert_eq!(port.rezeroed(StepperId::Stepper0), None, "the other counter is untouched");
+        assert_eq!(outcome.measured[ValveId::Valve1], 1000, "declared open, so it reads open");
+        assert_eq!(outcome.measured[ValveId::Valve0], 0);
     }
 }
