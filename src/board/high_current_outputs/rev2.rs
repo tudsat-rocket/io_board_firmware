@@ -31,7 +31,9 @@ pub struct HcoControllerRev2 {
     out2: Output<'static>,
     out3: SimplePwmChannel<'static, p::TIM3>,
     out4: SimplePwmChannel<'static, p::TIM3>,
-    virtual_timer: Timer<'static, p::TIM2>,
+    /// The time base behind the HCO1/HCO2 software PWM. **TIM5, not TIM2** — see
+    /// [`HcoControllerRev2::new`].
+    virtual_timer: Timer<'static, p::TIM5>,
 }
 
 impl HcoControl for HcoControllerRev2 {
@@ -41,7 +43,7 @@ impl HcoControl for HcoControllerRev2 {
 
     fn set_state(&mut self, target_state: HcoState) {
         // Unlike rev3 these four are not interchangeable: HCO1/HCO2 are plain GPIO driven by the
-        // TIM2 software-PWM ISR, HCO3/HCO4 are real timer channels. So they stay written out.
+        // TIM5 software-PWM ISR, HCO3/HCO4 are real timer channels. So they stay written out.
         match target_state[HcoId::Hco0] {
             State::Digital(level) => {
                 PULSE_US_PWM1.store(u16::MAX, Ordering::Relaxed);
@@ -95,6 +97,22 @@ impl HcoControl for HcoControllerRev2 {
 }
 
 impl HcoControllerRev2 {
+    /// # Why the software PWM runs on TIM5
+    ///
+    /// HCO1 (PC0) and HCO2 (PC15) are plain GPIO on this revision — no timer channel reaches
+    /// them — so their pulse widths are bit-banged from a timer interrupt. Any timer with two
+    /// compare channels can be that time base, and it used to be TIM2.
+    ///
+    /// TIM2 is now the stepper's, because **TIM2 CH3/CH4 are the only timer channels on PA2/PA3**
+    /// and PA2/PA3 are the only COM pins that can carry a hardware pulse train (see
+    /// `board::stepper`). Nothing else can do that job; this one can be done by anything. So the
+    /// software PWM moved and the stepper got the pins it needs.
+    ///
+    /// TIM5 rather than TIM1 for two reasons: it is a general-purpose timer with the same
+    /// register layout as TIM2, so this is a rename rather than a rewrite; and on the STM32F105
+    /// **TIM5 has no pin mappings at all**, so a timer used purely as a time base physically
+    /// cannot drive an output by mistake. TIM6/TIM7 are basic timers with no compare channels and
+    /// could not do it. TIM4 is embassy's time driver.
     pub async fn new(
         // NOTE: don't change this, since we use raw pac to set this output
         pin1: Peri<'static, p::PC0>,
@@ -102,7 +120,7 @@ impl HcoControllerRev2 {
         pin2: Peri<'static, p::PC15>,
         pin3: Peri<'static, p::PB0>,
         pin4: Peri<'static, p::PB1>,
-        virtual_timer: Peri<'static, p::TIM2>,
+        virtual_timer: Peri<'static, p::TIM5>,
         out3_4_timer: Peri<'static, p::TIM3>,
         init_state: HcoState,
     ) -> Self {
@@ -113,20 +131,20 @@ impl HcoControllerRev2 {
         // *HCO2_OUT.lock().await = Some(out2);
 
         let period = Duration::from_hz(50);
-        let mut tim2 = Timer::new(virtual_timer);
-        tim2.set_tick_freq(Hertz::mhz(1));
-        tim2.set_max_compare_value((period.as_micros() - 1) as u16);
-        tim2.set_autoreload_preload(true);
-        tim2.enable_update_interrupt(true);
-        tim2.set_output_compare_mode(Channel::Ch1, OutputCompareMode::Frozen);
-        tim2.set_compare_value(Channel::Ch1, 1500);
-        tim2.set_output_compare_mode(Channel::Ch2, OutputCompareMode::Frozen);
-        tim2.set_compare_value(Channel::Ch2, 1500);
+        let mut soft_pwm = Timer::new(virtual_timer);
+        soft_pwm.set_tick_freq(Hertz::mhz(1));
+        soft_pwm.set_max_compare_value((period.as_micros() - 1) as u16);
+        soft_pwm.set_autoreload_preload(true);
+        soft_pwm.enable_update_interrupt(true);
+        soft_pwm.set_output_compare_mode(Channel::Ch1, OutputCompareMode::Frozen);
+        soft_pwm.set_compare_value(Channel::Ch1, 1500);
+        soft_pwm.set_output_compare_mode(Channel::Ch2, OutputCompareMode::Frozen);
+        soft_pwm.set_compare_value(Channel::Ch2, 1500);
 
-        tim2.start();
+        soft_pwm.start();
 
-        embassy_stm32::interrupt::TIM2.unpend();
-        unsafe { embassy_stm32::interrupt::TIM2.enable() };
+        embassy_stm32::interrupt::TIM5.unpend();
+        unsafe { embassy_stm32::interrupt::TIM5.enable() };
 
         <p::PB0 as TimerPin<p::TIM3, Ch3, AfioRemap<0>>>::afio_remap(&pin3);
         <p::PB1 as TimerPin<p::TIM3, Ch4, AfioRemap<0>>>::afio_remap(&pin4);
@@ -151,7 +169,7 @@ impl HcoControllerRev2 {
             out2,
             out3: channels.ch3,
             out4: channels.ch4,
-            virtual_timer: tim2,
+            virtual_timer: soft_pwm,
         };
         hco_ctl.set_state(init_state);
         hco_ctl
@@ -159,14 +177,14 @@ impl HcoControllerRev2 {
 }
 
 embassy_stm32::bind_interrupts!(struct Irqs {
-    TIM2 => Tim2Handler;
+    TIM5 => SoftPwmHandler;
 });
 
-struct Tim2Handler;
+struct SoftPwmHandler;
 
-impl interrupt::typelevel::Handler<interrupt::typelevel::TIM2> for Tim2Handler {
+impl interrupt::typelevel::Handler<interrupt::typelevel::TIM5> for SoftPwmHandler {
     unsafe fn on_interrupt() {
-        let timer = embassy_stm32::pac::TIM2;
+        let timer = embassy_stm32::pac::TIM5;
         let status_regs = timer.sr().read();
 
         if status_regs.uif() {

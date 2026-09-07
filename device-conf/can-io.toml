@@ -170,6 +170,16 @@ data_type = "uint8"
 access_type = "ro"
 default_value = 4
 
+# Raw signed step count per stepper, unclamped; writing it homes without moving.
+[[objects]]
+index = 0x2016
+parameter_name = "stepper position, steps since boot"
+object_type = "array"
+data_type = "int32"
+access_type = "rw"
+array_size = 2
+default_value = [0, 0]
+
 # --- direct high current output control ----------------------------------
 
 # Direct digital level; rejected while the output is owned by a valve, unless raw debug is on.
@@ -355,7 +365,7 @@ default_value = 1
 
 # --- valve mapping and calibration ---------------------------------------
 
-# 0 = not fitted, 1 = solenoid, 2 = servo.
+# 0 = not fitted, 1 = solenoid, 2 = servo, 3 = stepper (see 0x3060).
 [[objects]]
 index = 0x3010
 parameter_name = "valve kind"
@@ -652,3 +662,65 @@ object_type = "var"
 data_type = "uint16"
 access_type = "rw"
 default_value = 500
+
+# --- clock/direction steppers, one entry per actuator ---------------------
+
+# Valve slot this actuator is; that slot's kind (0x3010) must be 3.
+[[objects]]
+index = 0x3060
+parameter_name = "stepper valve index (0xFF = none)"
+object_type = "array"
+data_type = "uint8"
+access_type = "rw"
+array_size = 2
+default_value = [255, 255]
+
+# Step count at 0 promille.
+[[objects]]
+index = 0x3061
+parameter_name = "stepper step count at fully closed"
+object_type = "array"
+data_type = "int32"
+access_type = "rw"
+array_size = 2
+default_value = [0, 0]
+
+# Step count at 1000 promille; may be below 0x3061, which reverses the direction.
+[[objects]]
+index = 0x3062
+parameter_name = "stepper step count at fully open"
+object_type = "array"
+data_type = "int32"
+access_type = "rw"
+array_size = 2
+default_value = [0, 0]
+
+# Traverse speed the ramp accelerates toward; clamped to 20 kHz.
+[[objects]]
+index = 0x3063
+parameter_name = "stepper traverse speed, steps per second"
+object_type = "array"
+data_type = "uint32"
+access_type = "rw"
+array_size = 2
+default_value = [0, 0]
+
+# Rate the motor can start and stop at without losing steps; 0 is rejected.
+[[objects]]
+index = 0x3064
+parameter_name = "stepper pull-in rate, steps per second"
+object_type = "array"
+data_type = "uint32"
+access_type = "rw"
+array_size = 2
+default_value = [0, 0]
+
+# Ramp rate; 0 means every move runs at the pull-in rate.
+[[objects]]
+index = 0x3065
+parameter_name = "stepper acceleration, steps per second squared"
+object_type = "array"
+data_type = "uint32"
+access_type = "rw"
+array_size = 2
+default_value = [0, 0]

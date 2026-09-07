@@ -51,6 +51,19 @@ name = "node8reg"
 path = "src/bin/node8reg.rs"
 required-features = ["hardware"]
 
+# The stepper node: a clock/direction actuator on COM4 instead of a servo on an HCO pair.
+[[bin]]
+name = "node9"
+path = "src/bin/node9.rs"
+required-features = ["hardware"]
+
+# Two actuators on one board. Needs `dual-stepper`, which reassigns PA3 from the first
+# stepper's direction line to the second stepper's step clock — see src/board/stepper.rs.
+[[bin]]
+name = "node10"
+path = "src/bin/node10.rs"
+required-features = ["hardware", "dual-stepper"]
+
 # The bench node, for a board that is not installed in the vehicle.
 [[bin]]
 name = "generic"
@@ -133,6 +146,12 @@ hardware = [
 ]
 rev2 = []
 rev3 = []
+
+# A second clock/direction actuator. Off by default because it changes the stepper pinout rather
+# than just adding to it: with one actuator PA2 is the step clock and PA3 its direction, with two
+# PA2/PA3 are both step clocks (TIM2 CH3/CH4) and the direction lines move to PC10 and PA5. Both
+# revisions, no timer reallocation, and no high current output gives up its PWM either way.
+dual-stepper = []
 
 # Everything the pure logic needs to build and link for the host, and nothing the target build
 # should ever see. `mock-driver` satisfies embassy-time's driver symbol; `defmt/unstable-test`

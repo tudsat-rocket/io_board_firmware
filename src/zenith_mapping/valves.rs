@@ -41,6 +41,24 @@ pub const fn pressurization(pair: HcoPair) -> ValveConfig {
     servo(pair, 2200, 1080)
 }
 
+/// Steps from closed to open until somebody counts the real ones, in the same spirit as
+/// [`UNMEASURED_TRAVEL_MS`]: one full revolution of a PD2-C at its factory quarter-stepping
+/// (2057h = 128, so 800 pulses per revolution of a 50-pole-pair motor). Deliberately the same
+/// everywhere, so a value that has actually been measured stands out by being different.
+///
+/// Counting it is a bench job: drive the actuator to each mechanical stop in raw debug mode,
+/// reading 0x2016 at both ends, and the difference is this number.
+pub const UNCOUNTED_TRAVEL_STEPS: i32 = 800;
+
+/// The clock/direction actuator on COM4, with speeds a 42 mm stepper will not lose steps at.
+///
+/// 2000 steps/s is 2.5 rev/s at quarter-stepping, 400 is inside any pull-in rate this frame size
+/// has, and 8000 steps/s^2 brings it between the two in a quarter of a second. Slow, and meant to
+/// be: raise them once the mechanism has actually been run against its load.
+pub const fn placeholder_stepper(valve: crate::index::ValveId) -> crate::stepper::StepperConfig {
+    crate::stepper::StepperConfig::new(valve, 0, UNCOUNTED_TRAVEL_STEPS).with_speed(2_000, 400, 8_000)
+}
+
 /// Mid-range travel for bench work with an uncharacterised servo.
 pub const fn placeholder_servo(pair: HcoPair) -> ValveConfig {
     servo(pair, 2000, 1000)
