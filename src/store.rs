@@ -141,6 +141,13 @@ pub struct Store {
     /// [`Self::refresh_error_counters`].
     pub error_counts: PerErrorCounter<u32>,
 
+    /// Mirror of [`crate::cpu`]'s published values, refreshed on the control tick — for the same
+    /// reason the error counters are mirrored: they are written from the idle loop, which runs
+    /// with interrupts masked and cannot take this lock. [`od::CPU_LOAD_UNKNOWN`] until the first
+    /// reporting period completes.
+    pub cpu_load_permille: u16,
+    pub control_tick_peak_us: u16,
+
     // --- 0x3000 runtime config ----------------------------------------------
     pub config: Config,
 
@@ -177,6 +184,8 @@ impl Store {
             rail_current_ma: PerRail::splat(0),
             rail_voltage_mv: PerRail::splat(0),
             error_counts: PerErrorCounter::splat(0),
+            cpu_load_permille: od::CPU_LOAD_UNKNOWN,
+            control_tick_peak_us: 0,
             config: Config::new(),
             pending: Pending {
                 valves: PerValve::splat(false),
@@ -209,6 +218,17 @@ impl Store {
         if let Some(counts) = crate::errors::take_if_changed() {
             self.error_counts = counts;
         }
+    }
+
+    /// Copy [`crate::cpu`]'s published utilization in. Called from the control tick, alongside
+    /// [`Self::refresh_error_counters`] and for the same reasons: two relaxed loads, and no task
+    /// of its own.
+    ///
+    /// Unconditional rather than change-gated — there is no cheaper "did it move?" check than
+    /// just reading the two values.
+    pub fn refresh_cpu(&mut self) {
+        self.cpu_load_permille = crate::cpu::load_word();
+        self.control_tick_peak_us = crate::cpu::peak_tick_us();
     }
 
     /// Gather the slots that claim a TPDO channel into the by-channel arrays the broadcaster
@@ -361,6 +381,8 @@ pub fn read(store: &Store, index: u16, sub: u8) -> Result<OdValue, AbortCode> {
         RAW_DEBUG_MODE => scalar(OdValue::u8(store.raw_debug as u8)),
         LINK_STATE => scalar(OdValue::u8(store.link_state as u8)),
         MS_SINCE_HEARTBEAT => scalar(OdValue::u32(store.ms_since_heartbeat)),
+        CPU_LOAD => scalar(OdValue::u16(store.cpu_load_permille)),
+        CONTROL_TICK_PEAK_US => scalar(OdValue::u16(store.control_tick_peak_us)),
         RAIL_CURRENT => read_array(store.rail_current_ma.as_slice(), sub, OdValue::u16),
         RAIL_VOLTAGE => read_array(store.rail_voltage_mv.as_slice(), sub, OdValue::u16),
         ERROR_COUNTERS => read_array(store.error_counts.as_slice(), sub, OdValue::u32),

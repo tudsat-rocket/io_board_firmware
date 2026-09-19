@@ -246,6 +246,33 @@ pub const LINK_STATE: u16 = 0x2032;
 /// Milliseconds since the last master heartbeat. `uint32`, read-only.
 pub const MS_SINCE_HEARTBEAT: u16 = 0x2033;
 
+/// Share of wall-clock time the CPU spent doing anything other than sleeping, permille.
+/// `uint16`, read-only. [`CPU_LOAD_UNKNOWN`] until the first measurement completes.
+///
+/// Measured by idle accounting, not by instrumenting anything: the node's idle loop is the only
+/// place that ever sleeps, so timing how long it sits there and subtracting from elapsed time
+/// gives whole-system utilization — every task, every interrupt handler, the time driver, the
+/// flash driver — without any of them knowing they are being counted. 1000 means the node never
+/// reached its idle loop at all during the measurement.
+///
+/// Reported as the *worst* of the short windows that make up a reporting period rather than
+/// their average. A board that is comfortable on average and saturated for a tenth of a second
+/// at a time has a problem, and an average is exactly what hides it.
+pub const CPU_LOAD: u16 = 0x2034;
+
+/// What [`CPU_LOAD`] reads when nothing has measured it: before the first reporting period
+/// completes after boot, and on a build with no idle loop to account for.
+pub const CPU_LOAD_UNKNOWN: u16 = u16::MAX;
+
+/// Worst control-loop iteration of the last reporting period, microseconds. `uint16`, read-only,
+/// saturating at 65535.
+///
+/// Wall-clock from the start of a control tick's work to its end, the awaits inside it included
+/// — the latency of the loop that owns the outputs, not its CPU time. An iteration longer than
+/// the tick period has missed its deadline; [`ErrorCounter::ControlTickOverrun`] counts those,
+/// and this says how far the worst one overshot.
+pub const CONTROL_TICK_PEAK_US: u16 = 0x2035;
+
 /// Rail currents in milliamps: logic, HCO1+2, HCO3+4. `uint16[3]`, read-only.
 ///
 /// rev3 only; reads 0 on rev2, which has no on-board sensing — which is also why stall detection
@@ -274,7 +301,7 @@ pub const RAIL_VOLTAGE: u16 = 0x2041;
 pub const ERROR_COUNTERS: u16 = 0x2050;
 
 /// Number of counters at [`ERROR_COUNTERS`], and the array size of that object.
-pub const NUM_ERROR_COUNTERS: usize = 22;
+pub const NUM_ERROR_COUNTERS: usize = 23;
 
 /// What each sub-index of [`ERROR_COUNTERS`] counts.
 ///
@@ -345,11 +372,18 @@ pub enum ErrorCounter {
     ConfigInvalid = 20,
     /// The watchdog pet ran measurably late: something blocked the executor.
     ///
-    /// This is the near miss, and deliberately the only counter about the executor. A watchdog
-    /// reset, a panic and a HardFault all end in a reset that clears every counter here, so none
-    /// of them can be counted in RAM — catching those needs a region the reset does not touch,
-    /// which this object does not have.
+    /// This is the near miss. A watchdog reset, a panic and a HardFault all end in a reset that
+    /// clears every counter here, so none of them can be counted in RAM — catching those needs a
+    /// region the reset does not touch, which this object does not have.
     WatchdogLate = 21,
+    /// A control-loop iteration took longer than its tick period, so the loop that owns the
+    /// outputs ran late. One count per iteration.
+    ///
+    /// The shallow end of what [`Self::WatchdogLate`] catches: this is the control loop slipping
+    /// its deadline, that is the executor stalled long enough to threaten a reset.
+    /// [`CONTROL_TICK_PEAK_US`] says how far the worst recent iteration overshot, and
+    /// [`CPU_LOAD`] whether the reason is simply that there is no headroom left.
+    ControlTickOverrun = 22,
 }
 
 impl ErrorCounter {
@@ -377,6 +411,7 @@ impl ErrorCounter {
         Self::ConfigFlashError,
         Self::ConfigInvalid,
         Self::WatchdogLate,
+        Self::ControlTickOverrun,
     ];
 
     /// The counter at sub-index `sub` of [`ERROR_COUNTERS`], for decoding a captured read.
@@ -775,6 +810,8 @@ mod tests {
             RAW_DEBUG_MODE,
             LINK_STATE,
             MS_SINCE_HEARTBEAT,
+            CPU_LOAD,
+            CONTROL_TICK_PEAK_US,
             RAIL_CURRENT,
             RAIL_VOLTAGE,
             ERROR_COUNTERS,

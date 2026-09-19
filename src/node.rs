@@ -5,7 +5,7 @@
 //! which calibration — is [`Config`], and a board that has been configured over the bus and told
 //! to save ignores the compile-time constants entirely.
 
-use embassy_executor::Spawner;
+use embassy_executor::{Spawner, raw};
 use embassy_stm32::flash::Flash;
 use embassy_sync::pubsub::PubSubChannel;
 
@@ -51,6 +51,44 @@ pub const NODE_NAME: &str = "I/O [rev3]";
 
 /// What distinguishes one physical node from another at build time.
 pub use crate::config::NodeSettings;
+
+/// The thread-mode executor every task on this board runs on. Nothing runs at interrupt priority:
+/// the one interrupt executor this firmware declares (`crate::EXECUTOR_HIGH`) is never started.
+static EXECUTOR: StaticCell<raw::Executor> = StaticCell::new();
+
+/// Bring one node up, then be its idle loop. Never returns; this is what each `src/bin/nodeN.rs`
+/// hands control to.
+///
+/// Written out by hand rather than spelled `#[embassy_executor::main]`, which expands to very
+/// nearly this, because the idle loop has to be *ours*: [`crate::cpu::sleep`] times the `wfe` it
+/// sleeps in, and that measurement is the board's whole CPU utilization figure. The macro's loop
+/// sleeps in a `wfe` nobody can time.
+pub fn run(settings: NodeSettings) -> ! {
+    /// Context value the cortex-m pender recognises as "the thread-mode executor", which is what
+    /// makes a wake from a task turn into the `sev` that ends our `wfe`. Not public in
+    /// `embassy-executor`, but part of its ABI.
+    const THREAD_PENDER: usize = usize::MAX;
+
+    let executor: &'static raw::Executor = EXECUTOR.init(raw::Executor::new(THREAD_PENDER as *mut ()));
+    executor.spawner().spawn(init(executor.spawner(), settings).unwrap());
+
+    // Before the first sleep, and it must be: without SEVONPEND the `wfe` below never returns.
+    crate::cpu::init();
+
+    loop {
+        // SAFETY: the only `poll` of this executor, and never reentrant — `sleep` runs no tasks,
+        // and nothing else in this firmware polls it.
+        unsafe { executor.poll() };
+        crate::cpu::sleep();
+    }
+}
+
+/// The boot task. Everything [`run`] would do asynchronously happens here, because `run` itself
+/// cannot be `async` — it is the loop that drives the executor.
+#[embassy_executor::task]
+async fn init(spawner: Spawner, settings: NodeSettings) {
+    spawn_node(spawner, settings).await;
+}
 
 pub async fn spawn_node(spawner: Spawner, settings: NodeSettings) {
     let board: Board = init_board(spawner).await;

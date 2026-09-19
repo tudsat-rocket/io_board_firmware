@@ -11,8 +11,6 @@
 #![no_std]
 #![no_main]
 
-use embassy_executor::Spawner;
-
 use io_board::config::Config;
 use io_board::index::{AmplifierId, AmplifierId::*, HcoPair, I2cBus, I2cBus::*, SensorSlot::*, ValveId::*};
 use io_board::node::NodeSettings;
@@ -23,9 +21,9 @@ use defmt_rtt as _;
 // Firmware metadata generated using `cancan-build`
 include!(concat!(env!("OUT_DIR"), "/cancan_metadata.rs"));
 
-#[embassy_executor::main]
-async fn main(spawner: Spawner) {
-    io_board::node::spawn_node(spawner, BENCH).await;
+#[cortex_m_rt::entry]
+fn main() -> ! {
+    io_board::node::run(BENCH)
 }
 
 /// Two uncharacterised servos on the two HCO pairs, and the first four amplifier positions of

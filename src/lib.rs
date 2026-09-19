@@ -22,8 +22,12 @@
 //!
 //! # Where the raw PAC is still used, and why
 //!
-//! Everything reachable through embassy goes through embassy. Three places do not:
+//! Everything reachable through embassy goes through embassy. Four places do not:
 //!
+//! - [`node::run`] is `#[embassy_executor::main]` written out by hand, and [`cpu::init`] reaches
+//!   under embassy to set SEVONPEND in the Cortex-M SCB. Both exist so that the idle loop belongs
+//!   to this firmware rather than to the executor: timing the `wfe` it sleeps in is where the
+//!   board's CPU utilization figure comes from. See [`cpu`].
 //! - [`panic::safe_outputs`] writes timer and GPIO registers directly. It runs from a panic or a
 //!   HardFault, where the `HcoControl` borrow may be mid-mutation and taking a lock is not an
 //!   option, but the outputs still have to be de-energised before the reset.
@@ -53,6 +57,7 @@
 #![cfg_attr(not(test), no_std)]
 
 pub mod config;
+pub mod cpu;
 pub mod errors;
 pub mod hco;
 pub mod index;

@@ -12,6 +12,7 @@
 use embassy_time::Instant;
 
 use crate::config::{Config, ValveConfig};
+use crate::cpu::CpuMonitor;
 use crate::hco::{HcoState, Level, State};
 use crate::index::{HcoId, PerHco, PerSensorSlot, PerValve, ValveId};
 use crate::leds::{LedsState, StateLedPub};
@@ -53,6 +54,10 @@ pub struct Control<R: RailSensing = NoRails> {
     /// Toggled once a second so the white LED shows the executor is still running.
     blink: bool,
     last_blink: Instant,
+    /// Whole-board CPU utilization. Lives here because this is the one loop on the board with a
+    /// deadline to miss, which makes it the natural thing to measure the system against; the
+    /// measurement itself is idle time and belongs to nobody. See [`crate::cpu`].
+    cpu: CpuMonitor,
 }
 
 /// The concrete `Control` the firmware spawns, monomorphised per revision so it can cross an
@@ -141,6 +146,7 @@ impl<R: RailSensing> Control<R> {
             last_link: LinkState::NeverSeen,
             blink: false,
             last_blink: now,
+            cpu: CpuMonitor::new(now, TICK),
         }
     }
 
@@ -148,7 +154,12 @@ impl<R: RailSensing> Control<R> {
         loop {
             // wait for explicit wake or next tick
             let _ = embassy_time::with_timeout(TICK, CONTROL_WAKE.wait()).await;
+            let started = Instant::now();
             self.tick().await;
+            // Timed out here so that the awaits *inside* the tick are counted and the wait for
+            // the next one is not: how long an iteration takes, not how often it runs.
+            let now = Instant::now();
+            self.cpu.update(now.saturating_duration_since(started), now);
         }
     }
 
@@ -226,6 +237,9 @@ impl<R: RailSensing> Control<R> {
         // that cannot take this lock, and this is the one place that holds it periodically
         // anyway. On a healthy board it is a single atomic load.
         store.refresh_error_counters();
+        // Published by the previous iteration's `cpu.update`, so what the bus reads is one tick
+        // behind a number that only moves every half second anyway.
+        store.refresh_cpu();
     }
 
     /// The whole per-tick arbitration decision: apply pending direct writes, resolve

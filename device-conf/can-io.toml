@@ -238,6 +238,25 @@ data_type = "uint32"
 access_type = "ro"
 default_value = 0
 
+# Whole-system utilization by idle accounting, worst 100 ms window of the last half second.
+# 65535 until the first measurement completes.
+[[objects]]
+index = 0x2034
+parameter_name = "cpu load, permille"
+object_type = "var"
+data_type = "uint16"
+access_type = "ro"
+default_value = 65535
+
+# Worst control tick of the last half second, wall-clock, awaits included.
+[[objects]]
+index = 0x2035
+parameter_name = "peak control loop iteration, microseconds"
+object_type = "var"
+data_type = "uint16"
+access_type = "ro"
+default_value = 0
+
 # rev3 only; reads 0 on rev2, which has no on-board sensing.
 [[objects]]
 index = 0x2040
@@ -266,9 +285,9 @@ parameter_name = "error counters since boot"
 object_type = "array"
 data_type = "uint32"
 access_type = "ro"
-array_size = 22
+array_size = 23
 default_value = [
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
 ]
 
