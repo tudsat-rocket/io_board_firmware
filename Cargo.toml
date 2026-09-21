@@ -64,6 +64,18 @@ name = "node10"
 path = "src/bin/node10.rs"
 required-features = ["hardware", "dual-stepper"]
 
+# Rev2 stepper nodes: one actuator on COM3 with ENABLE switched from HCO2, a solenoid on HCO1.
+# Build with `rev2` instead of the default `rev3`.
+[[bin]]
+name = "node15"
+path = "src/bin/node15.rs"
+required-features = ["hardware"]
+
+[[bin]]
+name = "node16"
+path = "src/bin/node16.rs"
+required-features = ["hardware"]
+
 # The bench node, for a board that is not installed in the vehicle.
 [[bin]]
 name = "generic"

@@ -41,6 +41,11 @@ pub const fn pressurization(pair: HcoPair) -> ValveConfig {
     servo(pair, 2200, 1080)
 }
 
+/// Placeholder endpoints until the valve has been characterised on the bench.
+pub const fn external_n2(pair: HcoPair) -> ValveConfig {
+    servo(pair, 2000, 1000)
+}
+
 /// Steps from closed to open until somebody counts the real ones, in the same spirit as
 /// [`UNMEASURED_TRAVEL_MS`]: one full revolution of a PD2-C at its factory quarter-stepping
 /// (2057h = 128, so 800 pulses per revolution of a 50-pole-pair motor). Deliberately the same

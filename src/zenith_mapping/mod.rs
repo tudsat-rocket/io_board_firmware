@@ -6,7 +6,7 @@
 //! rebuild; this file is the fallback, and the place to record a configuration once it has been
 //! proven.
 
-use crate::config::{Config, FallbackAction, NodeSettings, ReliefConfig, SensorSlotConfig, ValveConfig};
+use crate::config::{Config, FallbackAction, NodeSettings, PROMILLE_MAX, ReliefConfig, SensorSlotConfig, ValveConfig};
 #[allow(
     unused_imports,
     reason = "SensorSlot's later variants are only used by node configs that do not exist yet"
@@ -181,5 +181,78 @@ const fn throttle_stepper() -> ValveConfig {
             unpower: false,
         },
         ..ValveConfig::stepper()
+    }
+}
+
+/// Node 15 — rev2 board, N2 stepper plus the external N2 servo.
+///
+/// The same single-actuator arrangement as [`NODE9_STEPPER`] (COM3 on rev2, PA2 step / PA3
+/// direction), except that ENABLE is not strapped to 5 V: it is switched from HCO2 and exposed
+/// as its own valve slot, see [`stepper_enable`]. The master has to energise valve 1 before
+/// valve 0 will move. The external N2 servo is on pair B (HCO3 power, HCO4 signal), whose PWM is
+/// a hardware timer channel on rev2; HCO1 is unused.
+///
+/// Build with `rev2` — `just flash-one node15` does that on its own.
+pub const NODE15_N2_STEPPER: NodeSettings = NodeSettings::new(
+    15,
+    Config::new()
+        // N2 stepper on COM3.
+        .with_stepper(StepperId::Stepper0, valves::placeholder_stepper(Valve0))
+        .with_valve(Valve0, throttle_stepper())
+        // Stepper ENABLE on HCO2.
+        .with_valve(Valve1, stepper_enable(HcoId::Hco1))
+        // External N2 servo: power on HCO3, signal on HCO4.
+        .with_valve(Valve2, valves::external_n2(HcoPair::B)),
+);
+
+/// Node 16 — rev2 board, OX stepper plus the external oxidizer fill solenoid.
+///
+/// Stepper wired like [`NODE15_N2_STEPPER`] — COM3, its ENABLE on HCO2 — and a solenoid on
+/// HCO1. The fill solenoid closes in both fallback stages rather than taking the vent-shaped
+/// default — a lost master must never leave the tank filling.
+///
+/// Build with `rev2` — `just flash-one node16` does that on its own.
+pub const NODE16_OX_STEPPER: NodeSettings = NodeSettings::new(
+    16,
+    Config::new()
+        // OX stepper on COM3.
+        .with_stepper(StepperId::Stepper0, valves::placeholder_stepper(Valve0))
+        .with_valve(Valve0, throttle_stepper())
+        // Stepper ENABLE on HCO2.
+        .with_valve(Valve1, stepper_enable(HcoId::Hco1))
+        // External OX fill solenoid on HCO1.
+        .with_valve(Valve2, closed_on_fallback(ValveConfig::solenoid_on(HcoId::Hco0))),
+);
+
+/// A stepper's ENABLE line on a high current output, commanded as a solenoid: 1000 promille is
+/// enabled, 0 disabled.
+///
+/// Both fallback stages keep it energised. The stepper's own fallback drives it closed, which it
+/// can only do while enabled, and the step count is only trustworthy while the motor holds —
+/// pulses sent to a disabled drive are counted but never happen.
+const fn stepper_enable(hco: HcoId) -> ValveConfig {
+    ValveConfig {
+        fallback_a: FallbackAction {
+            position: PROMILLE_MAX,
+            unpower: false,
+        },
+        fallback_b: FallbackAction {
+            position: PROMILLE_MAX,
+            unpower: false,
+        },
+        ..ValveConfig::solenoid_on(hco)
+    }
+}
+
+/// `config` with both fallback stages closing it and dropping the drive.
+const fn closed_on_fallback(config: ValveConfig) -> ValveConfig {
+    let closed = FallbackAction {
+        position: 0,
+        unpower: true,
+    };
+    ValveConfig {
+        fallback_a: closed,
+        fallback_b: closed,
+        ..config
     }
 }

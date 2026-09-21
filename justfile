@@ -51,21 +51,25 @@ flash: build _cancan
         exit 1
     fi
 
-# Build and flash one board over CAN, by binary name (node2..node7, node8reg, node9, generic).
+# Build and flash one board over CAN, by binary name (node2..node7, node8reg, node9, node10,
+# node15, node16, generic).
 flash-one board: _cancan
     #!/usr/bin/env bash
     set -euo pipefail
     id=""
-    for entry in {{ boards }} generic:6 node8reg:8 node9:9 node10:10; do
+    for entry in {{ boards }} generic:6 node8reg:8 node9:9 node10:10 node15:15 node16:16; do
         [ "${entry%%:*}" = "{{ board }}" ] && id="${entry##*:}"
     done
     if [ -z "${id}" ]; then
-        echo "unknown board '{{ board }}' — known: {{ boards }} generic:6 node8reg:8 node9:9 node10:10" >&2
+        echo "unknown board '{{ board }}' — known: {{ boards }} generic:6 node8reg:8 node9:9 node10:10 node15:15 node16:16" >&2
         exit 1
     fi
     extra=""
     [ "{{ board }}" = "node10" ] && extra=",dual-stepper"
-    cargo build --release {{ features }}${extra} --bin {{ board }}
+    features="{{ features }}"
+    # node15/node16 are rev2 boards whatever `rev` is set to.
+    case "{{ board }}" in node15|node16) features="--no-default-features --features rev2,hardware" ;; esac
+    cargo build --release ${features}${extra} --bin {{ board }}
     {{ cancan }} {{ iface_arg }} flash "${id}" "{{ target_dir }}/{{ board }}"
 
 # List the boards answering on the bus (probes all 256 cancan node ids).
