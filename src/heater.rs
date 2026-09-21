@@ -14,7 +14,7 @@
 
 use embassy_time::{Duration, Instant};
 
-use crate::index::HcoId;
+use crate::index::HcoPair;
 use crate::rail_sense::NoRails;
 use crate::store::{RAW_INVALID, TEMPERATURE_INVALID};
 
@@ -22,8 +22,10 @@ use crate::store::{RAW_INVALID, TEMPERATURE_INVALID};
 /// about it is written over SDO or persisted, so changing the setpoint means a rebuild.
 #[derive(Clone, Copy, Debug, defmt::Format)]
 pub struct HeaterConfig {
-    /// The output that switches the pad.
-    pub hco: HcoId,
+    /// The pair that switches the pad. Both outputs switch together.
+    pub pair: HcoPair,
+    /// The analog input the pad's NTC divider is wired to.
+    pub ntc: AnalogPin,
     /// Temperature to hold, in millidegrees Celsius.
     pub setpoint_milli_c: i32,
     /// Half-width of the dead band. The pad switches on below `setpoint - hysteresis` and off
@@ -36,9 +38,10 @@ pub struct HeaterConfig {
 }
 
 impl HeaterConfig {
-    pub const fn new(hco: HcoId, setpoint_milli_c: i32) -> Self {
+    pub const fn new(pair: HcoPair, ntc: AnalogPin, setpoint_milli_c: i32) -> Self {
         Self {
-            hco,
+            pair,
+            ntc,
             setpoint_milli_c,
             hysteresis_milli_c: 1_000,
             offset_milli_c: 0,
@@ -54,6 +57,20 @@ impl HeaterConfig {
         self.hysteresis_milli_c = hysteresis_milli_c;
         self
     }
+}
+
+/// An ADC-capable connector pin free for an external sensor on rev3. Labels are the rev3
+/// schematic's.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, defmt::Format)]
+pub enum AnalogPin {
+    /// `A_IN_0`, COM5.
+    Pa6,
+    /// `A_IN_1`. Taken by the second stepper's direction line in a `dual-stepper` build.
+    Pa5,
+    /// `A_IN_2`.
+    Pc5,
+    /// `A_IN_3`.
+    Pc4,
 }
 
 /// 0x2017 sub 3.
@@ -72,7 +89,8 @@ pub enum HeaterState {
 
 #[allow(async_fn_in_trait)]
 pub trait HeaterSensing {
-    /// Raw 12-bit reading of the heater NTC divider, or `None` if this board cannot read it.
+    /// Raw 12-bit reading of the heater NTC divider, or `None` if this board cannot read it
+    /// (rev2, or no pin was handed over at boot).
     async fn heater_ntc_counts(&mut self) -> Option<u16>;
 }
 
@@ -257,7 +275,7 @@ pub fn ntc_counts_to_milli_c(counts: u16) -> i32 {
 mod tests {
     use super::*;
 
-    const CFG: HeaterConfig = HeaterConfig::new(HcoId::Hco2, 30_000);
+    const CFG: HeaterConfig = HeaterConfig::new(HcoPair::B, AnalogPin::Pa6, 30_000);
 
     fn at0() -> Instant {
         Instant::from_millis(0)

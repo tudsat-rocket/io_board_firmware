@@ -7,7 +7,7 @@
 //! proven.
 
 use crate::config::{Config, FallbackAction, NodeSettings, PROMILLE_MAX, ReliefConfig, SensorSlotConfig, ValveConfig};
-use crate::heater::HeaterConfig;
+use crate::heater::{AnalogPin, HeaterConfig};
 #[allow(
     unused_imports,
     reason = "SensorSlot's later variants are only used by node configs that do not exist yet"
@@ -60,11 +60,12 @@ pub const NODE4_HEATER_HYSTERESIS_MILLI_C: i32 = 1_000;
 /// uncalibrated value from the `heater:` line the node logs every second.
 pub const NODE4_HEATER_OFFSET_MILLI_C: i32 = 0;
 
-/// Node 4 — upper propulsion. Oxidizer vent solenoid on HCO1, and a heating pad on HCO3 that the
-/// node regulates on its own from the pad's NTC on COM5 (PA6). See [`crate::heater`].
+/// Node 4 — upper propulsion. Oxidizer vent solenoid on HCO1, and a heating pad on pair B
+/// (HCO3+4) that the node regulates on its own from the pad's NTC on COM5 (PA6). See
+/// [`crate::heater`].
 pub const NODE4: NodeSettings =
     NodeSettings::new(4, Config::new().with_valve(Valve0, ValveConfig::solenoid_on(HcoId::Hco0))).with_heater(
-        HeaterConfig::new(HcoId::Hco2, NODE4_HEATER_SETPOINT_MILLI_C)
+        HeaterConfig::new(HcoPair::B, AnalogPin::Pa6, NODE4_HEATER_SETPOINT_MILLI_C)
             .with_hysteresis_milli_c(NODE4_HEATER_HYSTERESIS_MILLI_C)
             .with_offset_milli_c(NODE4_HEATER_OFFSET_MILLI_C),
     );

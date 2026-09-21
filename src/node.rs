@@ -54,7 +54,7 @@ pub const NODE_NAME: &str = "I/O [rev3]";
 pub use crate::config::NodeSettings;
 
 pub async fn spawn_node(spawner: Spawner, settings: NodeSettings) {
-    let board: Board = init_board(spawner).await;
+    let board: Board = init_board(spawner, settings.heater.map(|h| h.ntc)).await;
 
     let cancan_config = CanCanConfig {
         node_id: settings.node_id,
@@ -121,10 +121,17 @@ pub async fn spawn_node(spawner: Spawner, settings: NodeSettings) {
     // stays silent until a config maps a stepper valve onto it.
     let mut control = BoardControl::new(outputs, rails, board.leds).with_stepper(STEPPER.init(board.stepper));
     if let Some(heater) = settings.heater {
-        if let Some(valve) = defaults.hco_owner(heater.hco) {
-            defmt::error!("heater output {} is also mapped to valve {}; the heater wins", heater.hco, valve);
+        for hco in [heater.pair.power(), heater.pair.signal()] {
+            if let Some(valve) = defaults.hco_owner(hco) {
+                defmt::error!("heater output {} is also mapped to valve {}; the heater wins", hco, valve);
+            }
         }
-        defmt::info!("heater on {}, holding {} m°C", heater.hco, heater.setpoint_milli_c);
+        defmt::info!(
+            "heater on pair {}, NTC on {}, holding {} m°C",
+            heater.pair,
+            heater.ntc,
+            heater.setpoint_milli_c
+        );
         control = control.with_heater(heater);
     }
     let control = CONTROL.init(control);

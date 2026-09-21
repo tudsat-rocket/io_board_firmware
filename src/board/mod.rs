@@ -116,7 +116,9 @@ embassy_stm32::bind_interrupts!(struct Irqs {
     DMA1_CHANNEL1 => dma::InterruptHandler<DMA1_CH1>;
 });
 
-pub async fn init_board(spawner: Spawner) -> Board {
+/// `heater_ntc` is the analog input a heating pad's NTC is on, if the node has one. The pin is
+/// only claimed when asked for.
+pub async fn init_board(spawner: Spawner, heater_ntc: Option<crate::heater::AnalogPin>) -> Board {
     let p = hw::setup();
 
     let mut iwdg = IndependentWatchdog::new(p.IWDG, WATCHDOG_TIMEOUT_US);
@@ -198,6 +200,29 @@ pub async fn init_board(spawner: Spawner) -> Board {
     spawner.spawn(leds::run_leds(leds, LedsState::default(), led_pub_sub.subscriber().unwrap()).unwrap());
 
     #[cfg(feature = "rev3")]
+    let heater_ntc = {
+        use crate::heater::AnalogPin;
+        use embassy_stm32::adc::AdcChannel;
+        match heater_ntc {
+            None => None,
+            Some(AnalogPin::Pa6) => Some(p.PA6.degrade_adc()),
+            Some(AnalogPin::Pc5) => Some(p.PC5.degrade_adc()),
+            Some(AnalogPin::Pc4) => Some(p.PC4.degrade_adc()),
+            #[cfg(not(feature = "dual-stepper"))]
+            Some(AnalogPin::Pa5) => Some(p.PA5.degrade_adc()),
+            #[cfg(feature = "dual-stepper")]
+            Some(AnalogPin::Pa5) => {
+                defmt::error!("heater NTC on PA5, but this build drives a stepper direction line on it");
+                None
+            }
+        }
+    };
+    #[cfg(feature = "rev2")]
+    if heater_ntc.is_some() {
+        defmt::error!("heater configured, but rev2 has no ADC wired up; the pad stays off");
+    }
+
+    #[cfg(feature = "rev3")]
     let onboard_sens = OnboardSensRev3::new(
         p.ADC1,
         // The HCO pairs are crossed against the schematic label numbering on this revision: PA1
@@ -211,7 +236,7 @@ pub async fn init_board(spawner: Spawner) -> Board {
             v_hco12_supply: p.PC2,
             v_hco34_supply: p.PC3,
             v_temp: p.PA4,
-            heater_ntc: p.PA6,
+            heater_ntc,
         },
         adc::SampleTime::CYCLES7_5,
     )

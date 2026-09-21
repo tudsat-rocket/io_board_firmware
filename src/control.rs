@@ -355,7 +355,8 @@ impl<R: RailSensing + HeaterSensing> Control<R> {
         // debug mode hands it back to direct control so it can be switched by hand.
         let heating = self.heater.update(self.heater_cfg.as_ref(), inputs.heater_ntc, inputs.now);
         if let Some(cfg) = self.heater_cfg.filter(|_| !inputs.raw_debug) {
-            desired[cfg.hco] = digital(heating);
+            desired[cfg.pair.power()] = digital(heating);
+            desired[cfg.pair.signal()] = digital(heating);
         }
 
         self.outputs.drive(desired);
@@ -806,10 +807,10 @@ mod tests {
 
     #[test]
     fn the_heater_switches_its_output_and_owns_it_over_a_valve() {
-        let heater = HeaterConfig::new(HcoId::Hco2, 30_000);
+        let heater = HeaterConfig::new(HcoPair::B, crate::heater::AnalogPin::Pa6, 30_000);
         let mut ctl = test_control().with_heater(heater);
         // A solenoid mapped onto the same output loses to the heater.
-        let cfg = Config::new().with_valve(ValveId::Valve1, ValveConfig::solenoid_on(HcoId::Hco2));
+        let cfg = Config::new().with_valve(ValveId::Valve1, ValveConfig::solenoid_on(HcoId::Hco3));
 
         let cold = TickInputs {
             heater_ntc: Some(2278), // 20 C
@@ -817,6 +818,7 @@ mod tests {
         };
         let outcome = ctl.decide(cold);
         assert_eq!(ctl.outputs.current()[HcoId::Hco2], State::Digital(Level::High));
+        assert_eq!(ctl.outputs.current()[HcoId::Hco3], State::Digital(Level::High));
         assert_eq!(outcome.heater.2, crate::heater::HeaterState::Heating as u8);
 
         let hot = TickInputs {
@@ -825,11 +827,12 @@ mod tests {
         };
         ctl.decide(hot);
         assert_eq!(ctl.outputs.current()[HcoId::Hco2], State::Digital(Level::Low));
+        assert_eq!(ctl.outputs.current()[HcoId::Hco3], State::Digital(Level::Low));
     }
 
     #[test]
     fn a_heater_with_a_broken_ntc_stays_off() {
-        let mut ctl = test_control().with_heater(HeaterConfig::new(HcoId::Hco2, 30_000));
+        let mut ctl = test_control().with_heater(HeaterConfig::new(HcoPair::B, crate::heater::AnalogPin::Pa6, 30_000));
         let broken = TickInputs {
             heater_ntc: Some(4095),
             ..inputs(Config::new(), [0, 0, 0, 0], Instant::from_millis(0))
@@ -840,7 +843,7 @@ mod tests {
 
     #[test]
     fn raw_debug_hands_the_heater_output_back_to_direct_control() {
-        let mut ctl = test_control().with_heater(HeaterConfig::new(HcoId::Hco2, 30_000));
+        let mut ctl = test_control().with_heater(HeaterConfig::new(HcoPair::B, crate::heater::AnalogPin::Pa6, 30_000));
         let cold_debug = TickInputs {
             heater_ntc: Some(2278),
             raw_debug: true,
