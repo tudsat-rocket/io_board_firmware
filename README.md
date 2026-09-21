@@ -54,17 +54,18 @@ Nothing configured.
 
 No sensors.
 
-Heating pad on HC3 + HC4, switched by the node itself. The pad's 10k NTC is read on COM5 (PA6),
-expected as a 10k pull-up to 3.3 V with the NTC to ground. The pad turns on below 29 °C and off
-above 31 °C (setpoint 30 °C, set at compile time in `src/zenith_mapping/mod.rs`). It turns off if
-the NTC reads open or shorted. Temperature and state are at SDO 0x2017.
+Heating pad on HC3 + HC4, switched by the node itself. The pad's 10k NTC is read on COM4 pin 1
+(PA2), wired NTC to 3.3 V and 10k to ground (`NtcWiring::ToSupply`; `ToGround` is the other way
+round). The pad turns on below 29 °C and off above 31 °C (setpoint 30 °C, set at compile time in
+`src/zenith_mapping/mod.rs`). It turns off if the NTC reads open or shorted. Temperature and state
+are at SDO 0x2017.
 
-To calibrate the NTC, put a reference thermometer on the pad and watch the RTT log
-(`just probe-flash node4`). Once a second the node prints
-`heater: raw … counts, uncalibrated … m°C, offset … m°C, calibrated … m°C`. Set
-`NODE4_HEATER_OFFSET_MILLI_C` to `reference - uncalibrated` and rebuild. In raw debug mode HC3 and HC4 go
-back to direct control. The NTC pin is part of the node settings (`HeaterConfig::ntc`); PA6,
-PA5, PC4 and PC5 are the choices. See `src/heater.rs`.
+To calibrate the NTC, put a reference thermometer on the pad and watch the RTT log (`just
+probe-flash node4`). Once a second the node prints `heater: raw … counts, uncalibrated … m°C,
+offset … m°C, calibrated … m°C`. Set `NODE4_HEATER_OFFSET_MILLI_C` to `reference - uncalibrated`
+and rebuild. In raw debug mode HC3 and HC4 go back to direct control. The NTC pin is part of the
+node settings (`HeaterConfig::ntc`); PA6, PA2, PA5, PC4 and PC5 are the choices. PA2 is the
+stepper's step clock, so node 4 has no stepper port. See `src/heater.rs`.
 
 ### Node 5: upper propulsion
 

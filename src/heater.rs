@@ -26,6 +26,8 @@ pub struct HeaterConfig {
     pub pair: HcoPair,
     /// The analog input the pad's NTC divider is wired to.
     pub ntc: AnalogPin,
+    /// Which side of the divider the NTC is on.
+    pub ntc_wiring: NtcWiring,
     /// Temperature to hold, in millidegrees Celsius.
     pub setpoint_milli_c: i32,
     /// Half-width of the dead band. The pad switches on below `setpoint - hysteresis` and off
@@ -42,10 +44,16 @@ impl HeaterConfig {
         Self {
             pair,
             ntc,
+            ntc_wiring: NtcWiring::ToGround,
             setpoint_milli_c,
             hysteresis_milli_c: 1_000,
             offset_milli_c: 0,
         }
+    }
+
+    pub const fn with_ntc_wiring(mut self, ntc_wiring: NtcWiring) -> Self {
+        self.ntc_wiring = ntc_wiring;
+        self
     }
 
     pub const fn with_offset_milli_c(mut self, offset_milli_c: i32) -> Self {
@@ -63,6 +71,8 @@ impl HeaterConfig {
 /// schematic's.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, defmt::Format)]
 pub enum AnalogPin {
+    /// COM4 pin 1, the stepper step clock. Claiming it leaves the node without a stepper port.
+    Pa2,
     /// `A_IN_0`, COM5.
     Pa6,
     /// `A_IN_1`. Taken by the second stepper's direction line in a `dual-stepper` build.
@@ -72,6 +82,30 @@ pub enum AnalogPin {
     /// `A_IN_3`.
     Pc4,
 }
+
+/// Which side of the 10k divider the NTC sits on.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, defmt::Format)]
+pub enum NtcWiring {
+    /// 10k to +3.3V, NTC to ground. The reading falls as the pad heats.
+    ToGround,
+    /// NTC to +3.3V, 10k to ground. The reading rises as the pad heats.
+    ToSupply,
+}
+
+impl NtcWiring {
+    /// The reading the [`NtcWiring::ToGround`] divider would give at the same temperature, which
+    /// is what [`NTC_CURVE`] is tabulated in. Swapping the two legs of a divider turns `x` into
+    /// `full scale - x`, and with a 10k fixed leg that is exact for the curve.
+    fn normalise(self, counts: u16) -> u16 {
+        match self {
+            Self::ToGround => counts,
+            Self::ToSupply => ADC_FULL_SCALE.saturating_sub(counts),
+        }
+    }
+}
+
+/// 12-bit ADC.
+const ADC_FULL_SCALE: u16 = 4095;
 
 /// 0x2017 sub 3.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, defmt::Format)]
@@ -143,7 +177,8 @@ impl Heater {
         };
 
         self.raw = counts.unwrap_or(RAW_INVALID);
-        let uncalibrated = counts.map_or(TEMPERATURE_INVALID, ntc_counts_to_milli_c);
+        let uncalibrated =
+            counts.map_or(TEMPERATURE_INVALID, |c| ntc_counts_to_milli_c(cfg.ntc_wiring.normalise(c)));
         self.milli_c = match uncalibrated {
             TEMPERATURE_INVALID => TEMPERATURE_INVALID,
             t => t.saturating_add(cfg.offset_milli_c),
@@ -198,8 +233,9 @@ impl Default for Heater {
 /// The pad NTC's curve, sampled every [`NTC_CURVE_STEP_C`] from [`NTC_CURVE_MIN_C`]: the 12-bit
 /// ADC reading at each temperature. It falls as the NTC heats.
 ///
-/// Assumes a 10k upper leg to +3.3V and the NTC to ground, with R25 = 10k and B = 3950 K. Both
-/// the pad's beta and the upper leg are **unmeasured**; regenerate if either differs:
+/// Tabulated for a 10k upper leg to +3.3V and the NTC to ground, with R25 = 10k and B = 3950 K.
+/// The other wiring is mapped onto it by [`NtcWiring::normalise`]. The pad's beta is
+/// **unmeasured**; regenerate if it or the fixed leg differs:
 ///
 /// ```text
 ///   R_ntc(T) = 10k * exp(3950 * (1/T - 1/298.15))
@@ -371,6 +407,28 @@ mod tests {
         let mut h = Heater::new();
         assert!(!h.update(Some(&cfg), Some(4095), at0()));
         assert_eq!(h.milli_c(), TEMPERATURE_INVALID);
+    }
+
+    #[test]
+    fn an_ntc_to_supply_reads_rising_counts_as_rising_temperature() {
+        let cfg = CFG.with_ntc_wiring(NtcWiring::ToSupply);
+        let mut h = Heater::new();
+        // 4095 - 2278: the mirrored divider at 20 C.
+        assert!(h.update(Some(&cfg), Some(4095 - 2278), at0()));
+        assert_eq!(h.milli_c(), 20_000);
+        // 4095 - 1614: 35 C.
+        assert!(!h.update(Some(&cfg), Some(4095 - 1614), at0()));
+        assert_eq!(h.milli_c(), 35_000);
+    }
+
+    #[test]
+    fn an_ntc_to_supply_still_detects_open_and_short() {
+        let cfg = CFG.with_ntc_wiring(NtcWiring::ToSupply);
+        let mut h = Heater::new();
+        assert!(!h.update(Some(&cfg), Some(0), at0()));
+        assert_eq!(h.state(), HeaterState::SensorFault);
+        assert!(!h.update(Some(&cfg), Some(4095), at0()));
+        assert_eq!(h.state(), HeaterState::SensorFault);
     }
 
     #[test]

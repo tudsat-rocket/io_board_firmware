@@ -117,9 +117,17 @@ pub async fn spawn_node(spawner: Spawner, settings: NodeSettings) {
     #[cfg(feature = "rev2")]
     let rails = crate::rail_sense::NoRails;
 
-    // Handed over unconditionally: the port costs two otherwise-unused pins and a timer, and
-    // stays silent until a config maps a stepper valve onto it.
-    let mut control = BoardControl::new(outputs, rails, board.leds).with_stepper(STEPPER.init(board.stepper));
+    // Handed over whenever the board built one: the port costs two otherwise-unused pins and a
+    // timer, and stays silent until a config maps a stepper valve onto it.
+    let mut control = BoardControl::new(outputs, rails, board.leds);
+    match board.stepper {
+        Some(stepper) => control = control.with_stepper(STEPPER.init(stepper)),
+        None => {
+            if defaults.steppers.values().any(|s| s.is_mapped()) {
+                defmt::error!("a stepper is configured, but its step clock pin is the heater NTC input");
+            }
+        }
+    }
     if let Some(heater) = settings.heater {
         for hco in [heater.pair.power(), heater.pair.signal()] {
             if let Some(valve) = defaults.hco_owner(hco) {
