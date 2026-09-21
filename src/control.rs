@@ -13,6 +13,7 @@ use embassy_time::Instant;
 
 use crate::config::{Config, ValveConfig};
 use crate::hco::{HcoState, Level, State};
+use crate::heater::{Heater, HeaterConfig, HeaterSensing};
 use crate::index::{HcoId, PerHco, PerSensorSlot, PerStepper, PerValve, ValveId};
 use crate::leds::{LedsState, StateLedPub};
 use crate::outputs::{Outputs, digital, pwm};
@@ -31,7 +32,7 @@ const TICK: embassy_time::Duration = embassy_time::Duration::from_millis(20);
 
 /// Generic over rail sensing so this whole task can be built and driven by a host test against
 /// [`NoRails`] and a mocked [`crate::hco::HcoControl`], not just against real hardware.
-pub struct Control<R: RailSensing = NoRails> {
+pub struct Control<R: RailSensing + HeaterSensing = NoRails> {
     outputs: Outputs,
     valves: PerValve<Valve>,
     /// Position feedback from anything that is not a configured sensor slot.
@@ -44,6 +45,9 @@ pub struct Control<R: RailSensing = NoRails> {
     // TODO: document what exactly latch is, or choose a better name
     latch: FallbackLatch,
     relief: Relief,
+    /// The heating pad thermostat. `heater_cfg` is `None` on a node without one.
+    heater: Heater,
+    heater_cfg: Option<HeaterConfig>,
     /// Desired state of each output from the direct-control path. Owns whichever outputs no valve
     /// claims; in raw debug mode it can also override an owned one.
     direct: HcoState,
@@ -97,6 +101,8 @@ struct TickInputs {
     pending: crate::store::Pending,
     direct_writes: Option<DirectWrites>,
     rails: Option<Rails>,
+    /// Raw heater NTC reading, `None` if there is no heater or it cannot be read.
+    heater_ntc: Option<u16>,
     now: Instant,
     since_heartbeat: u32,
     seen: bool,
@@ -129,6 +135,8 @@ struct TickOutcome {
     statuses: PerValve<u8>,
     currents: PerValve<u16>,
     relief_state: u8,
+    /// Heater NTC temperature (m°C), raw counts, and state, for 0x2017.
+    heater: (i32, u16, u8),
     /// Where each actuator's step counter stands, for 0x2016. 0 on a board without a step port.
     stepper_position_steps: PerStepper<i32>,
     link: LinkState,
@@ -138,7 +146,7 @@ struct TickOutcome {
     leds: Option<LedsState>,
 }
 
-impl<R: RailSensing> Control<R> {
+impl<R: RailSensing + HeaterSensing> Control<R> {
     pub fn new(outputs: Outputs, rails: R, leds: StateLedPub) -> Self {
         let now = Instant::now();
         Self {
@@ -147,6 +155,8 @@ impl<R: RailSensing> Control<R> {
             feedback: NoFeedback,
             latch: FallbackLatch::new(),
             relief: Relief::new(),
+            heater: Heater::new(),
+            heater_cfg: None,
             direct: HcoState::splat(State::Digital(Level::Low)),
             rails,
             leds,
@@ -167,6 +177,12 @@ impl<R: RailSensing> Control<R> {
         self
     }
 
+    /// Attach a thermostat-controlled heating pad.
+    pub fn with_heater(mut self, cfg: HeaterConfig) -> Self {
+        self.heater_cfg = Some(cfg);
+        self
+    }
+
     pub async fn run(&mut self) -> ! {
         loop {
             // wait for explicit wake or next tick
@@ -177,6 +193,10 @@ impl<R: RailSensing> Control<R> {
 
     async fn tick(&mut self) {
         let rails = self.read_rails().await;
+        let heater_ntc = match self.heater_cfg {
+            Some(_) => self.rails.heater_ntc_counts().await,
+            None => None,
+        };
         let now = Instant::now();
         let since_heartbeat = safety::since_last_heartbeat();
         let seen = safety::master_ever_seen();
@@ -210,6 +230,7 @@ impl<R: RailSensing> Control<R> {
             pending,
             direct_writes,
             rails,
+            heater_ntc,
             now,
             since_heartbeat,
             seen,
@@ -223,6 +244,7 @@ impl<R: RailSensing> Control<R> {
         store.valve_status = outcome.statuses;
         store.valve_current_ma = outcome.currents;
         store.relief_state = outcome.relief_state;
+        (store.heater_milli_c, store.heater_raw, store.heater_state) = outcome.heater;
         store.stepper_position_steps = outcome.stepper_position_steps;
         store.link_state = outcome.link;
         store.ms_since_heartbeat = since_heartbeat;
@@ -329,6 +351,13 @@ impl<R: RailSensing> Control<R> {
             statuses[valve] = self.valves[valve].status() as u8;
         }
 
+        // The heater owns its output over any valve or direct write, in every link state. Raw
+        // debug mode hands it back to direct control so it can be switched by hand.
+        let heating = self.heater.update(self.heater_cfg.as_ref(), inputs.heater_ntc, inputs.now);
+        if let Some(cfg) = self.heater_cfg.filter(|_| !inputs.raw_debug) {
+            desired[cfg.hco] = digital(heating);
+        }
+
         self.outputs.drive(desired);
         let stepper_position_steps = self.drive_steppers(&inputs.config, stepper_targets, stepper_steps, elapsed_ms);
 
@@ -340,6 +369,7 @@ impl<R: RailSensing> Control<R> {
             statuses,
             currents,
             relief_state: self.relief.state() as u8,
+            heater: (self.heater.milli_c(), self.heater.raw(), self.heater.state() as u8),
             stepper_position_steps,
             link,
             leds,
@@ -510,7 +540,10 @@ impl<R: RailSensing> Control<R> {
         let state = LedsState {
             // Red is "this board is not in its normal flight configuration" — which includes
             // actively venting a vessel on its own initiative.
-            red: raw_debug || stalled || self.relief.is_active(),
+            red: raw_debug
+                || stalled
+                || self.relief.is_active()
+                || self.heater.state() == crate::heater::HeaterState::SensorFault,
             // Yellow is "the master is not talking to me".
             yellow: !matches!(link, LinkState::Alive),
             // White is a plain "the executor is running" heartbeat.
@@ -702,6 +735,7 @@ mod tests {
             pending: Pending::default(),
             direct_writes: None,
             rails: None,
+            heater_ntc: None,
             now,
             since_heartbeat: 0,
             seen: true,
@@ -768,6 +802,52 @@ mod tests {
             1000,
             "with no reading the travel-time estimate takes over rather than the valve freezing"
         );
+    }
+
+    #[test]
+    fn the_heater_switches_its_output_and_owns_it_over_a_valve() {
+        let heater = HeaterConfig::new(HcoId::Hco2, 30_000);
+        let mut ctl = test_control().with_heater(heater);
+        // A solenoid mapped onto the same output loses to the heater.
+        let cfg = Config::new().with_valve(ValveId::Valve1, ValveConfig::solenoid_on(HcoId::Hco2));
+
+        let cold = TickInputs {
+            heater_ntc: Some(2278), // 20 C
+            ..inputs(cfg.clone(), [0, 0, 0, 0], Instant::from_millis(0))
+        };
+        let outcome = ctl.decide(cold);
+        assert_eq!(ctl.outputs.current()[HcoId::Hco2], State::Digital(Level::High));
+        assert_eq!(outcome.heater.2, crate::heater::HeaterState::Heating as u8);
+
+        let hot = TickInputs {
+            heater_ntc: Some(1614), // 35 C
+            ..inputs(cfg.clone(), [0, 1000, 0, 0], Instant::from_millis(20))
+        };
+        ctl.decide(hot);
+        assert_eq!(ctl.outputs.current()[HcoId::Hco2], State::Digital(Level::Low));
+    }
+
+    #[test]
+    fn a_heater_with_a_broken_ntc_stays_off() {
+        let mut ctl = test_control().with_heater(HeaterConfig::new(HcoId::Hco2, 30_000));
+        let broken = TickInputs {
+            heater_ntc: Some(4095),
+            ..inputs(Config::new(), [0, 0, 0, 0], Instant::from_millis(0))
+        };
+        ctl.decide(broken);
+        assert_eq!(ctl.outputs.current()[HcoId::Hco2], State::Digital(Level::Low));
+    }
+
+    #[test]
+    fn raw_debug_hands_the_heater_output_back_to_direct_control() {
+        let mut ctl = test_control().with_heater(HeaterConfig::new(HcoId::Hco2, 30_000));
+        let cold_debug = TickInputs {
+            heater_ntc: Some(2278),
+            raw_debug: true,
+            ..inputs(Config::new(), [0, 0, 0, 0], Instant::from_millis(0))
+        };
+        ctl.decide(cold_debug);
+        assert_eq!(ctl.outputs.current()[HcoId::Hco2], State::Digital(Level::Low), "direct control says off");
     }
 
     #[test]

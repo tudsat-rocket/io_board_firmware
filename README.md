@@ -54,6 +54,17 @@ Nothing configured.
 
 No sensors.
 
+Heating pad on HC3, switched by the node itself. The pad's 10k NTC is read on COM5 (PA6),
+expected as a 10k pull-up to 3.3 V with the NTC to ground. The pad turns on below 29 °C and off
+above 31 °C (setpoint 30 °C, set at compile time in `src/zenith_mapping/mod.rs`). It turns off if
+the NTC reads open or shorted. Temperature and state are at SDO 0x2017.
+
+To calibrate the NTC, put a reference thermometer on the pad and watch the RTT log
+(`just probe-flash node4`). Once a second the node prints
+`heater: raw … counts, uncalibrated … m°C, offset … m°C, calibrated … m°C`. Set
+`NODE4_HEATER_OFFSET_MILLI_C` to `reference - uncalibrated` and rebuild. In raw debug mode HC3 goes
+back to direct control. See `src/heater.rs`.
+
 ### Node 5: upper propulsion
 
 | Valve | Type | Outputs | Function |

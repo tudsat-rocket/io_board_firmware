@@ -58,6 +58,7 @@
 pub mod config;
 pub mod errors;
 pub mod hco;
+pub mod heater;
 pub mod index;
 pub mod leds;
 pub mod rail_sense;

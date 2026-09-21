@@ -211,6 +211,7 @@ pub async fn init_board(spawner: Spawner) -> Board {
             v_hco12_supply: p.PC2,
             v_hco34_supply: p.PC3,
             v_temp: p.PA4,
+            heater_ntc: p.PA6,
         },
         adc::SampleTime::CYCLES7_5,
     )

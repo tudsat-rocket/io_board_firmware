@@ -33,6 +33,9 @@ pub const RAW_INVALID: u16 = u16::MAX;
 /// "no slot is mapped here" versus "the slot mapped here has nothing to say".
 pub const SENSOR_INVALID: i16 = i16::MIN;
 
+/// A temperature with no usable reading ([`HEATER`] sub 1).
+pub const TEMPERATURE_INVALID: i32 = i32::MIN;
+
 /// The "unset" sentinel for an optional index in the 0x3000 block: no sensor slot, no valve, no
 /// TPDO channel.
 ///
@@ -204,6 +207,18 @@ pub const RELIEF_STATE: u16 = 0x2015;
 /// count **without moving it**. Drive the actuator to a known mechanical stop, then write the step
 /// count for that stop. Rejected with `ResourceNotAvailable` on a node with no stepper configured.
 pub const STEPPER_POSITION: u16 = 0x2016;
+
+/// Heating pad thermostat, on nodes built with one. `int32[3]`, read-only.
+///
+/// | sub | meaning                                                                  |
+/// |-----|--------------------------------------------------------------------------|
+/// | 1   | calibrated pad NTC temperature, millidegrees C; [`TEMPERATURE_INVALID`] if none |
+/// | 2   | raw ADC counts; [`RAW_INVALID`] when not read                             |
+/// | 3   | state: 0 idle (pad off), 1 heating, 2 NTC fault (pad off), 3 no heater    |
+///
+/// The setpoint is compile-time, in the node's factory settings, and neither configurable nor
+/// persisted. The pad's output shows up at [`HCO_DIGITAL`].
+pub const HEATER: u16 = 0x2017;
 
 // --- direct high current output control ------------------------------------
 
@@ -904,6 +919,7 @@ mod tests {
             RELIEF_PULSE_MS,
             RELIEF_COOLDOWN_MS,
             STEPPER_POSITION,
+            HEATER,
             STEPPER_VALVE,
             STEPPER_CLOSED_STEPS,
             STEPPER_OPEN_STEPS,

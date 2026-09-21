@@ -43,7 +43,7 @@ pub static PERSIST_WAKE: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 /// [`iocan_proto::od`], which is where an object's meaning is documented; re-exported here
 /// because the whole firmware reaches for them through the store.
 pub use iocan_proto::od;
-pub use iocan_proto::od::{NO_INDEX, RAW_INVALID, SENSOR_INVALID, SIGNATURE_LOAD, SIGNATURE_SAVE};
+pub use iocan_proto::od::{NO_INDEX, RAW_INVALID, SENSOR_INVALID, SIGNATURE_LOAD, SIGNATURE_SAVE, TEMPERATURE_INVALID};
 
 /// 0x2032. How the node currently sees the master.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, defmt::Format)]
@@ -125,6 +125,11 @@ pub struct Store {
     /// Reported as well as commanded because it is the only observable that says where a shaft
     /// really is — 0x2012 clamps it into the configured travel, this does not.
     pub stepper_position_steps: PerStepper<i32>,
+    /// 0x2017: heater NTC temperature (m°C), its raw ADC counts, and a
+    /// [`crate::heater::HeaterState`] discriminant.
+    pub heater_milli_c: i32,
+    pub heater_raw: u16,
+    pub heater_state: u8,
 
     pub hco_digital: PerHco<u8>,
     pub hco_pwm_us: PerHco<u16>,
@@ -179,6 +184,9 @@ impl Store {
             valve_current_ma: PerValve::splat(0),
             relief_state: crate::relief::ReliefState::Disabled as u8,
             stepper_position_steps: PerStepper::splat(0),
+            heater_milli_c: TEMPERATURE_INVALID,
+            heater_raw: RAW_INVALID,
+            heater_state: crate::heater::HeaterState::Disabled as u8,
             hco_digital: PerHco::splat(0),
             hco_pwm_us: PerHco::splat(0),
             hco_owner: PerHco::splat(0),
@@ -368,6 +376,9 @@ pub fn read(store: &Store, index: u16, sub: u8) -> Result<OdValue, AbortCode> {
         VALVE_CURRENT => read_array(store.valve_current_ma.as_slice(), sub, OdValue::u16),
         RELIEF_STATE => scalar(OdValue::u8(store.relief_state)),
         STEPPER_POSITION => read_array(store.stepper_position_steps.as_slice(), sub, OdValue::i32),
+        HEATER => {
+            read_array(&[store.heater_milli_c, store.heater_raw as i32, store.heater_state as i32], sub, OdValue::i32)
+        }
 
         RELIEF_ENABLED => scalar(OdValue::u8(cfg.relief.enabled as u8)),
         RELIEF_VALVE => scalar(OdValue::u8(cfg.relief.valve.map_or(0xFF, ValveId::as_u8))),
@@ -909,8 +920,8 @@ pub fn write(store: &mut Store, index: u16, sub: u8, data: &[u8]) -> Result<(), 
 
         // Everything else in the 0x2000 block is process data we produce.
         RAW_ADC_BUS0 | RAW_ADC_BUS1 | RAW_ENCODER | I2C_PRESENT | I2C_SWEEPS | SENSOR_VALUE | SENSOR_UNIT
-        | VALVE_TARGET | VALVE_MEASURED | VALVE_STATUS | VALVE_CURRENT | RELIEF_STATE | HCO_OWNER | LINK_STATE
-        | MS_SINCE_HEARTBEAT | RAIL_CURRENT | RAIL_VOLTAGE => return Err(AbortCode::ReadOnly),
+        | VALVE_TARGET | VALVE_MEASURED | VALVE_STATUS | VALVE_CURRENT | RELIEF_STATE | HEATER | HCO_OWNER
+        | LINK_STATE | MS_SINCE_HEARTBEAT | RAIL_CURRENT | RAIL_VOLTAGE => return Err(AbortCode::ReadOnly),
 
         _ => return Err(AbortCode::NoSuchObject),
     }

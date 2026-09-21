@@ -119,7 +119,14 @@ pub async fn spawn_node(spawner: Spawner, settings: NodeSettings) {
 
     // Handed over unconditionally: the port costs two otherwise-unused pins and a timer, and
     // stays silent until a config maps a stepper valve onto it.
-    let control = BoardControl::new(outputs, rails, board.leds).with_stepper(STEPPER.init(board.stepper));
+    let mut control = BoardControl::new(outputs, rails, board.leds).with_stepper(STEPPER.init(board.stepper));
+    if let Some(heater) = settings.heater {
+        if let Some(valve) = defaults.hco_owner(heater.hco) {
+            defmt::error!("heater output {} is also mapped to valve {}; the heater wins", heater.hco, valve);
+        }
+        defmt::info!("heater on {}, holding {} m°C", heater.hco, heater.setpoint_milli_c);
+        control = control.with_heater(heater);
+    }
     let control = CONTROL.init(control);
     spawner.spawn(run_control(control).unwrap());
 

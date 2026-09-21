@@ -180,6 +180,16 @@ access_type = "rw"
 array_size = 2
 default_value = [0, 0]
 
+# Heater: pad NTC temperature m°C, raw ADC counts, state (0 idle, 1 heating, 2 NTC fault, 3 none).
+[[objects]]
+index = 0x2017
+parameter_name = "heater: temperature m°C, raw counts, state"
+object_type = "array"
+data_type = "int32"
+access_type = "ro"
+array_size = 3
+default_value = [-2147483648, 65535, 3]
+
 # --- direct high current output control ----------------------------------
 
 # Direct digital level; rejected while the output is owned by a valve, unless raw debug is on.

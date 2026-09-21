@@ -373,11 +373,22 @@ pub struct NodeSettings {
     pub node_id: u8,
     /// Factory defaults, used when the NOR flash holds no valid configuration.
     pub config: Config,
+    /// A thermostat-controlled heating pad. Compile-time only: not in `config`, not persisted.
+    pub heater: Option<crate::heater::HeaterConfig>,
 }
 
 impl NodeSettings {
     pub const fn new(node_id: u8, config: Config) -> Self {
-        Self { node_id, config }
+        Self {
+            node_id,
+            config,
+            heater: None,
+        }
+    }
+
+    pub const fn with_heater(mut self, heater: crate::heater::HeaterConfig) -> Self {
+        self.heater = Some(heater);
+        self
     }
 }
 
