@@ -105,10 +105,15 @@ embedded-hal-async = { version = "1.0" }
 cortex-m = { version = "0.7", features = ["inline-asm", "critical-section-single-core"], optional = true }
 cortex-m-rt = { version = "0.7", optional = true }
 
-embassy-stm32 = { version = "0.6", features = ["stm32f105rc", "unstable-pac", "time-driver-any", "exti"], optional = true }
-embassy-executor = { version = "0.10", features = [ "platform-cortex-m", "executor-thread", "executor-interrupt"], optional = true }
+# `defmt` on the three hardware-only embassy crates: without it their internal `unwrap!`/`panic!`
+# checks are core panics, and every message ("peripheral 'TIM2' is configured to use the
+# 'pclk1_tim' clock, which is not running…") sits in flash as text. With it they go through
+# defmt like the rest of the firmware, and the strings stay in the ELF. Worth ~7 KiB on rev3,
+# which is the difference between fitting the 114 KiB partition and not.
+embassy-stm32 = { version = "0.6", features = ["stm32f105rc", "defmt", "unstable-pac", "time-driver-any", "exti"], optional = true }
+embassy-executor = { version = "0.10", features = [ "defmt", "platform-cortex-m", "executor-thread", "executor-interrupt"], optional = true }
 embassy-time = { version = "0.5" }
-embassy-embedded-hal = { version = "0.6", optional = true }
+embassy-embedded-hal = { version = "0.6", features = ["defmt"], optional = true }
 embassy-sync = { version = "0.8" }
 embassy-futures = { version = "0.1", optional = true }
 
