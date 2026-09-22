@@ -180,7 +180,8 @@ access_type = "rw"
 array_size = 2
 default_value = [0, 0]
 
-# Heater: pad NTC temperature m°C, raw ADC counts, state (0 idle, 1 heating, 2 NTC fault, 3 none).
+# Heater: pad NTC temperature m°C, raw ADC counts, state (0 idle, 1 heating, 2 NTC fault, 3 none,
+# 4 off, 5 blind).
 [[objects]]
 index = 0x2017
 parameter_name = "heater: temperature m°C, raw counts, state"
@@ -189,6 +190,15 @@ data_type = "int32"
 access_type = "ro"
 array_size = 3
 default_value = [-2147483648, 65535, 3]
+
+# Heater mode: 0 off, 1 thermostat, 2 blind (no temperature control). Off at boot; stage B resets it.
+[[objects]]
+index = 0x2018
+parameter_name = "heater mode"
+object_type = "var"
+data_type = "uint8"
+access_type = "rw"
+default_value = 0
 
 # --- direct high current output control ----------------------------------
 
@@ -602,8 +612,8 @@ parameter_name = "tpdo broadcast period per kind, milliseconds"
 object_type = "array"
 data_type = "uint16"
 access_type = "rw"
-array_size = 18
-default_value = [500, 500, 200, 500, 500, 500, 100, 0, 100, 0, 0, 50, 0, 5000, 1000, 1000, 1000, 0]
+array_size = 19
+default_value = [500, 500, 200, 500, 500, 500, 100, 0, 100, 0, 0, 50, 0, 5000, 1000, 1000, 1000, 0, 1000]
 
 # ============================================================================
 # 0x3050 — overpressure relief: the one decision a node makes for itself.
@@ -672,6 +682,17 @@ object_type = "var"
 data_type = "uint16"
 access_type = "rw"
 default_value = 500
+
+# --- heater -----------------------------------------------------------------
+
+# Thermostat setpoint, centidegrees C; writes above 8000 (80 °C) are rejected.
+[[objects]]
+index = 0x3070
+parameter_name = "heater setpoint, centidegrees C"
+object_type = "var"
+data_type = "int16"
+access_type = "rw"
+default_value = 0
 
 # --- clock/direction steppers, one entry per actuator ---------------------
 

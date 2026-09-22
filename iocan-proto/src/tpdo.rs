@@ -135,6 +135,18 @@ pub enum TpdoFrame {
     },
     /// Mirrors [`crate::od::VALVE_CURRENT`], one entry per valve.
     ValveCurrent([u16; 4]),
+    /// The heater at a glance: [`crate::od::HEATER`] and [`crate::od::HEATER_MODE`], plus the
+    /// active [`crate::od::HEATER_SETPOINT`].
+    ///
+    /// Temperatures are centidegrees Celsius here rather than the millidegrees of 0x2017, to fit
+    /// an `i16` each; a temperature with no valid reading is [`crate::od::SENSOR_INVALID`], the
+    /// same marker a sensor channel uses. Bytes 6..8 are unused padding.
+    Heater {
+        temperature: i16,
+        setpoint: i16,
+        state: u8,
+        mode: u8,
+    },
 }
 
 impl TpdoFrame {
@@ -159,6 +171,7 @@ impl TpdoFrame {
             Self::RailCurrent(_) => TpdoKind::RailCurrent,
             Self::Status { .. } => TpdoKind::Status,
             Self::ValveCurrent(_) => TpdoKind::ValveCurrent,
+            Self::Heater { .. } => TpdoKind::Heater,
         }
     }
 
@@ -208,6 +221,19 @@ impl TpdoFrame {
                 out[4..].copy_from_slice(&ms_since_heartbeat.to_le_bytes());
                 out
             }
+            Self::Heater {
+                temperature,
+                setpoint,
+                state,
+                mode,
+            } => {
+                let mut out = [0u8; 8];
+                out[..2].copy_from_slice(&temperature.to_le_bytes());
+                out[2..4].copy_from_slice(&setpoint.to_le_bytes());
+                out[4] = state;
+                out[5] = mode;
+                out
+            }
         }
     }
 
@@ -254,6 +280,12 @@ impl TpdoFrame {
                 raw_debug: bytes[1] != 0,
                 stalled_mask: bytes[2],
                 ms_since_heartbeat: u32::from_le_bytes(bytes[4..].try_into().unwrap()),
+            },
+            TpdoKind::Heater => Self::Heater {
+                temperature: i16::from_le_bytes([bytes[0], bytes[1]]),
+                setpoint: i16::from_le_bytes([bytes[2], bytes[3]]),
+                state: bytes[4],
+                mode: bytes[5],
             },
         }
     }
@@ -364,6 +396,12 @@ mod tests {
                 ms_since_heartbeat: 0x0102_0304,
             },
             TpdoFrame::ValveCurrent([50, 60, 70, 80]),
+            TpdoFrame::Heater {
+                temperature: -1234,
+                setpoint: 3000,
+                state: 5,
+                mode: 2,
+            },
         ];
 
         for frame in samples {
@@ -386,6 +424,20 @@ mod tests {
         assert_eq!(bytes[1], 0);
         assert_eq!(bytes[2], 0b0000_0100);
         assert_eq!(&bytes[4..], &0x0102_0304u32.to_le_bytes());
+    }
+
+    #[test]
+    fn heater_packs_the_fields_at_their_fixed_offsets() {
+        let frame = TpdoFrame::Heater {
+            temperature: 2_150,
+            setpoint: -500,
+            state: 1,
+            mode: 1,
+        };
+        let bytes = frame.encode();
+        assert_eq!(&bytes[..2], &2_150i16.to_le_bytes());
+        assert_eq!(&bytes[2..4], &(-500i16).to_le_bytes());
+        assert_eq!(bytes[4..], [1, 1, 0, 0]);
     }
 
     #[test]

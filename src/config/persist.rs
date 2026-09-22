@@ -31,10 +31,11 @@ const MAGIC: u32 = 0x4249_4F43; // "COIB", little-endian "IOCB"
 ///    changes what a Pt1000 slot's three coefficients *mean* even though their layout is
 ///    unchanged — hence a bump rather than a silent widening.
 /// 5: added the clock/direction steppers (`StepperConfig`), one block per `StepperId`.
-const VERSION: u16 = 5;
+/// 6: added the heater setpoint; a 19th TPDO kind (`Heater`) lengthened the period table.
+const VERSION: u16 = 6;
 
 const HEADER_LEN: usize = 12;
-const BODY_LEN: usize = 481;
+const BODY_LEN: usize = 485;
 #[cfg(test)]
 const RECORD_LEN: usize = HEADER_LEN + BODY_LEN + 4;
 
@@ -232,6 +233,8 @@ fn write_body(cfg: &Config, out: &mut [u8]) -> usize {
         w.u32(stepper.accel_hz_per_s);
     }
 
+    w.u16(cfg.heater_setpoint_centi_c as u16);
+
     w.pos
 }
 
@@ -324,6 +327,8 @@ fn read_body(body: &[u8]) -> Option<Config> {
             accel_hz_per_s: r.u32(),
         };
     }
+
+    cfg.heater_setpoint_centi_c = r.u16() as i16;
 
     Some(cfg)
 }
@@ -626,6 +631,15 @@ mod tests {
         assert_eq!(second.open_steps, -400, "a reversed actuator alongside a forward one");
         assert_eq!(second.max_step_hz, 1_000);
         assert_eq!(back.valves[ValveId::Valve3].kind as u8, ValveKind::Stepper as u8);
+    }
+
+    #[test]
+    fn the_heater_setpoint_survives_a_round_trip() {
+        let cfg = Config::new().with_heater_setpoint_centi_c(-1_250);
+        let mut buf = [0u8; BUF_LEN];
+        write_record(&cfg, 1, &mut buf);
+        let (_, back) = read_record(&buf).expect("record should validate");
+        assert_eq!(back.heater_setpoint_centi_c, -1_250, "a negative setpoint has to survive as one");
     }
 
     #[test]

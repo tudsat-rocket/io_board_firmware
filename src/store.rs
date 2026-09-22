@@ -68,6 +68,8 @@ pub struct Pending {
     pub valves: PerValve<bool>,
     /// A direct HCO write landed and needs arbitrating.
     pub outputs: bool,
+    /// 0x2018 was written. Only a wake-up: the control task reads the mode every tick anyway.
+    pub heater: bool,
     /// Config changed; mappings and derived state need recomputing.
     pub config: bool,
     /// 0x1010 was written with the save signature.
@@ -88,6 +90,7 @@ impl Pending {
     pub fn any(&self) -> bool {
         self.valves.any()
             || self.outputs
+            || self.heater
             || self.config
             || self.save
             || self.restore
@@ -130,6 +133,12 @@ pub struct Store {
     pub heater_milli_c: i32,
     pub heater_raw: u16,
     pub heater_state: u8,
+    /// 0x2018, a [`crate::heater::HeaterMode`] discriminant. Off at every boot; the control task
+    /// writes it back to off when fallback stage B fires.
+    pub heater_mode: u8,
+    /// Whether this build has a heater at all. Set once at boot, from [`crate::config::NodeSettings`];
+    /// 0x2018 is refused without one.
+    pub heater_fitted: bool,
 
     pub hco_digital: PerHco<u8>,
     pub hco_pwm_us: PerHco<u16>,
@@ -187,6 +196,8 @@ impl Store {
             heater_milli_c: TEMPERATURE_INVALID,
             heater_raw: RAW_INVALID,
             heater_state: crate::heater::HeaterState::Disabled as u8,
+            heater_mode: crate::heater::HeaterMode::Off as u8,
+            heater_fitted: false,
             hco_digital: PerHco::splat(0),
             hco_pwm_us: PerHco::splat(0),
             hco_owner: PerHco::splat(0),
@@ -203,6 +214,7 @@ impl Store {
             pending: Pending {
                 valves: PerValve::splat(false),
                 outputs: false,
+                heater: false,
                 config: false,
                 save: false,
                 restore: false,
@@ -379,6 +391,8 @@ pub fn read(store: &Store, index: u16, sub: u8) -> Result<OdValue, AbortCode> {
         HEATER => {
             read_array(&[store.heater_milli_c, store.heater_raw as i32, store.heater_state as i32], sub, OdValue::i32)
         }
+        HEATER_MODE => scalar(OdValue::u8(store.heater_mode)),
+        HEATER_SETPOINT => scalar(OdValue::i16(cfg.heater_setpoint_centi_c)),
 
         RELIEF_ENABLED => scalar(OdValue::u8(cfg.relief.enabled as u8)),
         RELIEF_VALVE => scalar(OdValue::u8(cfg.relief.valve.map_or(0xFF, ValveId::as_u8))),
@@ -613,6 +627,17 @@ pub fn write(store: &mut Store, index: u16, sub: u8, data: &[u8]) -> Result<(), 
             }
             store.valve_commanded[i] = position(data)?;
             store.pending.valves[i] = true;
+        }
+
+        HEATER_MODE => {
+            expect_scalar(sub)?;
+            if !store.heater_fitted {
+                return Err(AbortCode::ResourceNotAvailable);
+            }
+            let mode = as_u8(data)?;
+            crate::heater::HeaterMode::from_u8(mode).ok_or(AbortCode::InvalidValue)?;
+            store.heater_mode = mode;
+            store.pending.heater = true;
         }
 
         HCO_DIGITAL => {
@@ -918,6 +943,16 @@ pub fn write(store: &mut Store, index: u16, sub: u8, data: &[u8]) -> Result<(), 
             store.pending.config = true;
         }
 
+        HEATER_SETPOINT => {
+            expect_scalar(sub)?;
+            let v = as_u16(data)? as i16;
+            if v > iocan_proto::od::HEATER_SETPOINT_MAX {
+                return Err(AbortCode::ValueTooHigh);
+            }
+            store.config.heater_setpoint_centi_c = v;
+            store.pending.config = true;
+        }
+
         // Everything else in the 0x2000 block is process data we produce.
         RAW_ADC_BUS0 | RAW_ADC_BUS1 | RAW_ENCODER | I2C_PRESENT | I2C_SWEEPS | SENSOR_VALUE | SENSOR_UNIT
         | VALVE_TARGET | VALVE_MEASURED | VALVE_STATUS | VALVE_CURRENT | RELIEF_STATE | HEATER | HCO_OWNER
@@ -943,6 +978,33 @@ mod tests {
         s.config.valves[ValveId::Valve0] = ValveConfig::servo_on_pair(HcoPair::A, 2000, 1000, 1000);
         s.refresh_derived();
         s
+    }
+
+    #[test]
+    fn the_heater_mode_starts_off_and_needs_a_heater() {
+        let mut s = Store::new();
+        assert_eq!(read(&s, od::HEATER_MODE, 0).unwrap().data(), &[0], "off at boot");
+        assert!(matches!(write(&mut s, od::HEATER_MODE, 0, &[1]), Err(AbortCode::ResourceNotAvailable)));
+
+        s.heater_fitted = true;
+        write(&mut s, od::HEATER_MODE, 0, &[2]).unwrap();
+        assert_eq!(read(&s, od::HEATER_MODE, 0).unwrap().data(), &[2]);
+        assert!(s.pending.heater, "a mode change has to wake the control task");
+        assert!(matches!(write(&mut s, od::HEATER_MODE, 0, &[3]), Err(AbortCode::InvalidValue)));
+        assert_eq!(s.heater_mode, 2, "a rejected write leaves the mode alone");
+    }
+
+    #[test]
+    fn the_heater_setpoint_is_capped() {
+        let mut s = Store::new();
+        write(&mut s, od::HEATER_SETPOINT, 0, &od::HEATER_SETPOINT_MAX.to_le_bytes()).unwrap();
+        assert!(matches!(
+            write(&mut s, od::HEATER_SETPOINT, 0, &(od::HEATER_SETPOINT_MAX + 1).to_le_bytes()),
+            Err(AbortCode::ValueTooHigh)
+        ));
+        write(&mut s, od::HEATER_SETPOINT, 0, &(-500i16).to_le_bytes()).unwrap();
+        assert_eq!(read(&s, od::HEATER_SETPOINT, 0).unwrap().data(), &(-500i16).to_le_bytes());
+        assert!(s.pending.config, "the setpoint is configuration, saved with 0x1010");
     }
 
     #[test]

@@ -13,7 +13,7 @@ use embassy_time::Instant;
 
 use crate::config::{Config, ValveConfig};
 use crate::hco::{HcoState, Level, State};
-use crate::heater::{Heater, HeaterConfig, HeaterSensing};
+use crate::heater::{Heater, HeaterConfig, HeaterMode, HeaterSensing};
 use crate::index::{HcoId, PerHco, PerSensorSlot, PerStepper, PerValve, ValveId};
 use crate::leds::{LedsState, StateLedPub};
 use crate::outputs::{Outputs, digital, pwm};
@@ -103,6 +103,8 @@ struct TickInputs {
     rails: Option<Rails>,
     /// Raw heater NTC reading, `None` if there is no heater or it cannot be read.
     heater_ntc: Option<u16>,
+    /// What the master last told the heater to do (0x2018).
+    heater_mode: HeaterMode,
     now: Instant,
     since_heartbeat: u32,
     seen: bool,
@@ -137,6 +139,9 @@ struct TickOutcome {
     relief_state: u8,
     /// Heater NTC temperature (m°C), raw counts, and state, for 0x2017.
     heater: (i32, u16, u8),
+    /// Fallback stage B switched the heater off; 0x2018 has to be written back to off so the
+    /// master finds it that way when it returns.
+    heater_mode_reset: bool,
     /// Where each actuator's step counter stands, for 0x2016. 0 on a board without a step port.
     stepper_position_steps: PerStepper<i32>,
     link: LinkState,
@@ -202,10 +207,12 @@ impl<R: RailSensing + HeaterSensing> Control<R> {
         let seen = safety::master_ever_seen();
 
         // --- pull intent out of the store ----------------------------------
-        let (config, commanded, sensor_value, raw_debug, pending) = {
+        let (config, commanded, sensor_value, raw_debug, pending, heater_mode) = {
             let mut store = STORE.lock().await;
             let pending = store.pending.take();
-            (store.config.clone(), store.valve_commanded, store.sensor_value, store.raw_debug, pending)
+            // The SDO write only ever stores a valid code, so the fallback is unreachable.
+            let heater_mode = HeaterMode::from_u8(store.heater_mode).unwrap_or(HeaterMode::Off);
+            (store.config.clone(), store.valve_commanded, store.sensor_value, store.raw_debug, pending, heater_mode)
         };
 
         let direct_writes = if pending.outputs {
@@ -231,6 +238,7 @@ impl<R: RailSensing + HeaterSensing> Control<R> {
             direct_writes,
             rails,
             heater_ntc,
+            heater_mode,
             now,
             since_heartbeat,
             seen,
@@ -245,6 +253,9 @@ impl<R: RailSensing + HeaterSensing> Control<R> {
         store.valve_current_ma = outcome.currents;
         store.relief_state = outcome.relief_state;
         (store.heater_milli_c, store.heater_raw, store.heater_state) = outcome.heater;
+        if outcome.heater_mode_reset {
+            store.heater_mode = HeaterMode::Off as u8;
+        }
         store.stepper_position_steps = outcome.stepper_position_steps;
         store.link_state = outcome.link;
         store.ms_since_heartbeat = since_heartbeat;
@@ -351,9 +362,25 @@ impl<R: RailSensing + HeaterSensing> Control<R> {
             statuses[valve] = self.valves[valve].status() as u8;
         }
 
+        // Fallback stage A leaves the heater doing whatever it was told: a short outage should
+        // not let the pad go cold. Stage B switches it off and clears the command, so it stays
+        // off until the master deliberately turns it back on — the same state it boots in.
+        let mut heater_mode = inputs.heater_mode;
+        let heater_mode_reset = link == LinkState::FallbackB && heater_mode != HeaterMode::Off;
+        if heater_mode_reset {
+            defmt::warn!("heater: fallback stage B, switching off (was {})", heater_mode);
+            heater_mode = HeaterMode::Off;
+        }
+
         // The heater owns its output over any valve or direct write, in every link state. Raw
         // debug mode hands it back to direct control so it can be switched by hand.
-        let heating = self.heater.update(self.heater_cfg.as_ref(), inputs.heater_ntc, inputs.now);
+        let heating = self.heater.update(
+            self.heater_cfg.as_ref(),
+            heater_mode,
+            inputs.config.heater_setpoint_centi_c as i32 * 10,
+            inputs.heater_ntc,
+            inputs.now,
+        );
         if let Some(cfg) = self.heater_cfg.filter(|_| !inputs.raw_debug) {
             desired[cfg.pair.power()] = digital(heating);
             desired[cfg.pair.signal()] = digital(heating);
@@ -371,6 +398,7 @@ impl<R: RailSensing + HeaterSensing> Control<R> {
             currents,
             relief_state: self.relief.state() as u8,
             heater: (self.heater.milli_c(), self.heater.raw(), self.heater.state() as u8),
+            heater_mode_reset,
             stepper_position_steps,
             link,
             leds,
@@ -737,6 +765,7 @@ mod tests {
             direct_writes: None,
             rails: None,
             heater_ntc: None,
+            heater_mode: HeaterMode::Off,
             now,
             since_heartbeat: 0,
             seen: true,
@@ -807,13 +836,16 @@ mod tests {
 
     #[test]
     fn the_heater_switches_its_output_and_owns_it_over_a_valve() {
-        let heater = HeaterConfig::new(HcoPair::B, crate::heater::AnalogPin::Pa6, 30_000);
+        let heater = HeaterConfig::new(HcoPair::B, crate::heater::AnalogPin::Pa6);
         let mut ctl = test_control().with_heater(heater);
         // A solenoid mapped onto the same output loses to the heater.
-        let cfg = Config::new().with_valve(ValveId::Valve1, ValveConfig::solenoid_on(HcoId::Hco3));
+        let cfg = Config::new()
+            .with_valve(ValveId::Valve1, ValveConfig::solenoid_on(HcoId::Hco3))
+            .with_heater_setpoint_centi_c(3_000);
 
         let cold = TickInputs {
             heater_ntc: Some(2278), // 20 C
+            heater_mode: HeaterMode::Thermostat,
             ..inputs(cfg.clone(), [0, 0, 0, 0], Instant::from_millis(0))
         };
         let outcome = ctl.decide(cold);
@@ -823,6 +855,7 @@ mod tests {
 
         let hot = TickInputs {
             heater_ntc: Some(1614), // 35 C
+            heater_mode: HeaterMode::Thermostat,
             ..inputs(cfg.clone(), [0, 1000, 0, 0], Instant::from_millis(20))
         };
         ctl.decide(hot);
@@ -832,20 +865,75 @@ mod tests {
 
     #[test]
     fn a_heater_with_a_broken_ntc_stays_off() {
-        let mut ctl = test_control().with_heater(HeaterConfig::new(HcoPair::B, crate::heater::AnalogPin::Pa6, 30_000));
+        let mut ctl = test_control().with_heater(HeaterConfig::new(HcoPair::B, crate::heater::AnalogPin::Pa6));
         let broken = TickInputs {
             heater_ntc: Some(4095),
-            ..inputs(Config::new(), [0, 0, 0, 0], Instant::from_millis(0))
+            heater_mode: HeaterMode::Thermostat,
+            ..inputs(Config::new().with_heater_setpoint_centi_c(3_000), [0, 0, 0, 0], Instant::from_millis(0))
         };
         ctl.decide(broken);
         assert_eq!(ctl.outputs.current()[HcoId::Hco2], State::Digital(Level::Low));
     }
 
+    /// The backup for exactly the case above: the master decides to heat anyway.
+    #[test]
+    fn blind_mode_heats_through_a_broken_ntc() {
+        let mut ctl = test_control().with_heater(HeaterConfig::new(HcoPair::B, crate::heater::AnalogPin::Pa6));
+        let blind = TickInputs {
+            heater_ntc: Some(4095),
+            heater_mode: HeaterMode::Blind,
+            ..inputs(Config::new(), [0, 0, 0, 0], Instant::from_millis(0))
+        };
+        let outcome = ctl.decide(blind);
+        assert_eq!(ctl.outputs.current()[HcoId::Hco2], State::Digital(Level::High));
+        assert_eq!(ctl.outputs.current()[HcoId::Hco3], State::Digital(Level::High));
+        assert_eq!(outcome.heater.2, crate::heater::HeaterState::Blind as u8);
+    }
+
+    #[test]
+    fn the_heater_is_off_until_commanded() {
+        let mut ctl = test_control().with_heater(HeaterConfig::new(HcoPair::B, crate::heater::AnalogPin::Pa6));
+        let cold = TickInputs {
+            heater_ntc: Some(2278), // 20 C, well below the setpoint
+            ..inputs(Config::new().with_heater_setpoint_centi_c(3_000), [0, 0, 0, 0], Instant::from_millis(0))
+        };
+        let outcome = ctl.decide(cold);
+        assert_eq!(ctl.outputs.current()[HcoId::Hco2], State::Digital(Level::Low));
+        assert_eq!(outcome.heater.2, crate::heater::HeaterState::Off as u8);
+        assert!(!outcome.heater_mode_reset);
+    }
+
+    /// Stage A keeps heating; stage B switches off and asks for the command to be cleared.
+    #[test]
+    fn fallback_stage_a_keeps_the_heater_and_stage_b_switches_it_off() {
+        let mut ctl = test_control().with_heater(HeaterConfig::new(HcoPair::B, crate::heater::AnalogPin::Pa6));
+        let cfg = Config {
+            fallback_enabled: true,
+            ..Config::new()
+        };
+        let lost_for = |since_heartbeat, now| TickInputs {
+            heater_ntc: Some(4095),
+            heater_mode: HeaterMode::Blind,
+            since_heartbeat,
+            ..inputs(cfg.clone(), [0, 0, 0, 0], Instant::from_millis(now))
+        };
+
+        let stage_a = ctl.decide(lost_for(cfg.fallback_a_ms, 0));
+        assert_eq!(ctl.outputs.current()[HcoId::Hco2], State::Digital(Level::High), "stage A keeps heating");
+        assert!(!stage_a.heater_mode_reset);
+
+        let stage_b = ctl.decide(lost_for(cfg.fallback_b_ms, 20));
+        assert_eq!(ctl.outputs.current()[HcoId::Hco2], State::Digital(Level::Low), "stage B switches off");
+        assert_eq!(stage_b.heater.2, crate::heater::HeaterState::Off as u8);
+        assert!(stage_b.heater_mode_reset, "and the command is cleared, not just overridden");
+    }
+
     #[test]
     fn raw_debug_hands_the_heater_output_back_to_direct_control() {
-        let mut ctl = test_control().with_heater(HeaterConfig::new(HcoPair::B, crate::heater::AnalogPin::Pa6, 30_000));
+        let mut ctl = test_control().with_heater(HeaterConfig::new(HcoPair::B, crate::heater::AnalogPin::Pa6));
         let cold_debug = TickInputs {
             heater_ntc: Some(2278),
+            heater_mode: HeaterMode::Thermostat,
             raw_debug: true,
             ..inputs(Config::new(), [0, 0, 0, 0], Instant::from_millis(0))
         };

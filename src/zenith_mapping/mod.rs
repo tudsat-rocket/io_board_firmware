@@ -50,9 +50,9 @@ pub const NODE2: NodeSettings = NodeSettings::new(2, Config::new().with_sensor(S
 /// Node 3 — payload avionics. Nothing wired yet.
 pub const NODE3: NodeSettings = NodeSettings::new(3, Config::new());
 
-/// Temperature the node 4 heating pad holds, in millidegrees Celsius. Placeholder, pick the real
-/// one before flight.
-pub const NODE4_HEATER_SETPOINT_MILLI_C: i32 = 30_000;
+/// Factory default for the temperature the node 4 heating pad holds, in centidegrees Celsius.
+/// Placeholder, pick the real one before flight. Adjustable at 0x3070 and saved with 0x1010.
+pub const NODE4_HEATER_SETPOINT_CENTI_C: i16 = 3_000;
 /// Half-width of its dead band: on below 29 C, off above 31 C.
 pub const NODE4_HEATER_HYSTERESIS_MILLI_C: i32 = 1_000;
 /// Calibration offset for the pad's NTC, added to what the curve reads. Uncalibrated: measure the
@@ -61,17 +61,21 @@ pub const NODE4_HEATER_HYSTERESIS_MILLI_C: i32 = 1_000;
 pub const NODE4_HEATER_OFFSET_MILLI_C: i32 = 0;
 
 /// Node 4 — upper propulsion. Oxidizer vent solenoid on HCO1, and a heating pad on pair B
-/// (HCO3+4) that the node regulates on its own from the pad's NTC on COM4 pin 1 (PA2), which
-/// leaves it without a stepper port. See
-/// [`crate::heater`].
-pub const NODE4: NodeSettings =
-    NodeSettings::new(4, Config::new().with_valve(Valve0, ValveConfig::solenoid_on(HcoId::Hco0))).with_heater(
-        HeaterConfig::new(HcoPair::B, AnalogPin::Pa2, NODE4_HEATER_SETPOINT_MILLI_C)
-            // The reading rose with temperature on the bench, so the NTC is on the supply side.
-            .with_ntc_wiring(NtcWiring::ToSupply)
-            .with_hysteresis_milli_c(NODE4_HEATER_HYSTERESIS_MILLI_C)
-            .with_offset_milli_c(NODE4_HEATER_OFFSET_MILLI_C),
-    );
+/// (HCO3+4) with its NTC on COM4 pin 1 (PA2), which leaves it without a stepper port. The pad
+/// boots off; the master switches it on at 0x2018. See [`crate::heater`].
+pub const NODE4: NodeSettings = NodeSettings::new(
+    4,
+    Config::new()
+        .with_valve(Valve0, ValveConfig::solenoid_on(HcoId::Hco0))
+        .with_heater_setpoint_centi_c(NODE4_HEATER_SETPOINT_CENTI_C),
+)
+.with_heater(
+    HeaterConfig::new(HcoPair::B, AnalogPin::Pa2)
+        // The reading rose with temperature on the bench, so the NTC is on the supply side.
+        .with_ntc_wiring(NtcWiring::ToSupply)
+        .with_hysteresis_milli_c(NODE4_HEATER_HYSTERESIS_MILLI_C)
+        .with_offset_milli_c(NODE4_HEATER_OFFSET_MILLI_C),
+);
 
 /// Node 5 — upper propulsion: pressurization and pressurant vent, tank and regulator sensing.
 pub const NODE5: NodeSettings = NodeSettings::new(

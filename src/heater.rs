@@ -1,16 +1,27 @@
 //! A bang-bang thermostat for a resistive heating pad on one high current output.
 //!
-//! The pad carries its own 10k NTC, read through a divider on an analog COM pin. The node keeps
-//! the pad near a compile-time setpoint on its own — no master involved, the same way
-//! [`crate::relief`] acts without one.
+//! The pad carries its own 10k NTC, read through a divider on an analog COM pin. What the heater
+//! does is the master's call, through [`iocan_proto::od::HEATER_MODE`]: off (the boot state), a
+//! thermostat holding [`iocan_proto::od::HEATER_SETPOINT`], or blind heating with no temperature
+//! control, the backup for a broken NTC. Once told, it regulates on its own, the same way
+//! [`crate::relief`] acts without a master.
+//!
+//! The hardware half — which pair, which pin, how the NTC is wired, its calibration — is
+//! [`HeaterConfig`], fixed at build time. The setpoint is configuration (0x3070, persisted); the
+//! mode is a command (0x2018, not persisted).
 //!
 //! # Precedence
 //! The heater owns its output outright, in every link state. The only exception is raw debug
 //! mode, where the output goes back to direct control (0x2020) so it can be exercised on a bench.
 //!
 //! # Failure
-//! A thermistor that reads open or shorted switches the pad **off**. An unregulated heater is the
-//! worse failure: it keeps heating until something else gives.
+//! In thermostat mode, a thermistor that reads open or shorted switches the pad **off**. An
+//! unregulated heater is the worse failure: it keeps heating until something else gives. Blind
+//! mode is the master deliberately accepting that failure, so it heats whatever the NTC says.
+//!
+//! # Fallback
+//! Stage A keeps whatever mode was commanded. Stage B switches the heater off and resets the
+//! command, so it stays off until the master re-enables it — see [`crate::control`].
 
 use embassy_time::{Duration, Instant};
 
@@ -18,8 +29,9 @@ use crate::index::HcoPair;
 use crate::rail_sense::NoRails;
 use crate::store::{RAW_INVALID, TEMPERATURE_INVALID};
 
-/// Compile-time heater settings. Deliberately not part of [`crate::config::Config`]: nothing
-/// about it is written over SDO or persisted, so changing the setpoint means a rebuild.
+/// Compile-time heater hardware. Deliberately not part of [`crate::config::Config`]: pin muxing
+/// happens at boot, long before a config is read, so none of it can change at runtime. The
+/// setpoint, which can, is [`crate::config::Config::heater_setpoint_centi_c`].
 #[derive(Clone, Copy, Debug, defmt::Format)]
 pub struct HeaterConfig {
     /// The pair that switches the pad. Both outputs switch together.
@@ -28,8 +40,6 @@ pub struct HeaterConfig {
     pub ntc: AnalogPin,
     /// Which side of the divider the NTC is on.
     pub ntc_wiring: NtcWiring,
-    /// Temperature to hold, in millidegrees Celsius.
-    pub setpoint_milli_c: i32,
     /// Half-width of the dead band. The pad switches on below `setpoint - hysteresis` and off
     /// above `setpoint + hysteresis`, so it does not chatter around the setpoint.
     pub hysteresis_milli_c: i32,
@@ -40,12 +50,11 @@ pub struct HeaterConfig {
 }
 
 impl HeaterConfig {
-    pub const fn new(pair: HcoPair, ntc: AnalogPin, setpoint_milli_c: i32) -> Self {
+    pub const fn new(pair: HcoPair, ntc: AnalogPin) -> Self {
         Self {
             pair,
             ntc,
             ntc_wiring: NtcWiring::ToGround,
-            setpoint_milli_c,
             hysteresis_milli_c: 1_000,
             offset_milli_c: 0,
         }
@@ -107,18 +116,44 @@ impl NtcWiring {
 /// 12-bit ADC.
 const ADC_FULL_SCALE: u16 = 4095;
 
+/// 0x2018: what the master has told the heater to do.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, defmt::Format)]
+#[repr(u8)]
+pub enum HeaterMode {
+    Off = 0,
+    /// Hold the setpoint, and refuse to heat without a valid NTC reading.
+    Thermostat = 1,
+    /// Pad on continuously, whatever the NTC says. The backup for a broken sensor.
+    Blind = 2,
+}
+
+impl HeaterMode {
+    pub const fn from_u8(v: u8) -> Option<Self> {
+        match v {
+            0 => Some(Self::Off),
+            1 => Some(Self::Thermostat),
+            2 => Some(Self::Blind),
+            _ => None,
+        }
+    }
+}
+
 /// 0x2017 sub 3.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, defmt::Format)]
 #[repr(u8)]
 pub enum HeaterState {
-    /// In or above the dead band, pad off.
+    /// Thermostat, in or above the dead band, pad off.
     Idle = 0,
-    /// Below the dead band, or still climbing through it, pad on.
+    /// Thermostat, below the dead band or still climbing through it, pad on.
     Heating = 1,
-    /// Configured, but the NTC has no valid reading. Pad off.
+    /// Thermostat, but the NTC has no valid reading. Pad off.
     SensorFault = 2,
     /// No heater on this node.
     Disabled = 3,
+    /// Commanded off.
+    Off = 4,
+    /// Commanded to heat blind. Pad on.
+    Blind = 5,
 }
 
 #[allow(async_fn_in_trait)]
@@ -170,25 +205,38 @@ impl Heater {
     }
 
     /// Advance one tick and return whether the pad should be on.
-    pub fn update(&mut self, cfg: Option<&HeaterConfig>, counts: Option<u16>, now: Instant) -> bool {
+    ///
+    /// The temperature is measured and reported in every mode, so the master can watch the pad
+    /// while it heats blind or sits off.
+    pub fn update(
+        &mut self,
+        cfg: Option<&HeaterConfig>,
+        mode: HeaterMode,
+        setpoint_milli_c: i32,
+        counts: Option<u16>,
+        now: Instant,
+    ) -> bool {
         let Some(cfg) = cfg else {
             self.state = HeaterState::Disabled;
             return false;
         };
 
         self.raw = counts.unwrap_or(RAW_INVALID);
-        let uncalibrated =
-            counts.map_or(TEMPERATURE_INVALID, |c| ntc_counts_to_milli_c(cfg.ntc_wiring.normalise(c)));
+        let uncalibrated = counts.map_or(TEMPERATURE_INVALID, |c| ntc_counts_to_milli_c(cfg.ntc_wiring.normalise(c)));
         self.milli_c = match uncalibrated {
             TEMPERATURE_INVALID => TEMPERATURE_INVALID,
             t => t.saturating_add(cfg.offset_milli_c),
         };
 
-        let next = if self.milli_c == TEMPERATURE_INVALID {
+        let next = if mode == HeaterMode::Off {
+            HeaterState::Off
+        } else if mode == HeaterMode::Blind {
+            HeaterState::Blind
+        } else if self.milli_c == TEMPERATURE_INVALID {
             HeaterState::SensorFault
-        } else if self.milli_c < cfg.setpoint_milli_c - cfg.hysteresis_milli_c {
+        } else if self.milli_c < setpoint_milli_c - cfg.hysteresis_milli_c {
             HeaterState::Heating
-        } else if self.milli_c > cfg.setpoint_milli_c + cfg.hysteresis_milli_c {
+        } else if self.milli_c > setpoint_milli_c + cfg.hysteresis_milli_c {
             HeaterState::Idle
         } else {
             match self.state {
@@ -202,6 +250,9 @@ impl Heater {
             match next {
                 HeaterState::SensorFault => {
                     defmt::error!("heater: NTC reads {} counts, no valid temperature, pad off", self.raw)
+                }
+                HeaterState::Blind => {
+                    defmt::warn!("heater: heating blind, no temperature control, at {} m°C", self.milli_c)
                 }
                 _ => defmt::info!("heater: {} at {} m°C", next, self.milli_c),
             }
@@ -220,7 +271,7 @@ impl Heater {
             );
         }
 
-        self.state == HeaterState::Heating
+        matches!(self.state, HeaterState::Heating | HeaterState::Blind)
     }
 }
 
@@ -311,7 +362,9 @@ pub fn ntc_counts_to_milli_c(counts: u16) -> i32 {
 mod tests {
     use super::*;
 
-    const CFG: HeaterConfig = HeaterConfig::new(HcoPair::B, AnalogPin::Pa6, 30_000);
+    const CFG: HeaterConfig = HeaterConfig::new(HcoPair::B, AnalogPin::Pa6);
+    const HOLD: HeaterMode = HeaterMode::Thermostat;
+    const SETPOINT: i32 = 30_000;
 
     fn at0() -> Instant {
         Instant::from_millis(0)
@@ -354,32 +407,35 @@ mod tests {
     #[test]
     fn cold_pad_heats() {
         let mut h = Heater::new();
-        assert!(h.update(Some(&CFG), Some(2278), at0())); // 20 C
+        assert!(h.update(Some(&CFG), HOLD, SETPOINT, Some(2278), at0())); // 20 C
         assert_eq!(h.state(), HeaterState::Heating);
     }
 
     #[test]
     fn hot_pad_is_off() {
         let mut h = Heater::new();
-        assert!(!h.update(Some(&CFG), Some(1614), at0())); // 35 C
+        assert!(!h.update(Some(&CFG), HOLD, SETPOINT, Some(1614), at0())); // 35 C
         assert_eq!(h.state(), HeaterState::Idle);
     }
 
     #[test]
     fn it_keeps_heating_through_the_dead_band_and_stops_above_it() {
         let mut h = Heater::new();
-        assert!(h.update(Some(&CFG), Some(2278), at0())); // 20 C
-        assert!(h.update(Some(&CFG), Some(1825), at0()), "30 C is inside the band, keep heating"); // 30 C
-        assert!(!h.update(Some(&CFG), Some(1760), at0()), "~32 C is above the band"); // ~31.5 C
-        assert!(!h.update(Some(&CFG), Some(1825), at0()), "and it stays off coming back down into the band");
-        assert!(h.update(Some(&CFG), Some(1900), at0()), "~28 C is below the band again");
+        assert!(h.update(Some(&CFG), HOLD, SETPOINT, Some(2278), at0())); // 20 C
+        assert!(h.update(Some(&CFG), HOLD, SETPOINT, Some(1825), at0()), "30 C is inside the band, keep heating"); // 30 C
+        assert!(!h.update(Some(&CFG), HOLD, SETPOINT, Some(1760), at0()), "~32 C is above the band"); // ~31.5 C
+        assert!(
+            !h.update(Some(&CFG), HOLD, SETPOINT, Some(1825), at0()),
+            "and it stays off coming back down into the band"
+        );
+        assert!(h.update(Some(&CFG), HOLD, SETPOINT, Some(1900), at0()), "~28 C is below the band again");
     }
 
     #[test]
     fn a_broken_ntc_switches_the_pad_off() {
         let mut h = Heater::new();
-        assert!(h.update(Some(&CFG), Some(2278), at0()));
-        assert!(!h.update(Some(&CFG), Some(4095), at0()));
+        assert!(h.update(Some(&CFG), HOLD, SETPOINT, Some(2278), at0()));
+        assert!(!h.update(Some(&CFG), HOLD, SETPOINT, Some(4095), at0()));
         assert_eq!(h.state(), HeaterState::SensorFault);
         assert_eq!(h.milli_c(), TEMPERATURE_INVALID);
     }
@@ -387,7 +443,7 @@ mod tests {
     #[test]
     fn a_board_that_cannot_read_the_ntc_never_heats() {
         let mut h = Heater::new();
-        assert!(!h.update(Some(&CFG), None, at0()));
+        assert!(!h.update(Some(&CFG), HOLD, SETPOINT, None, at0()));
         assert_eq!(h.state(), HeaterState::SensorFault);
         assert_eq!(h.raw(), RAW_INVALID);
     }
@@ -397,7 +453,7 @@ mod tests {
         // The NTC reads 30 C, but the pad is really 3 C colder.
         let cfg = CFG.with_offset_milli_c(-3_000);
         let mut h = Heater::new();
-        assert!(h.update(Some(&cfg), Some(1825), at0()), "27 C calibrated is below the band");
+        assert!(h.update(Some(&cfg), HOLD, SETPOINT, Some(1825), at0()), "27 C calibrated is below the band");
         assert_eq!(h.milli_c(), 27_000);
     }
 
@@ -405,7 +461,7 @@ mod tests {
     fn the_offset_does_not_mask_a_broken_ntc() {
         let cfg = CFG.with_offset_milli_c(5_000);
         let mut h = Heater::new();
-        assert!(!h.update(Some(&cfg), Some(4095), at0()));
+        assert!(!h.update(Some(&cfg), HOLD, SETPOINT, Some(4095), at0()));
         assert_eq!(h.milli_c(), TEMPERATURE_INVALID);
     }
 
@@ -414,10 +470,10 @@ mod tests {
         let cfg = CFG.with_ntc_wiring(NtcWiring::ToSupply);
         let mut h = Heater::new();
         // 4095 - 2278: the mirrored divider at 20 C.
-        assert!(h.update(Some(&cfg), Some(4095 - 2278), at0()));
+        assert!(h.update(Some(&cfg), HOLD, SETPOINT, Some(4095 - 2278), at0()));
         assert_eq!(h.milli_c(), 20_000);
         // 4095 - 1614: 35 C.
-        assert!(!h.update(Some(&cfg), Some(4095 - 1614), at0()));
+        assert!(!h.update(Some(&cfg), HOLD, SETPOINT, Some(4095 - 1614), at0()));
         assert_eq!(h.milli_c(), 35_000);
     }
 
@@ -425,16 +481,47 @@ mod tests {
     fn an_ntc_to_supply_still_detects_open_and_short() {
         let cfg = CFG.with_ntc_wiring(NtcWiring::ToSupply);
         let mut h = Heater::new();
-        assert!(!h.update(Some(&cfg), Some(0), at0()));
+        assert!(!h.update(Some(&cfg), HOLD, SETPOINT, Some(0), at0()));
         assert_eq!(h.state(), HeaterState::SensorFault);
-        assert!(!h.update(Some(&cfg), Some(4095), at0()));
+        assert!(!h.update(Some(&cfg), HOLD, SETPOINT, Some(4095), at0()));
         assert_eq!(h.state(), HeaterState::SensorFault);
+    }
+
+    #[test]
+    fn off_keeps_a_cold_pad_off_but_still_reports_its_temperature() {
+        let mut h = Heater::new();
+        assert!(!h.update(Some(&CFG), HeaterMode::Off, SETPOINT, Some(2278), at0())); // 20 C
+        assert_eq!(h.state(), HeaterState::Off);
+        assert_eq!(h.milli_c(), 20_000);
+    }
+
+    #[test]
+    fn blind_heats_through_a_broken_ntc() {
+        let mut h = Heater::new();
+        assert!(h.update(Some(&CFG), HeaterMode::Blind, SETPOINT, Some(4095), at0()));
+        assert_eq!(h.state(), HeaterState::Blind);
+        assert!(h.update(Some(&CFG), HeaterMode::Blind, SETPOINT, None, at0()), "and with no reading at all");
+    }
+
+    #[test]
+    fn blind_ignores_the_setpoint() {
+        let mut h = Heater::new();
+        assert!(h.update(Some(&CFG), HeaterMode::Blind, SETPOINT, Some(1614), at0()), "35 C, above the band");
+        assert_eq!(h.milli_c(), 35_000);
+    }
+
+    #[test]
+    fn the_setpoint_is_an_input_not_a_constant() {
+        let mut h = Heater::new();
+        // 20 C: below a 30 C setpoint, above a 10 C one.
+        assert!(h.update(Some(&CFG), HOLD, 30_000, Some(2278), at0()));
+        assert!(!h.update(Some(&CFG), HOLD, 10_000, Some(2278), at0()));
     }
 
     #[test]
     fn no_config_is_disabled() {
         let mut h = Heater::new();
-        assert!(!h.update(None, Some(2278), at0()));
+        assert!(!h.update(None, HeaterMode::Blind, SETPOINT, Some(2278), at0()), "not even blind");
         assert_eq!(h.state(), HeaterState::Disabled);
     }
 }

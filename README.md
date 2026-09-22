@@ -54,11 +54,23 @@ Nothing configured.
 
 No sensors.
 
-Heating pad on HC3 + HC4, switched by the node itself. The pad's 10k NTC is read on COM4 pin 1
-(PA2), wired NTC to 3.3 V and 10k to ground (`NtcWiring::ToSupply`; `ToGround` is the other way
-round). The pad turns on below 29 °C and off above 31 °C (setpoint 30 °C, set at compile time in
-`src/zenith_mapping/mod.rs`). It turns off if the NTC reads open or shorted. Temperature and state
-are at SDO 0x2017.
+Heating pad on HC3 + HC4. The pad's 10k NTC is read on COM4 pin 1 (PA2), wired NTC to 3.3 V and
+10k to ground (`NtcWiring::ToSupply`; `ToGround` is the other way round).
+
+The master controls it over SDO:
+
+| Object | What | Notes |
+|---|---|---|
+| 0x2018 | mode: 0 off, 1 thermostat, 2 blind | Off at every boot. Not saved. |
+| 0x3070 | setpoint, 0.01 °C (`int16`) | Factory default 30 °C. Max 80 °C. Saved with 0x1010. |
+| 0x2017 | temperature (m°C), raw counts, state | Read-only. |
+
+In thermostat mode the pad turns on 1 °C below the setpoint and off 1 °C above it, and turns off
+if the NTC reads open or shorted. Blind mode is the backup for a broken NTC: the pad stays on
+continuously with no temperature control, so someone has to watch it. The temperature is still
+reported. Fallback stage A leaves the mode alone; stage B switches the heater off and resets
+0x2018 to off (both need the fallback enabled at 0x3007). Everything is also broadcast as TPDO
+kind 18 (`Heater`), on nodes with a heater only.
 
 To calibrate the NTC, put a reference thermometer on the pad and watch the RTT log (`just
 probe-flash node4`). Once a second the node prints `heater: raw … counts, uncalibrated … m°C,

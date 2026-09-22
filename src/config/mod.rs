@@ -83,6 +83,7 @@ const DEFAULT_TPDO_MS: PerTpdoKind<u16> = PerTpdoKind::new([
     1000, // 15 RailCurrent
     1000, // 16 Status
     0,    // 17 ValveCurrent
+    1000, // 18 Heater — never sent by a node without one, see `crate::can::tpdo`
 ]);
 
 #[derive(Clone, Debug)]
@@ -104,6 +105,10 @@ pub struct Config {
     /// The board's clock/direction actuators. At most two, because PA2/PA3 carry the only timer
     /// channels left on pins this board can reach.
     pub steppers: PerStepper<StepperConfig>,
+    /// 0x3070: temperature the heater's thermostat holds, centidegrees Celsius. Carried by every
+    /// node so the record layout does not depend on the build; meaningless on one without a
+    /// heater ([`NodeSettings::heater`]).
+    pub heater_setpoint_centi_c: i16,
 }
 
 impl Config {
@@ -121,7 +126,13 @@ impl Config {
             tpdo_interval_ms: DEFAULT_TPDO_MS,
             relief: ReliefConfig::disabled(),
             steppers: PerStepper::splat(StepperConfig::disabled()),
+            heater_setpoint_centi_c: 0,
         }
+    }
+
+    pub const fn with_heater_setpoint_centi_c(mut self, setpoint: i16) -> Self {
+        self.heater_setpoint_centi_c = setpoint;
+        self
     }
 
     pub const fn with_relief(mut self, relief: ReliefConfig) -> Self {
@@ -285,6 +296,11 @@ impl Config {
             }
         }
 
+        // The SDO write refuses this too; checked here as well for a config loaded from NOR.
+        if self.heater_setpoint_centi_c > iocan_proto::od::HEATER_SETPOINT_MAX {
+            return Err(ConfigError::HeaterSetpointTooHigh);
+        }
+
         if self.relief.is_armed() {
             // An armed relief loop pointing at a valve that is not fitted would look configured
             // while doing nothing, which is the worst way for a safety function to fail. Refuse
@@ -373,7 +389,8 @@ pub struct NodeSettings {
     pub node_id: u8,
     /// Factory defaults, used when the NOR flash holds no valid configuration.
     pub config: Config,
-    /// A thermostat-controlled heating pad. Compile-time only: not in `config`, not persisted.
+    /// A heating pad's hardware. Compile-time only; its setpoint is in `config`
+    /// ([`Config::heater_setpoint_centi_c`]).
     pub heater: Option<crate::heater::HeaterConfig>,
 }
 
@@ -422,6 +439,8 @@ pub enum ConfigError {
     /// Relief is armed against a sensor slot that is not configured.
     ReliefSensorUnmapped(SensorSlot),
     ReliefPulseZero,
+    /// The heater setpoint is above [`iocan_proto::od::HEATER_SETPOINT_MAX`].
+    HeaterSetpointTooHigh,
 }
 
 #[cfg(test)]

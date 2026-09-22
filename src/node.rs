@@ -134,12 +134,8 @@ pub async fn spawn_node(spawner: Spawner, settings: NodeSettings) {
                 defmt::error!("heater output {} is also mapped to valve {}; the heater wins", hco, valve);
             }
         }
-        defmt::info!(
-            "heater on pair {}, NTC on {}, holding {} m°C",
-            heater.pair,
-            heater.ntc,
-            heater.setpoint_milli_c
-        );
+        defmt::info!("heater on pair {}, NTC on {}, off until commanded at 0x2018", heater.pair, heater.ntc);
+        STORE.lock().await.heater_fitted = true;
         control = control.with_heater(heater);
     }
     let control = CONTROL.init(control);

@@ -214,11 +214,42 @@ pub const STEPPER_POSITION: u16 = 0x2016;
 /// |-----|--------------------------------------------------------------------------|
 /// | 1   | calibrated pad NTC temperature, millidegrees C; [`TEMPERATURE_INVALID`] if none |
 /// | 2   | raw ADC counts; [`RAW_INVALID`] when not read                             |
-/// | 3   | state: 0 idle (pad off), 1 heating, 2 NTC fault (pad off), 3 no heater    |
+/// | 3   | state, see below                                                         |
 ///
-/// The setpoint is compile-time, in the node's factory settings, and neither configurable nor
-/// persisted. The pad's output shows up at [`HCO_DIGITAL`].
+/// | state | meaning                                                              | pad |
+/// |-------|----------------------------------------------------------------------|-----|
+/// | 0     | idle — thermostat on, at or above the setpoint                       | off |
+/// | 1     | heating — thermostat on, below the setpoint                          | on  |
+/// | 2     | NTC fault — thermostat on, but no valid reading                      | off |
+/// | 3     | no heater on this node                                               | —   |
+/// | 4     | off — commanded off ([`HEATER_MODE`] 0)                              | off |
+/// | 5     | blind — heating without temperature control ([`HEATER_MODE`] 2)      | on  |
+///
+/// The temperature is still measured and reported in blind mode; it just does not decide
+/// anything. The pad's output shows up at [`HCO_DIGITAL`], and the whole picture is broadcast as
+/// [`crate::TpdoFrame::Heater`].
 pub const HEATER: u16 = 0x2017;
+
+/// What the heater is told to do. `uint8`, **read/write**. Not persisted: every boot starts at 0.
+///
+/// | code | mode                                                                        |
+/// |------|-----------------------------------------------------------------------------|
+/// | 0    | off                                                                         |
+/// | 1    | thermostat — hold [`HEATER_SETPOINT`], pad off on an NTC fault               |
+/// | 2    | blind — pad on continuously, no temperature control at all                   |
+///
+/// Blind mode is the backup for a broken NTC: the thermostat refuses to heat without a reading,
+/// and this is how the master says "heat anyway". Nothing on the node limits it, so whoever
+/// commands it has to be watching.
+///
+/// Fallback: stage A ([`FALLBACK_A_MS`]) leaves the mode alone, so a short master outage does not
+/// interrupt heating. Stage B ([`FALLBACK_B_MS`]) switches the heater off and resets this object
+/// to 0, so a master that comes back finds it off and has to re-enable it deliberately. Like the
+/// valve fallback, both stages only fire with [`FALLBACK_ENABLED`] set.
+///
+/// Rejected with `ResourceNotAvailable` on a node without a heater, and `InvalidValue` for a code
+/// not in the table.
+pub const HEATER_MODE: u16 = 0x2018;
 
 // --- direct high current output control ------------------------------------
 
@@ -676,7 +707,7 @@ pub const SENSOR_INTERVAL_MS: u16 = 0x3030;
 /// newly plugged-in amplifier boards does not disturb the sample rate during assembly.
 pub const SCAN_INTERVAL_MS: u16 = 0x3031;
 
-/// TPDO broadcast period per kind, milliseconds. `uint16[18]`, read/write.
+/// TPDO broadcast period per kind, milliseconds. `uint16[19]`, read/write.
 ///
 /// Sub-index *n + 1* is the period for TPDO kind *n* (see [`crate::TpdoKind`], whose discriminant
 /// is that same *n*); 0 disables that kind. A period changed here takes effect on the next tick,
@@ -739,6 +770,19 @@ pub const RELIEF_PULSE_MS: u16 = 0x3055;
 /// Without it, the lag between valve and sensor would make a single decision dump the whole
 /// vessel.
 pub const RELIEF_COOLDOWN_MS: u16 = 0x3056;
+
+// --- heater ----------------------------------------------------------------
+
+/// Temperature the heater's thermostat holds, centidegrees Celsius. `int16`, read/write.
+///
+/// Only used in thermostat mode ([`HEATER_MODE`] 1). The same unit a temperature sensor slot
+/// reports in ([`SENSOR_UNIT`] code 2). Writes above [`HEATER_SETPOINT_MAX`] are rejected with
+/// `ValueTooHigh`. Accepted on a node without a heater, like the rest of the config block, and
+/// ignored there.
+pub const HEATER_SETPOINT: u16 = 0x3070;
+
+/// Highest [`HEATER_SETPOINT`] a node accepts, centidegrees Celsius: 80 °C.
+pub const HEATER_SETPOINT_MAX: i16 = 8_000;
 
 // --- clock/direction steppers ----------------------------------------------
 //
@@ -920,6 +964,8 @@ mod tests {
             RELIEF_COOLDOWN_MS,
             STEPPER_POSITION,
             HEATER,
+            HEATER_MODE,
+            HEATER_SETPOINT,
             STEPPER_VALVE,
             STEPPER_CLOSED_STEPS,
             STEPPER_OPEN_STEPS,
