@@ -26,7 +26,7 @@ const fn servo(pair: HcoPair, closed_us: u16, open_us: u16) -> ValveConfig {
 }
 
 pub const fn ox_fill_and_dump(pair: HcoPair) -> ValveConfig {
-    servo(pair, 1980, 850)
+    servo(pair, 2050, 1060)
 }
 
 pub const fn pressurant_vent(pair: HcoPair) -> ValveConfig {
@@ -38,7 +38,7 @@ pub const fn main_valve(pair: HcoPair) -> ValveConfig {
 }
 
 pub const fn pressurization(pair: HcoPair) -> ValveConfig {
-    servo(pair, 2200, 1080)
+    servo(pair, 2310, 1230)
 }
 
 /// Mid-range travel for bench work with an uncharacterised servo.
