@@ -86,7 +86,10 @@ impl Tpdo {
 
                 let payload = {
                     let store = STORE.lock().await;
-                    build(&store, kind)
+                    applies(&store, kind).then(|| build(&store, kind))
+                };
+                let Some(payload) = payload else {
+                    continue;
                 };
                 if !should_send(self.last_sent[index], now, payload) {
                     continue;
@@ -188,6 +191,11 @@ fn frame_for(store: &Store, kind: TpdoKind) -> TpdoFrame {
         TpdoKind::RailVoltage => TpdoFrame::RailVoltage(*store.rail_voltage_mv.as_array()),
         TpdoKind::RailCurrent => TpdoFrame::RailCurrent(*store.rail_current_ma.as_array()),
 
+        TpdoKind::Temperature => TpdoFrame::Temperature {
+            board_milli_c: store.temperature_milli_c[crate::index::TempSensorId::Board],
+            mcu_milli_c: store.temperature_milli_c[crate::index::TempSensorId::Mcu],
+        },
+
         TpdoKind::Status => TpdoFrame::Status {
             link_state: store.link_state as u8,
             raw_debug: store.raw_debug,
@@ -200,7 +208,25 @@ fn frame_for(store: &Store, kind: TpdoKind) -> TpdoFrame {
                 .fold(0u8, |bits, (valve, _)| bits | 1 << valve.index()),
             ms_since_heartbeat: store.ms_since_heartbeat,
         },
+
+        TpdoKind::Heater => TpdoFrame::Heater {
+            temperature: match store.heater_milli_c {
+                crate::store::TEMPERATURE_INVALID => SENSOR_INVALID,
+                // Saturating one short of the invalid marker, the same as a sensor slot does.
+                t => (t / 10).clamp(SENSOR_INVALID as i32 + 1, i16::MAX as i32) as i16,
+            },
+            setpoint: store.config.heater_setpoint_centi_c,
+            state: store.heater_state,
+            mode: store.heater_mode,
+        },
     }
+}
+
+/// Whether this node has anything to say on a kind at all. Only the heater frame can be absent:
+/// a node without a heater would otherwise broadcast "no heater" once a second forever.
+#[cfg(any(feature = "hardware", test))]
+fn applies(store: &Store, kind: TpdoKind) -> bool {
+    kind != TpdoKind::Heater || store.heater_fitted
 }
 
 #[cfg(any(feature = "hardware", test))]
@@ -231,6 +257,41 @@ mod tests {
     }
 
     #[test]
+    fn the_heater_frame_is_only_sent_by_a_node_with_a_heater() {
+        let mut store = Store::new();
+        assert!(!applies(&store, TpdoKind::Heater));
+        assert!(applies(&store, TpdoKind::Status), "every other kind is unaffected");
+        store.heater_fitted = true;
+        assert!(applies(&store, TpdoKind::Heater));
+    }
+
+    #[test]
+    fn the_heater_frame_reports_centidegrees() {
+        let mut store = Store::new();
+        store.heater_fitted = true;
+        store.heater_milli_c = 21_567;
+        store.heater_state = crate::heater::HeaterState::Blind as u8;
+        store.heater_mode = crate::heater::HeaterMode::Blind as u8;
+        store.config.heater_setpoint_centi_c = 3_000;
+        assert_eq!(
+            build(&store, TpdoKind::Heater),
+            TpdoFrame::Heater {
+                temperature: 2_156,
+                setpoint: 3_000,
+                state: 5,
+                mode: 2,
+            }
+            .encode()
+        );
+
+        store.heater_milli_c = crate::store::TEMPERATURE_INVALID;
+        let TpdoFrame::Heater { temperature, .. } = frame_for(&store, TpdoKind::Heater) else {
+            unreachable!()
+        };
+        assert_eq!(temperature, SENSOR_INVALID, "no reading maps onto the sensor plane's marker");
+    }
+
+    #[test]
     fn rails_split_into_separate_voltage_and_current_frames() {
         let mut store = Store::new();
         store.rail_current_ma = crate::index::PerRail::new([111, 222, 333]);
@@ -238,6 +299,38 @@ mod tests {
 
         assert_eq!(build(&store, TpdoKind::RailCurrent), TpdoFrame::RailCurrent([111, 222, 333]).encode());
         assert_eq!(build(&store, TpdoKind::RailVoltage), TpdoFrame::RailVoltage([444, 555, 666]).encode());
+    }
+
+    #[test]
+    fn temperatures_are_published_in_temp_sensor_id_order() {
+        use crate::index::TempSensorId;
+
+        let mut store = Store::new();
+        store.temperature_milli_c = crate::index::PerTemp::new([41_500, -3_250]);
+
+        assert_eq!(
+            build(&store, TpdoKind::Temperature),
+            TpdoFrame::Temperature {
+                board_milli_c: 41_500,
+                mcu_milli_c: -3_250,
+            }
+            .encode()
+        );
+        assert_eq!(store.temperature_milli_c[TempSensorId::Board], 41_500);
+    }
+
+    /// A board with no on-board sensing still broadcasts the frame; it just says so.
+    #[test]
+    fn a_node_with_no_temperature_sensing_publishes_the_invalid_sentinel() {
+        let store = Store::new();
+        assert_eq!(
+            build(&store, TpdoKind::Temperature),
+            TpdoFrame::Temperature {
+                board_milli_c: crate::store::TEMPERATURE_INVALID,
+                mcu_milli_c: crate::store::TEMPERATURE_INVALID,
+            }
+            .encode()
+        );
     }
 
     #[test]

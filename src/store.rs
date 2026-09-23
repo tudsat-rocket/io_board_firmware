@@ -22,7 +22,7 @@ use zencan_common::sdo::AbortCode;
 use crate::config::{Config, SensorKind, SensorSlotConfig, Unit, ValveKind};
 use crate::index::{
     AmplifierId, HcoId, I2cBus, Id, PdoSensorChannel, PerAdcSlot, PerErrorCounter, PerHco, PerI2cBus, PerPdoSensor,
-    PerRail, PerSensorSlot, PerValve, SensorSlot, ValveId,
+    PerRail, PerSensorSlot, PerStepper, PerTemp, PerValve, SensorSlot, StepperId, ValveId,
 };
 use crate::valves::position_of;
 
@@ -43,7 +43,7 @@ pub static PERSIST_WAKE: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 /// [`iocan_proto::od`], which is where an object's meaning is documented; re-exported here
 /// because the whole firmware reaches for them through the store.
 pub use iocan_proto::od;
-pub use iocan_proto::od::{NO_INDEX, RAW_INVALID, SENSOR_INVALID, SIGNATURE_LOAD, SIGNATURE_SAVE};
+pub use iocan_proto::od::{NO_INDEX, RAW_INVALID, SENSOR_INVALID, SIGNATURE_LOAD, SIGNATURE_SAVE, TEMPERATURE_INVALID};
 
 /// 0x2032. How the node currently sees the master.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, defmt::Format)]
@@ -68,12 +68,18 @@ pub struct Pending {
     pub valves: PerValve<bool>,
     /// A direct HCO write landed and needs arbitrating.
     pub outputs: bool,
+    /// 0x2018 was written. Only a wake-up: the control task reads the mode every tick anyway.
+    pub heater: bool,
     /// Config changed; mappings and derived state need recomputing.
     pub config: bool,
     /// 0x1010 was written with the save signature.
     pub save: bool,
     /// 0x1011 was written with the load signature.
     pub restore: bool,
+    /// 0x2016 was written: declare that actuator's shaft to be at this step count without moving
+    /// it. `Option` rather than a flag plus a value because "re-zero to 0" is a real request and
+    /// must not be indistinguishable from "no request".
+    pub stepper_zero: PerStepper<Option<i32>>,
 }
 
 impl Pending {
@@ -82,7 +88,13 @@ impl Pending {
     }
 
     pub fn any(&self) -> bool {
-        self.valves.any() || self.outputs || self.config || self.save || self.restore
+        self.valves.any()
+            || self.outputs
+            || self.heater
+            || self.config
+            || self.save
+            || self.restore
+            || self.stepper_zero.values().any(Option::is_some)
     }
 }
 
@@ -112,6 +124,21 @@ pub struct Store {
     pub valve_current_ma: PerValve<u16>,
     /// 0x2015, a [`crate::relief::ReliefState`] discriminant.
     pub relief_state: u8,
+    /// 0x2016. Pulses each clock/direction actuator has emitted since boot, direction-signed.
+    /// Reported as well as commanded because it is the only observable that says where a shaft
+    /// really is — 0x2012 clamps it into the configured travel, this does not.
+    pub stepper_position_steps: PerStepper<i32>,
+    /// 0x2017: heater NTC temperature (m°C), its raw ADC counts, and a
+    /// [`crate::heater::HeaterState`] discriminant.
+    pub heater_milli_c: i32,
+    pub heater_raw: u16,
+    pub heater_state: u8,
+    /// 0x2018, a [`crate::heater::HeaterMode`] discriminant. Off at every boot; the control task
+    /// writes it back to off when fallback stage B fires.
+    pub heater_mode: u8,
+    /// Whether this build has a heater at all. Set once at boot, from [`crate::config::NodeSettings`];
+    /// 0x2018 is refused without one.
+    pub heater_fitted: bool,
 
     pub hco_digital: PerHco<u8>,
     pub hco_pwm_us: PerHco<u16>,
@@ -133,6 +160,15 @@ pub struct Store {
     /// Zero on rev2, which has no on-board sensing.
     pub rail_current_ma: PerRail<u16>,
     pub rail_voltage_mv: PerRail<u16>,
+    /// 0x2042. [`TEMPERATURE_INVALID`] per entry until a reading lands, and permanently so on
+    /// rev2 and for a thermistor that reads open or shorted.
+    pub temperature_milli_c: PerTemp<i32>,
+    /// 0x2043: the raw conversions behind 0x2042, [`RAW_INVALID`] where there was none.
+    ///
+    /// Exposed for the same reason the amplifier counts at 0x2000/0x2001 are, next to the
+    /// calibrated values at 0x2004: a temperature that looks wrong is either a wrong conversion
+    /// or wrong maths applied to a right one, and only the raw count tells you which.
+    pub temperature_raw: PerTemp<u16>,
 
     /// Mirror of [`crate::errors`]'s atomics, refreshed on the control tick.
     ///
@@ -165,6 +201,12 @@ impl Store {
             valve_status: PerValve::splat(0),
             valve_current_ma: PerValve::splat(0),
             relief_state: crate::relief::ReliefState::Disabled as u8,
+            stepper_position_steps: PerStepper::splat(0),
+            heater_milli_c: TEMPERATURE_INVALID,
+            heater_raw: RAW_INVALID,
+            heater_state: crate::heater::HeaterState::Disabled as u8,
+            heater_mode: crate::heater::HeaterMode::Off as u8,
+            heater_fitted: false,
             hco_digital: PerHco::splat(0),
             hco_pwm_us: PerHco::splat(0),
             hco_owner: PerHco::splat(0),
@@ -177,13 +219,17 @@ impl Store {
             rail_current_ma: PerRail::splat(0),
             rail_voltage_mv: PerRail::splat(0),
             error_counts: PerErrorCounter::splat(0),
+            temperature_milli_c: PerTemp::splat(TEMPERATURE_INVALID),
+            temperature_raw: PerTemp::splat(RAW_INVALID),
             config: Config::new(),
             pending: Pending {
                 valves: PerValve::splat(false),
                 outputs: false,
+                heater: false,
                 config: false,
                 save: false,
                 restore: false,
+                stepper_zero: PerStepper::splat(None),
             },
         }
     }
@@ -303,6 +349,14 @@ fn read_valve_array<F: Fn(&crate::config::ValveConfig) -> OdValue>(
     read_array(cfg.valves.as_slice(), sub, |v| field(&v))
 }
 
+fn read_stepper_array<F: Fn(&crate::stepper::StepperConfig) -> OdValue>(
+    cfg: &Config,
+    sub: u8,
+    field: F,
+) -> Result<OdValue, AbortCode> {
+    read_array(cfg.steppers.as_slice(), sub, |s| field(&s))
+}
+
 fn read_sensor_array<F: Fn(&SensorSlotConfig) -> OdValue>(
     cfg: &Config,
     sub: u8,
@@ -344,6 +398,12 @@ pub fn read(store: &Store, index: u16, sub: u8) -> Result<OdValue, AbortCode> {
         VALVE_STATUS => read_array(store.valve_status.as_slice(), sub, OdValue::u8),
         VALVE_CURRENT => read_array(store.valve_current_ma.as_slice(), sub, OdValue::u16),
         RELIEF_STATE => scalar(OdValue::u8(store.relief_state)),
+        STEPPER_POSITION => read_array(store.stepper_position_steps.as_slice(), sub, OdValue::i32),
+        HEATER => {
+            read_array(&[store.heater_milli_c, store.heater_raw as i32, store.heater_state as i32], sub, OdValue::i32)
+        }
+        HEATER_MODE => scalar(OdValue::u8(store.heater_mode)),
+        HEATER_SETPOINT => scalar(OdValue::i16(cfg.heater_setpoint_centi_c)),
 
         RELIEF_ENABLED => scalar(OdValue::u8(cfg.relief.enabled as u8)),
         RELIEF_VALVE => scalar(OdValue::u8(cfg.relief.valve.map_or(0xFF, ValveId::as_u8))),
@@ -352,6 +412,13 @@ pub fn read(store: &Store, index: u16, sub: u8) -> Result<OdValue, AbortCode> {
         RELIEF_POSITION => scalar(OdValue::u16(cfg.relief.position)),
         RELIEF_PULSE_MS => scalar(OdValue::u16(cfg.relief.pulse_ms)),
         RELIEF_COOLDOWN_MS => scalar(OdValue::u16(cfg.relief.cooldown_ms)),
+
+        STEPPER_VALVE => read_stepper_array(cfg, sub, |s| OdValue::u8(s.valve.map_or(NO_INDEX, ValveId::as_u8))),
+        STEPPER_CLOSED_STEPS => read_stepper_array(cfg, sub, |s| OdValue::i32(s.closed_steps)),
+        STEPPER_OPEN_STEPS => read_stepper_array(cfg, sub, |s| OdValue::i32(s.open_steps)),
+        STEPPER_MAX_HZ => read_stepper_array(cfg, sub, |s| OdValue::u32(s.max_step_hz)),
+        STEPPER_START_HZ => read_stepper_array(cfg, sub, |s| OdValue::u32(s.start_step_hz)),
+        STEPPER_ACCEL_HZ_PER_S => read_stepper_array(cfg, sub, |s| OdValue::u32(s.accel_hz_per_s)),
 
         HCO_DIGITAL => read_array(store.hco_digital.as_slice(), sub, OdValue::u8),
         HCO_PWM_US => read_array(store.hco_pwm_us.as_slice(), sub, OdValue::u16),
@@ -364,6 +431,8 @@ pub fn read(store: &Store, index: u16, sub: u8) -> Result<OdValue, AbortCode> {
         RAIL_CURRENT => read_array(store.rail_current_ma.as_slice(), sub, OdValue::u16),
         RAIL_VOLTAGE => read_array(store.rail_voltage_mv.as_slice(), sub, OdValue::u16),
         ERROR_COUNTERS => read_array(store.error_counts.as_slice(), sub, OdValue::u32),
+        TEMPERATURE => read_array(store.temperature_milli_c.as_slice(), sub, OdValue::i32),
+        TEMPERATURE_RAW => read_array(store.temperature_raw.as_slice(), sub, OdValue::u16),
 
         MASTER_NODE_ID => scalar(OdValue::u8(cfg.master_node_id)),
         FALLBACK_A_MS => scalar(OdValue::u32(cfg.fallback_a_ms)),
@@ -573,6 +642,17 @@ pub fn write(store: &mut Store, index: u16, sub: u8, data: &[u8]) -> Result<(), 
             store.pending.valves[i] = true;
         }
 
+        HEATER_MODE => {
+            expect_scalar(sub)?;
+            if !store.heater_fitted {
+                return Err(AbortCode::ResourceNotAvailable);
+            }
+            let mode = as_u8(data)?;
+            crate::heater::HeaterMode::from_u8(mode).ok_or(AbortCode::InvalidValue)?;
+            store.heater_mode = mode;
+            store.pending.heater = true;
+        }
+
         HCO_DIGITAL => {
             let i: HcoId = slot(sub)?;
             check_direct_access(store, i)?;
@@ -588,6 +668,19 @@ pub fn write(store: &mut Store, index: u16, sub: u8, data: &[u8]) -> Result<(), 
             store.hco_direct_pwm[i] = true;
             store.hco_direct_dirty[i] = true;
             store.pending.outputs = true;
+        }
+
+        // Not a motion command: this says where the shaft already is, so that the step counter
+        // and the physical actuator agree again after a hand-turn or a power cycle. See
+        // `crate::stepper` on why there is no other homing.
+        STEPPER_POSITION => {
+            let i: StepperId = slot(sub)?;
+            if !store.config.steppers[i].is_mapped() {
+                return Err(AbortCode::ResourceNotAvailable);
+            }
+            let steps = as_i32(data)?;
+            store.stepper_position_steps[i] = steps;
+            store.pending.stepper_zero[i] = Some(steps);
         }
 
         LEDS => {
@@ -792,6 +885,37 @@ pub fn write(store: &mut Store, index: u16, sub: u8, data: &[u8]) -> Result<(), 
             store.pending.config = true;
         }
 
+        STEPPER_VALVE => {
+            let i: StepperId = slot(sub)?;
+            store.config.steppers[i].valve = opt_id_from_wire(as_u8(data)?)?;
+            store.pending.config = true;
+        }
+        STEPPER_CLOSED_STEPS => {
+            let i: StepperId = slot(sub)?;
+            store.config.steppers[i].closed_steps = as_i32(data)?;
+            store.pending.config = true;
+        }
+        STEPPER_OPEN_STEPS => {
+            let i: StepperId = slot(sub)?;
+            store.config.steppers[i].open_steps = as_i32(data)?;
+            store.pending.config = true;
+        }
+        STEPPER_MAX_HZ => {
+            let i: StepperId = slot(sub)?;
+            store.config.steppers[i].max_step_hz = as_u32(data)?;
+            store.pending.config = true;
+        }
+        STEPPER_START_HZ => {
+            let i: StepperId = slot(sub)?;
+            store.config.steppers[i].start_step_hz = as_u32(data)?;
+            store.pending.config = true;
+        }
+        STEPPER_ACCEL_HZ_PER_S => {
+            let i: StepperId = slot(sub)?;
+            store.config.steppers[i].accel_hz_per_s = as_u32(data)?;
+            store.pending.config = true;
+        }
+
         RELIEF_ENABLED => {
             expect_scalar(sub)?;
             store.config.relief.enabled = as_u8(data)? != 0;
@@ -832,10 +956,22 @@ pub fn write(store: &mut Store, index: u16, sub: u8, data: &[u8]) -> Result<(), 
             store.pending.config = true;
         }
 
+        HEATER_SETPOINT => {
+            expect_scalar(sub)?;
+            let v = as_u16(data)? as i16;
+            if v > iocan_proto::od::HEATER_SETPOINT_MAX {
+                return Err(AbortCode::ValueTooHigh);
+            }
+            store.config.heater_setpoint_centi_c = v;
+            store.pending.config = true;
+        }
+
         // Everything else in the 0x2000 block is process data we produce.
         RAW_ADC_BUS0 | RAW_ADC_BUS1 | RAW_ENCODER | I2C_PRESENT | I2C_SWEEPS | SENSOR_VALUE | SENSOR_UNIT
-        | VALVE_TARGET | VALVE_MEASURED | VALVE_STATUS | VALVE_CURRENT | RELIEF_STATE | HCO_OWNER | LINK_STATE
-        | MS_SINCE_HEARTBEAT | RAIL_CURRENT | RAIL_VOLTAGE => return Err(AbortCode::ReadOnly),
+        | VALVE_TARGET | VALVE_MEASURED | VALVE_STATUS | VALVE_CURRENT | RELIEF_STATE | HEATER | HCO_OWNER
+        | LINK_STATE | MS_SINCE_HEARTBEAT | RAIL_CURRENT | RAIL_VOLTAGE | TEMPERATURE | TEMPERATURE_RAW => {
+            return Err(AbortCode::ReadOnly);
+        }
 
         _ => return Err(AbortCode::NoSuchObject),
     }
@@ -857,6 +993,33 @@ mod tests {
         s.config.valves[ValveId::Valve0] = ValveConfig::servo_on_pair(HcoPair::A, 2000, 1000, 1000);
         s.refresh_derived();
         s
+    }
+
+    #[test]
+    fn the_heater_mode_starts_off_and_needs_a_heater() {
+        let mut s = Store::new();
+        assert_eq!(read(&s, od::HEATER_MODE, 0).unwrap().data(), &[0], "off at boot");
+        assert!(matches!(write(&mut s, od::HEATER_MODE, 0, &[1]), Err(AbortCode::ResourceNotAvailable)));
+
+        s.heater_fitted = true;
+        write(&mut s, od::HEATER_MODE, 0, &[2]).unwrap();
+        assert_eq!(read(&s, od::HEATER_MODE, 0).unwrap().data(), &[2]);
+        assert!(s.pending.heater, "a mode change has to wake the control task");
+        assert!(matches!(write(&mut s, od::HEATER_MODE, 0, &[3]), Err(AbortCode::InvalidValue)));
+        assert_eq!(s.heater_mode, 2, "a rejected write leaves the mode alone");
+    }
+
+    #[test]
+    fn the_heater_setpoint_is_capped() {
+        let mut s = Store::new();
+        write(&mut s, od::HEATER_SETPOINT, 0, &od::HEATER_SETPOINT_MAX.to_le_bytes()).unwrap();
+        assert!(matches!(
+            write(&mut s, od::HEATER_SETPOINT, 0, &(od::HEATER_SETPOINT_MAX + 1).to_le_bytes()),
+            Err(AbortCode::ValueTooHigh)
+        ));
+        write(&mut s, od::HEATER_SETPOINT, 0, &(-500i16).to_le_bytes()).unwrap();
+        assert_eq!(read(&s, od::HEATER_SETPOINT, 0).unwrap().data(), &(-500i16).to_le_bytes());
+        assert!(s.pending.config, "the setpoint is configuration, saved with 0x1010");
     }
 
     #[test]

@@ -123,7 +123,11 @@ impl SdoServer {
                     let mut store = STORE.lock().await;
                     let result = store::write(&mut store, index, sub, payload);
                     if result.is_ok() {
-                        if store.pending.valves.any() || store.pending.outputs || store.pending.config {
+                        if store.pending.valves.any()
+                            || store.pending.outputs
+                            || store.pending.heater
+                            || store.pending.config
+                        {
                             CONTROL_WAKE.signal(());
                         }
                         if store.pending.save || store.pending.restore {

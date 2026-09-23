@@ -32,7 +32,10 @@ pub mod relief;
 pub mod sensors;
 pub mod valves;
 
-use crate::index::{HcoId, I2cBus, PdoSensorChannel, PerSensorSlot, PerTpdoKind, PerValve, SensorSlot, ValveId};
+use crate::index::{
+    HcoId, I2cBus, PdoSensorChannel, PerSensorSlot, PerStepper, PerTpdoKind, PerValve, SensorSlot, StepperId, ValveId,
+};
+pub use crate::stepper::StepperConfig;
 
 pub use relief::ReliefConfig;
 pub use sensors::{
@@ -80,6 +83,8 @@ const DEFAULT_TPDO_MS: PerTpdoKind<u16> = PerTpdoKind::new([
     1000, // 15 RailCurrent
     1000, // 16 Status
     0,    // 17 ValveCurrent
+    1000, // 18 Heater — never sent by a node without one, see `crate::can::tpdo`
+    1000, // 19 Temperature
 ]);
 
 #[derive(Clone, Debug)]
@@ -98,6 +103,13 @@ pub struct Config {
     pub scan_interval_ms: u16,
     pub tpdo_interval_ms: PerTpdoKind<u16>,
     pub relief: ReliefConfig,
+    /// The board's clock/direction actuators. At most two, because PA2/PA3 carry the only timer
+    /// channels left on pins this board can reach.
+    pub steppers: PerStepper<StepperConfig>,
+    /// 0x3070: temperature the heater's thermostat holds, centidegrees Celsius. Carried by every
+    /// node so the record layout does not depend on the build; meaningless on one without a
+    /// heater ([`NodeSettings::heater`]).
+    pub heater_setpoint_centi_c: i16,
 }
 
 impl Config {
@@ -114,12 +126,37 @@ impl Config {
             scan_interval_ms: 500,
             tpdo_interval_ms: DEFAULT_TPDO_MS,
             relief: ReliefConfig::disabled(),
+            steppers: PerStepper::splat(StepperConfig::disabled()),
+            heater_setpoint_centi_c: 0,
         }
+    }
+
+    pub const fn with_heater_setpoint_centi_c(mut self, setpoint: i16) -> Self {
+        self.heater_setpoint_centi_c = setpoint;
+        self
     }
 
     pub const fn with_relief(mut self, relief: ReliefConfig) -> Self {
         self.relief = relief;
         self
+    }
+
+    /// Fit one clock/direction actuator, and give its valve slot the matching kind.
+    ///
+    /// Both halves in one call on purpose: a `StepperConfig` naming a valve that is not a
+    /// [`ValveKind::Stepper`], or a stepper valve with no actuator behind it, is exactly the
+    /// mismatch `sanity_check` rejects — so the ordinary way in cannot produce one.
+    pub const fn with_stepper(mut self, id: StepperId, stepper: StepperConfig) -> Self {
+        if let Some(valve) = stepper.valve {
+            self.valves = self.valves.with_at(valve.index(), ValveConfig::stepper());
+        }
+        self.steppers = self.steppers.with_at(id.index(), stepper);
+        self
+    }
+
+    /// Which actuator, if any, answers to a given valve slot.
+    pub fn stepper_for(&self, valve: ValveId) -> Option<StepperId> {
+        self.steppers.iter().find_map(|(id, s)| (s.valve == Some(valve)).then_some(id))
     }
 
     pub const fn with_valve(mut self, valve: ValveId, config: ValveConfig) -> Self {
@@ -191,6 +228,11 @@ impl Config {
             if v.kind == ValveKind::Servo && v.travel_ms == 0 {
                 return Err(ConfigError::ZeroTravelTime(id));
             }
+            // A stepper valve with no actuator behind it has nothing to drive: it would accept
+            // commands over the bus and move nothing at all.
+            if v.kind == ValveKind::Stepper && self.stepper_for(id).is_none() {
+                return Err(ConfigError::StepperUnmapped(id));
+            }
             // A valve told to trust a sensor that reports something other than promille would
             // take a pressure reading as a position. Better to refuse the config than to drive a
             // valve against a number that means nothing to it.
@@ -229,6 +271,37 @@ impl Config {
             }
         }
 
+        for (id, stepper) in self.steppers.iter() {
+            let Some(valve) = stepper.valve else {
+                continue;
+            };
+            // The mirror of the check above: an actuator pointing at a slot that is not a stepper
+            // would have the control task planning moves for a valve driving an HCO pair.
+            if self.valves[valve].kind != ValveKind::Stepper {
+                return Err(ConfigError::StepperValveKind(valve));
+            }
+            if stepper.span() == 0 {
+                return Err(ConfigError::StepperZeroTravel(id));
+            }
+            // Zero here is not "disabled", it is "never start", and the actuator would sit
+            // reporting Moving forever without emitting a pulse.
+            if stepper.start_step_hz == 0 || stepper.max_step_hz == 0 {
+                return Err(ConfigError::StepperZeroSpeed(id));
+            }
+            // Two actuators on one valve slot would both plan moves for it, from two different
+            // step counters, and fight over the same reported position.
+            for (other, w) in self.steppers.iter().skip(id.index() + 1) {
+                if w.valve == Some(valve) {
+                    return Err(ConfigError::StepperValveShared(id, other));
+                }
+            }
+        }
+
+        // The SDO write refuses this too; checked here as well for a config loaded from NOR.
+        if self.heater_setpoint_centi_c > iocan_proto::od::HEATER_SETPOINT_MAX {
+            return Err(ConfigError::HeaterSetpointTooHigh);
+        }
+
         if self.relief.is_armed() {
             // An armed relief loop pointing at a valve that is not fitted would look configured
             // while doing nothing, which is the worst way for a safety function to fail. Refuse
@@ -252,6 +325,36 @@ impl Config {
     /// Configuration that is legal but probably not what was meant. Logged once at boot rather
     /// than rejected, because each of these has a defensible use.
     pub fn log_warnings(&self) {
+        for (id, stepper) in self.steppers.iter() {
+            let Some(valve) = stepper.valve else {
+                continue;
+            };
+            let cfg = &self.valves[valve];
+            // With ENABLE strapped to 5 V there is no drive to drop, so a stepper holds its
+            // position through a fallback whatever the stage asked for. Configuring an unpower
+            // reads as "this will go limp" and it will not.
+            if cfg.fallback_a.unpower || cfg.fallback_b.unpower {
+                defmt::warn!(
+                    "valve {} is stepper {}: its fallback unpower flags (0x3005/0x3006) do \
+                     nothing, the motor holds torque as long as it has power",
+                    valve,
+                    id
+                );
+            }
+            if stepper.start_step_hz > stepper.max_step_hz {
+                defmt::warn!(
+                    "stepper {} pull-in rate {} Hz is above the traverse speed {} Hz, so the \
+                     traverse speed has no effect",
+                    id,
+                    stepper.start_step_hz,
+                    stepper.max_step_hz
+                );
+            }
+            if stepper.accel_hz_per_s == 0 {
+                defmt::warn!("stepper {} acceleration is 0: every move runs at the pull-in rate", id);
+            }
+        }
+
         if !self.relief.is_armed() {
             return;
         }
@@ -287,11 +390,23 @@ pub struct NodeSettings {
     pub node_id: u8,
     /// Factory defaults, used when the NOR flash holds no valid configuration.
     pub config: Config,
+    /// A heating pad's hardware. Compile-time only; its setpoint is in `config`
+    /// ([`Config::heater_setpoint_centi_c`]).
+    pub heater: Option<crate::heater::HeaterConfig>,
 }
 
 impl NodeSettings {
     pub const fn new(node_id: u8, config: Config) -> Self {
-        Self { node_id, config }
+        Self {
+            node_id,
+            config,
+            heater: None,
+        }
+    }
+
+    pub const fn with_heater(mut self, heater: crate::heater::HeaterConfig) -> Self {
+        self.heater = Some(heater);
+        self
     }
 }
 
@@ -310,11 +425,23 @@ pub enum ConfigError {
     SensorBusUnset(SensorSlot),
     /// Two sensor slots claim the same TPDO channel.
     PdoChannelShared(SensorSlot, SensorSlot),
+    /// A valve is configured as a stepper, but the board's actuator does not answer to it.
+    StepperUnmapped(ValveId),
+    /// The actuator names a valve slot that is not a [`ValveKind::Stepper`].
+    StepperValveKind(ValveId),
+    /// Closed and open are the same step count, so the actuator can never move.
+    StepperZeroTravel(StepperId),
+    /// A pulse rate of zero: the actuator would never take a step.
+    StepperZeroSpeed(StepperId),
+    /// Both actuators point at the same valve slot.
+    StepperValveShared(StepperId, StepperId),
     /// Relief is armed against a valve that is not fitted.
     ReliefValveUnmapped(ValveId),
     /// Relief is armed against a sensor slot that is not configured.
     ReliefSensorUnmapped(SensorSlot),
     ReliefPulseZero,
+    /// The heater setpoint is above [`iocan_proto::od::HEATER_SETPOINT_MAX`].
+    HeaterSetpointTooHigh,
 }
 
 #[cfg(test)]

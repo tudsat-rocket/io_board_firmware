@@ -29,9 +29,12 @@
 //!   option, but the outputs still have to be de-energised before the reset.
 //! - [`board::pet_watchdog`] kicks the IWDG by register during the long blocking flash operations
 //!   in the cancan confirm path, where the watchdog task cannot be scheduled.
-//! - The rev2 high current output controller software-PWMs HCO1 and HCO2 from a TIM2 interrupt,
+//! - The rev2 high current output controller software-PWMs HCO1 and HCO2 from a TIM5 interrupt,
 //!   because on that revision those pins are plain GPIO with no timer channel behind them. rev3
 //!   fixed the routing and uses `SimplePwm` throughout.
+//! - [`board::stepper`] drives the step clock straight through `low_level::Timer` and counts the
+//!   pulses in a TIM2 interrupt, because `SimplePwm` has no way to say "emit exactly N periods
+//!   and stop", and an exact count is the whole reason the actuator knows where it is.
 //!
 //! `unstable-pac` is also enabled for one read of `DBGMCU.idcode()`, which cancan reports as the
 //! chip identity, and for the bxCAN receive FIFO overrun check in [`can`].
@@ -55,12 +58,15 @@
 pub mod config;
 pub mod errors;
 pub mod hco;
+pub mod heater;
 pub mod index;
 pub mod leds;
 pub mod rail_sense;
 pub mod relief;
 pub mod safety;
+pub mod stepper;
 pub mod store;
+pub mod temp_sense;
 pub mod valves;
 pub mod zenith_mapping;
 

@@ -1,7 +1,7 @@
 use crate::board::pins_rev3::{HC_SENSE, HC2_SENSE, I_SENSE_1, I_SENSE_2, I_SENSE_3, TH_SENSE, V_MAIN_SENSE};
 use embassy_stm32::{
     Peri,
-    adc::{Adc, SampleTime},
+    adc::{Adc, AnyAdcChannel, SampleTime, Temperature},
     peripherals::ADC1,
 };
 
@@ -16,10 +16,6 @@ pub trait CurrentSens {
 }
 
 #[allow(async_fn_in_trait)]
-pub trait TemperatureSens {
-    async fn temperature_milli_c(&mut self) -> i32;
-}
-#[allow(async_fn_in_trait)]
 pub trait VoltageSens {
     async fn logic_supply_voltage_milli_v(&mut self) -> u16;
     async fn hco12_supply_voltage_milli_v(&mut self) -> u16;
@@ -29,6 +25,9 @@ pub trait VoltageSens {
 pub struct OnboardSensRev3 {
     adc: Adc<'static, ADC1>,
     pins: OnboardSens3Peri,
+    /// The die sensor's internal channel. Not a pin, so it lives here rather than in
+    /// [`OnboardSens3Peri`] — same as `vref` below, which is consumed during `new`.
+    temperature: Temperature,
     sample_time: SampleTime,
     vref_sample: u16,
 }
@@ -60,6 +59,9 @@ pub struct OnboardSens3Peri {
     pub v_hco12_supply: Peri<'static, HC2_SENSE>,
     pub v_hco34_supply: Peri<'static, HC_SENSE>,
     pub v_temp: Peri<'static, TH_SENSE>,
+    /// The analog input a heating pad's NTC divider is on, chosen by the node settings
+    /// ([`crate::heater::HeaterConfig::ntc`]). `None` on a node without a heater.
+    pub heater_ntc: Option<AnyAdcChannel<'static, ADC1>>,
 }
 
 impl OnboardSensRev3 {
@@ -73,9 +75,24 @@ impl OnboardSensRev3 {
     /// number, that error scales every voltage and current the board reports.
     const VREF_SAMPLE_TIME: SampleTime = SampleTime::CYCLES239_5;
 
+    /// Sample time for both temperature channels, for two separate reasons that land on the same
+    /// answer.
+    ///
+    /// The die sensor has the same 17.1 us datasheet minimum as VREFINT, so it needs 239.5 cycles
+    /// at the 12 MHz ADC clock for exactly the reason [`Self::VREF_SAMPLE_TIME`] does. The
+    /// thermistor is a pin, but a slow one: TH1 in parallel with R44 is ~3.4k at room temperature
+    /// and climbs past 5k as the board cools, which is at or beyond what the datasheet allows a
+    /// 7.5-cycle sample to settle from. Neither reading is in a hurry — the whole point of the
+    /// channel is a value that moves over seconds — so both take the longest sample the part has
+    /// rather than trading accuracy for 40 us.
+    const TEMPERATURE_SAMPLE_TIME: SampleTime = SampleTime::CYCLES239_5;
+
     pub async fn new(adc: Peri<'static, ADC1>, pins: OnboardSens3Peri, sample_time: SampleTime) -> Self {
         let mut adc = Adc::new(adc);
         let mut vref = adc.enable_vref();
+        // Same TSVREFE bit as `enable_vref`, so this costs nothing beyond the handle; enabled
+        // here so the one t_START wait below covers both internal channels.
+        let temperature = adc.enable_temperature();
 
         // t_START for the internal reference; the datasheet allows up to 10 us.
         embassy_time::Timer::after_micros(20).await;
@@ -87,6 +104,7 @@ impl OnboardSensRev3 {
         Self {
             adc,
             pins,
+            temperature,
             sample_time,
             vref_sample,
         }
@@ -96,10 +114,15 @@ impl OnboardSensRev3 {
         const VREFINT_MV: u32 = 1200;
         ((raw as u32 * VREFINT_MV) / (self.vref_sample as u32)) as u16
     }
-    // fn reading_to_uv(&self, raw: u16) -> u32 {
-    //     const VREFINT_MV: u32 = 1200;
-    //     (raw as u32 * VREFINT_MV * 1000) / (self.vref_sample as u32)
-    // }
+    /// Same conversion as [`Self::reading_to_mv`], with the resolution the die sensor needs: its
+    /// slope is 4.3 mV per degree, so a millivolt of quantisation would be a quarter of a degree.
+    ///
+    /// `u64` for the multiply rather than `u32`: full scale times 1_200_000 is 4.9e9, which
+    /// overflows a `u32` even though the die sensor itself never reads anywhere near that high.
+    fn reading_to_uv(&self, raw: u16) -> u32 {
+        const VREFINT_UV: u64 = 1_200_000;
+        ((raw as u64 * VREFINT_UV) / (self.vref_sample as u64)) as u32
+    }
 }
 impl CurrentSens for OnboardSensRev3 {
     async fn hco12_current_ma(&mut self) -> u16 {
@@ -133,6 +156,20 @@ impl VoltageSens for OnboardSensRev3 {
         reading_v_to_system_v(self.reading_to_mv(reading))
     }
 }
+impl crate::heater::HeaterSensing for OnboardSensRev3 {
+    async fn heater_ntc_counts(&mut self) -> Option<u16> {
+        // The divider is ~5k source impedance, more than the fast rail sample time allows for,
+        // so this channel gets the longest one. Four samples average out ADC noise.
+        const SAMPLES: u32 = 4;
+        let pin = self.pins.heater_ntc.as_mut()?;
+        let mut sum = 0u32;
+        for _ in 0..SAMPLES {
+            sum += self.adc.read(pin, SampleTime::CYCLES239_5).await as u32;
+        }
+        Some((sum / SAMPLES) as u16)
+    }
+}
+
 impl crate::rail_sense::RailSensing for OnboardSensRev3 {
     async fn read(&mut self) -> Option<crate::rail_sense::Rails> {
         // Both arrays are in `RailId` order: Logic, Hco12, Hco34.
@@ -151,25 +188,44 @@ impl crate::rail_sense::RailSensing for OnboardSensRev3 {
     }
 }
 
-// TODO:
-// impl TemperatureSens for OnboardSensRev3 {
-//     async fn temperature_milli_c(&mut self) -> i32 {
-//         let reading = self.adc.read(&mut self.pins.v_temp, self.sample_time).await;
-//         let v_meas_uv = self.reading_to_mv(reading) as u32 * 1000;
-//
-//         const V_REF_UV: u32 = 3_300_000;
-//         const R_UPPER_U_OHM: u32 = 5_100_000;
-//         const BETA: f32 = 3380; // 0 - 50 C
-//         const T0: f32 = 298.15;
-//
-//         // thermistor resistance
-//         let th_resistance = (R_UPPER_U_OHM * v_meas_uv) / (V_REF_UV - v_meas_uv);
-//
-//         let t_kelvin = 1.0 / ((1.0/ T0) + (1.0/BETA) * log(th_resistance /
-//
-//
-//     }
-// }
+impl crate::temp_sense::TemperatureSensing for OnboardSensRev3 {
+    async fn read_temperatures(&mut self) -> crate::temp_sense::Temperatures {
+        use crate::temp_sense::{Temperatures, mcu_sense_uv_to_milli_c, ntc_counts_to_milli_c};
+
+        // The thermistor is read as raw counts, not millivolts: the divider hangs off +3.3V and
+        // the ADC reference is +3.3VA, the filtered version of the same rail, so counts already
+        // carry the ratio the beta equation wants and VDDA cancels. Going through
+        // `reading_to_mv` would put VREFINT's own error into a reading that does not need it.
+        // See `NTC_CURVE`.
+        let board_raw = self.adc.read(&mut self.pins.v_temp, Self::TEMPERATURE_SAMPLE_TIME).await;
+
+        // The die sensor is the opposite case: its output is an absolute voltage compared against
+        // a fixed datasheet reference, so it does need VREFINT to escape VDDA.
+        let mcu_raw = self.adc.read(&mut self.temperature, Self::TEMPERATURE_SAMPLE_TIME).await;
+
+        let milli_c = crate::index::PerTemp::new([
+            ntc_counts_to_milli_c(board_raw),
+            mcu_sense_uv_to_milli_c(self.reading_to_uv(mcu_raw)),
+        ]);
+
+        // Once a second, and the fastest way to tell a frozen conversion from a frozen
+        // calculation when a board is on a bench with a probe attached.
+        defmt::debug!(
+            "temp: ntc {} counts -> {} mC, die {} counts -> {} mC (vref {})",
+            board_raw,
+            milli_c[crate::index::TempSensorId::Board],
+            mcu_raw,
+            milli_c[crate::index::TempSensorId::Mcu],
+            self.vref_sample,
+        );
+
+        // In `TempSensorId` order: Board, Mcu.
+        Temperatures {
+            milli_c,
+            raw: crate::index::PerTemp::new([board_raw, mcu_raw]),
+        }
+    }
+}
 
 /// Convert voltage read by adc to actual voltage on the target circuit.
 /// This is just because we use a voltage divider.
