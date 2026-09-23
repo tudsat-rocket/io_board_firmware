@@ -170,6 +170,36 @@ data_type = "uint8"
 access_type = "ro"
 default_value = 4
 
+# Raw signed step count per stepper, unclamped; writing it homes without moving.
+[[objects]]
+index = 0x2016
+parameter_name = "stepper position, steps since boot"
+object_type = "array"
+data_type = "int32"
+access_type = "rw"
+array_size = 2
+default_value = [0, 0]
+
+# Heater: pad NTC temperature m°C, raw ADC counts, state (0 idle, 1 heating, 2 NTC fault, 3 none,
+# 4 off, 5 blind).
+[[objects]]
+index = 0x2017
+parameter_name = "heater: temperature m°C, raw counts, state"
+object_type = "array"
+data_type = "int32"
+access_type = "ro"
+array_size = 3
+default_value = [-2147483648, 65535, 3]
+
+# Heater mode: 0 off, 1 thermostat, 2 blind (no temperature control). Off at boot; stage B resets it.
+[[objects]]
+index = 0x2018
+parameter_name = "heater mode"
+object_type = "var"
+data_type = "uint8"
+access_type = "rw"
+default_value = 0
+
 # --- direct high current output control ----------------------------------
 
 # Direct digital level; rejected while the output is owned by a valve, unless raw debug is on.
@@ -355,7 +385,7 @@ default_value = 1
 
 # --- valve mapping and calibration ---------------------------------------
 
-# 0 = not fitted, 1 = solenoid, 2 = servo.
+# 0 = not fitted, 1 = solenoid, 2 = servo, 3 = stepper (see 0x3060).
 [[objects]]
 index = 0x3010
 parameter_name = "valve kind"
@@ -582,8 +612,8 @@ parameter_name = "tpdo broadcast period per kind, milliseconds"
 object_type = "array"
 data_type = "uint16"
 access_type = "rw"
-array_size = 18
-default_value = [500, 500, 200, 500, 500, 500, 100, 0, 100, 0, 0, 50, 0, 5000, 1000, 1000, 1000, 0]
+array_size = 19
+default_value = [500, 500, 200, 500, 500, 500, 100, 0, 100, 0, 0, 50, 0, 5000, 1000, 1000, 1000, 0, 1000]
 
 # ============================================================================
 # 0x3050 — overpressure relief: the one decision a node makes for itself.
@@ -652,3 +682,76 @@ object_type = "var"
 data_type = "uint16"
 access_type = "rw"
 default_value = 500
+
+# --- heater -----------------------------------------------------------------
+
+# Thermostat setpoint, centidegrees C; writes above 8000 (80 °C) are rejected.
+[[objects]]
+index = 0x3070
+parameter_name = "heater setpoint, centidegrees C"
+object_type = "var"
+data_type = "int16"
+access_type = "rw"
+default_value = 0
+
+# --- clock/direction steppers, one entry per actuator ---------------------
+
+# Valve slot this actuator is; that slot's kind (0x3010) must be 3.
+[[objects]]
+index = 0x3060
+parameter_name = "stepper valve index (0xFF = none)"
+object_type = "array"
+data_type = "uint8"
+access_type = "rw"
+array_size = 2
+default_value = [255, 255]
+
+# Step count at 0 promille.
+[[objects]]
+index = 0x3061
+parameter_name = "stepper step count at fully closed"
+object_type = "array"
+data_type = "int32"
+access_type = "rw"
+array_size = 2
+default_value = [0, 0]
+
+# Step count at 1000 promille; may be below 0x3061, which reverses the direction.
+[[objects]]
+index = 0x3062
+parameter_name = "stepper step count at fully open"
+object_type = "array"
+data_type = "int32"
+access_type = "rw"
+array_size = 2
+default_value = [0, 0]
+
+# Traverse speed the ramp accelerates toward; clamped to 20 kHz.
+[[objects]]
+index = 0x3063
+parameter_name = "stepper traverse speed, steps per second"
+object_type = "array"
+data_type = "uint32"
+access_type = "rw"
+array_size = 2
+default_value = [0, 0]
+
+# Rate the motor can start and stop at without losing steps; 0 is rejected.
+[[objects]]
+index = 0x3064
+parameter_name = "stepper pull-in rate, steps per second"
+object_type = "array"
+data_type = "uint32"
+access_type = "rw"
+array_size = 2
+default_value = [0, 0]
+
+# Ramp rate; 0 means every move runs at the pull-in rate.
+[[objects]]
+index = 0x3065
+parameter_name = "stepper acceleration, steps per second squared"
+object_type = "array"
+data_type = "uint32"
+access_type = "rw"
+array_size = 2
+default_value = [0, 0]

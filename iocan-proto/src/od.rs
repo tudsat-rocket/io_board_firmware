@@ -33,6 +33,9 @@ pub const RAW_INVALID: u16 = u16::MAX;
 /// "no slot is mapped here" versus "the slot mapped here has nothing to say".
 pub const SENSOR_INVALID: i16 = i16::MIN;
 
+/// A temperature with no usable reading ([`HEATER`] sub 1).
+pub const TEMPERATURE_INVALID: i32 = i32::MIN;
+
 /// The "unset" sentinel for an optional index in the 0x3000 block: no sensor slot, no valve, no
 /// TPDO channel.
 ///
@@ -192,6 +195,61 @@ pub const VALVE_CURRENT: u16 = 0x2014;
 ///
 /// See [`RELIEF_ENABLED`] for what the loop does and why `inhibited` does not vent.
 pub const RELIEF_STATE: u16 = 0x2015;
+
+/// Pulses each stepper has emitted since boot, direction-signed. `int32[2]`, **read/write**.
+///
+/// There is no home switch and the driver's own encoder is not wired back, so this count is
+/// relative to power-on. Unlike [`VALVE_MEASURED`] it is **not** clamped into the configured
+/// travel: reading it outside [`STEPPER_CLOSED_STEPS`]..[`STEPPER_OPEN_STEPS`] is how an actuator
+/// that has walked off the end shows up.
+///
+/// Writing it is the only homing this actuator has: it declares the shaft to physically be at that
+/// count **without moving it**. Drive the actuator to a known mechanical stop, then write the step
+/// count for that stop. Rejected with `ResourceNotAvailable` on a node with no stepper configured.
+pub const STEPPER_POSITION: u16 = 0x2016;
+
+/// Heating pad thermostat, on nodes built with one. `int32[3]`, read-only.
+///
+/// | sub | meaning                                                                  |
+/// |-----|--------------------------------------------------------------------------|
+/// | 1   | calibrated pad NTC temperature, millidegrees C; [`TEMPERATURE_INVALID`] if none |
+/// | 2   | raw ADC counts; [`RAW_INVALID`] when not read                             |
+/// | 3   | state, see below                                                         |
+///
+/// | state | meaning                                                              | pad |
+/// |-------|----------------------------------------------------------------------|-----|
+/// | 0     | idle — thermostat on, at or above the setpoint                       | off |
+/// | 1     | heating — thermostat on, below the setpoint                          | on  |
+/// | 2     | NTC fault — thermostat on, but no valid reading                      | off |
+/// | 3     | no heater on this node                                               | —   |
+/// | 4     | off — commanded off ([`HEATER_MODE`] 0)                              | off |
+/// | 5     | blind — heating without temperature control ([`HEATER_MODE`] 2)      | on  |
+///
+/// The temperature is still measured and reported in blind mode; it just does not decide
+/// anything. The pad's output shows up at [`HCO_DIGITAL`], and the whole picture is broadcast as
+/// [`crate::TpdoFrame::Heater`].
+pub const HEATER: u16 = 0x2017;
+
+/// What the heater is told to do. `uint8`, **read/write**. Not persisted: every boot starts at 0.
+///
+/// | code | mode                                                                        |
+/// |------|-----------------------------------------------------------------------------|
+/// | 0    | off                                                                         |
+/// | 1    | thermostat — hold [`HEATER_SETPOINT`], pad off on an NTC fault               |
+/// | 2    | blind — pad on continuously, no temperature control at all                   |
+///
+/// Blind mode is the backup for a broken NTC: the thermostat refuses to heat without a reading,
+/// and this is how the master says "heat anyway". Nothing on the node limits it, so whoever
+/// commands it has to be watching.
+///
+/// Fallback: stage A ([`FALLBACK_A_MS`]) leaves the mode alone, so a short master outage does not
+/// interrupt heating. Stage B ([`FALLBACK_B_MS`]) switches the heater off and resets this object
+/// to 0, so a master that comes back finds it off and has to re-enable it deliberately. Like the
+/// valve fallback, both stages only fire with [`FALLBACK_ENABLED`] set.
+///
+/// Rejected with `ResourceNotAvailable` on a node without a heater, and `InvalidValue` for a code
+/// not in the table.
+pub const HEATER_MODE: u16 = 0x2018;
 
 // --- direct high current output control ------------------------------------
 
@@ -445,8 +503,9 @@ pub const FALLBACK_ENABLED: u16 = 0x3007;
 
 /// What kind of valve is on each index. `uint8[4]`, read/write.
 ///
-/// 0 = not fitted, 1 = solenoid, 2 = servo. A solenoid is on or off; a servo takes a PWM position
-/// and has a travel time, a settle time and optionally a separate power output.
+/// 0 = not fitted, 1 = solenoid, 2 = servo, 3 = stepper. A solenoid is on or off; a servo takes a
+/// PWM position and has a travel time, a settle time and optionally a separate power output. A
+/// stepper is described at [`STEPPER_VALVE`].
 pub const VALVE_KIND: u16 = 0x3010;
 
 /// High current output supplying the valve's power, 1..=4, or 0 for none. `uint8[4]`, read/write.
@@ -648,7 +707,7 @@ pub const SENSOR_INTERVAL_MS: u16 = 0x3030;
 /// newly plugged-in amplifier boards does not disturb the sample rate during assembly.
 pub const SCAN_INTERVAL_MS: u16 = 0x3031;
 
-/// TPDO broadcast period per kind, milliseconds. `uint16[18]`, read/write.
+/// TPDO broadcast period per kind, milliseconds. `uint16[19]`, read/write.
 ///
 /// Sub-index *n + 1* is the period for TPDO kind *n* (see [`crate::TpdoKind`], whose discriminant
 /// is that same *n*); 0 disables that kind. A period changed here takes effect on the next tick,
@@ -711,6 +770,93 @@ pub const RELIEF_PULSE_MS: u16 = 0x3055;
 /// Without it, the lag between valve and sensor would make a single decision dump the whole
 /// vessel.
 pub const RELIEF_COOLDOWN_MS: u16 = 0x3056;
+
+// --- heater ----------------------------------------------------------------
+
+/// Temperature the heater's thermostat holds, centidegrees Celsius. `int16`, read/write.
+///
+/// Only used in thermostat mode ([`HEATER_MODE`] 1). The same unit a temperature sensor slot
+/// reports in ([`SENSOR_UNIT`] code 2). Writes above [`HEATER_SETPOINT_MAX`] are rejected with
+/// `ValueTooHigh`. Accepted on a node without a heater, like the rest of the config block, and
+/// ignored there.
+pub const HEATER_SETPOINT: u16 = 0x3070;
+
+/// Highest [`HEATER_SETPOINT`] a node accepts, centidegrees Celsius: 80 °C.
+pub const HEATER_SETPOINT_MAX: i16 = 8_000;
+
+// --- clock/direction steppers ----------------------------------------------
+//
+// A node may carry up to two stepper actuators (Nanotec PD2-C, or any other driver taking a step
+// clock and a direction level). Every object in this block is a 2-entry array, one per actuator.
+// On rev2 the high current output software PWM was moved to TIM5 to free TIM2, whose CH3/CH4 are
+// the only timer channels the board has left on pins it can reach.
+//
+// The pinout depends on how many are fitted, and is fixed at build time (pin muxing happens long
+// before any configuration is read):
+//
+//   one actuator          PA2 step, PA3 direction         (COM4 / COM3)
+//   two (`dual-stepper`)  PA2 step 0, PA3 step 1, PC10 direction 0, PA5 direction 1
+//
+// Both step clocks are channels of one timer, so *while both are moving* they move at the same
+// rate — the lower of the two planned rates. Targets, step counters and directions are fully
+// independent, an actuator that arrives stops on its own, and whenever only one is moving it runs
+// at its own planned rate. A config mapping actuator 1 on a firmware built without `dual-stepper`
+// is a build mistake, not a bus one: the node logs an error at boot and that actuator never moves.
+//
+// The master does not have to know. A stepper occupies an ordinary valve slot with kind 3
+// ([`VALVE_KIND`]) and is commanded exactly like a servo through [`VALVE_COMMANDED`] and friends.
+// What differs underneath:
+//
+// - No high current output. Its [`VALVE_POWER_HCO`]/[`VALVE_SIGNAL_HCO`] are both "none" and it
+//   never appears in [`HCO_OWNER`]. [`VALVE_CURRENT`] reads 0 for it — the shunts only cover the
+//   outputs — so stall detection ([`VALVE_STALL_MA`]) is not available and must stay at 0.
+// - [`VALVE_MEASURED`] is exact. The pulses are counted in hardware, so the reported position is
+//   measured rather than integrated from [`VALVE_TRAVEL_MS`], which is ignored for a stepper.
+// - The unpowered flag is accepted and ignored. ENABLE is strapped to 5 V, so the motor holds
+//   torque whenever it has power. The measured word never has bit 15 set for a stepper, and the
+//   fallback unpower flags ([`FALLBACK_A_UNPOWER`]/[`FALLBACK_B_UNPOWER`]) do nothing — the
+//   firmware warns at boot if they are set.
+//
+// Homing is [`STEPPER_POSITION`].
+
+/// Index of the valve slot each actuator is, or [`NO_INDEX`]. `uint8[2]`, read/write.
+///
+/// That slot's [`VALVE_KIND`] must be 3 (stepper), and the two actuators may not name the same
+/// slot. Both directions are checked on save, because a mismatch would either accept commands
+/// that move nothing or plan moves for a valve that drives an output pair.
+pub const STEPPER_VALVE: u16 = 0x3060;
+
+/// Step count at 0 promille. `int32[2]`, read/write.
+pub const STEPPER_CLOSED_STEPS: u16 = 0x3061;
+
+/// Step count at 1000 promille. `int32[2]`, read/write.
+///
+/// May be below [`STEPPER_CLOSED_STEPS`]: the sign of the difference is what picks the direction
+/// of rotation, so a reversed actuator is expressed by swapping the endpoints rather than by a
+/// separate invert flag. Equal endpoints are rejected on save — the actuator could never move.
+pub const STEPPER_OPEN_STEPS: u16 = 0x3062;
+
+/// Traverse speed, steps per second: the ceiling the ramp accelerates toward. `uint32[2]`,
+/// read/write.
+///
+/// Clamped to 20 kHz, well inside the PD2-C's 1 MHz limit — the update interrupt runs once per
+/// step, and the period has to stay long enough to give a direction change the 35 µs the driver
+/// wants to settle.
+pub const STEPPER_MAX_HZ: u16 = 0x3063;
+
+/// Pull-in rate, steps per second. `uint32[2]`, read/write.
+///
+/// The speed the motor can start *and* stop at without losing steps, which for a 42 mm frame is a
+/// few hundred steps per second. Every move begins here and the braking curve never falls below
+/// it, so the hard stop on arrival costs nothing. Zero is rejected on save: it means "never
+/// start", not "disabled".
+pub const STEPPER_START_HZ: u16 = 0x3064;
+
+/// Ramp rate, steps per second squared. `uint32[2]`, read/write.
+///
+/// 0 is legal and means no ramp at all: every move runs the whole way at the pull-in rate, which
+/// is safe but slow. The firmware says so at boot.
+pub const STEPPER_ACCEL_HZ_PER_S: u16 = 0x3065;
 
 #[cfg(test)]
 mod tests {
@@ -816,6 +962,16 @@ mod tests {
             RELIEF_POSITION,
             RELIEF_PULSE_MS,
             RELIEF_COOLDOWN_MS,
+            STEPPER_POSITION,
+            HEATER,
+            HEATER_MODE,
+            HEATER_SETPOINT,
+            STEPPER_VALVE,
+            STEPPER_CLOSED_STEPS,
+            STEPPER_OPEN_STEPS,
+            STEPPER_MAX_HZ,
+            STEPPER_START_HZ,
+            STEPPER_ACCEL_HZ_PER_S,
         ];
         let mut sorted = all;
         sorted.sort_unstable();

@@ -1,7 +1,7 @@
 use crate::board::pins_rev3::{HC_SENSE, HC2_SENSE, I_SENSE_1, I_SENSE_2, I_SENSE_3, TH_SENSE, V_MAIN_SENSE};
 use embassy_stm32::{
     Peri,
-    adc::{Adc, SampleTime},
+    adc::{Adc, AnyAdcChannel, SampleTime},
     peripherals::ADC1,
 };
 
@@ -60,6 +60,9 @@ pub struct OnboardSens3Peri {
     pub v_hco12_supply: Peri<'static, HC2_SENSE>,
     pub v_hco34_supply: Peri<'static, HC_SENSE>,
     pub v_temp: Peri<'static, TH_SENSE>,
+    /// The analog input a heating pad's NTC divider is on, chosen by the node settings
+    /// ([`crate::heater::HeaterConfig::ntc`]). `None` on a node without a heater.
+    pub heater_ntc: Option<AnyAdcChannel<'static, ADC1>>,
 }
 
 impl OnboardSensRev3 {
@@ -133,6 +136,20 @@ impl VoltageSens for OnboardSensRev3 {
         reading_v_to_system_v(self.reading_to_mv(reading))
     }
 }
+impl crate::heater::HeaterSensing for OnboardSensRev3 {
+    async fn heater_ntc_counts(&mut self) -> Option<u16> {
+        // The divider is ~5k source impedance, more than the fast rail sample time allows for,
+        // so this channel gets the longest one. Four samples average out ADC noise.
+        const SAMPLES: u32 = 4;
+        let pin = self.pins.heater_ntc.as_mut()?;
+        let mut sum = 0u32;
+        for _ in 0..SAMPLES {
+            sum += self.adc.read(pin, SampleTime::CYCLES239_5).await as u32;
+        }
+        Some((sum / SAMPLES) as u16)
+    }
+}
+
 impl crate::rail_sense::RailSensing for OnboardSensRev3 {
     async fn read(&mut self) -> Option<crate::rail_sense::Rails> {
         // Both arrays are in `RailId` order: Logic, Hco12, Hco34.

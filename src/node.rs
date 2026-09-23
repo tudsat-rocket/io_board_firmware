@@ -39,6 +39,7 @@ static HCO_CONTROLLER: StaticCell<HcoControllerRev2> = StaticCell::new();
 static HCO_CONTROLLER: StaticCell<HcoControllerRev3> = StaticCell::new();
 
 static CONTROL: StaticCell<BoardControl> = StaticCell::new();
+static STEPPER: StaticCell<crate::board::StepperPortTim2> = StaticCell::new();
 static SENSORS: StaticCell<BoardSensors> = StaticCell::new();
 /// The compile-time defaults, kept so a restore (0x1011) has something to revert to without a
 /// reboot.
@@ -53,7 +54,7 @@ pub const NODE_NAME: &str = "I/O [rev3]";
 pub use crate::config::NodeSettings;
 
 pub async fn spawn_node(spawner: Spawner, settings: NodeSettings) {
-    let board: Board = init_board(spawner).await;
+    let board: Board = init_board(spawner, settings.heater.map(|h| h.ntc)).await;
 
     let cancan_config = CanCanConfig {
         node_id: settings.node_id,
@@ -85,6 +86,19 @@ pub async fn spawn_node(spawner: Spawner, settings: NodeSettings) {
     let config = defaults.clone();
     // Legal but probably-unintended settings, complained about once rather than rejected.
     config.log_warnings();
+    // The one mismatch `Config` cannot check for itself: it has no idea how many step clocks this
+    // *build* actually put on pins. A node whose config maps the second actuator but was built
+    // without `dual-stepper` would accept commands for it and never move it.
+    for (id, stepper) in config.steppers.iter() {
+        if stepper.is_mapped() && id.index() >= crate::board::stepper::CHANNELS {
+            defmt::error!(
+                "stepper {} is configured but this firmware has only {} step clock(s): rebuild \
+                 with the `dual-stepper` feature or the actuator will never move",
+                id,
+                crate::board::stepper::CHANNELS
+            );
+        }
+    }
     {
         let mut store = STORE.lock().await;
         store.config = config;
@@ -103,7 +117,28 @@ pub async fn spawn_node(spawner: Spawner, settings: NodeSettings) {
     #[cfg(feature = "rev2")]
     let rails = crate::rail_sense::NoRails;
 
-    let control = CONTROL.init(BoardControl::new(outputs, rails, board.leds));
+    // Handed over whenever the board built one: the port costs two otherwise-unused pins and a
+    // timer, and stays silent until a config maps a stepper valve onto it.
+    let mut control = BoardControl::new(outputs, rails, board.leds);
+    match board.stepper {
+        Some(stepper) => control = control.with_stepper(STEPPER.init(stepper)),
+        None => {
+            if defaults.steppers.values().any(|s| s.is_mapped()) {
+                defmt::error!("a stepper is configured, but its step clock pin is the heater NTC input");
+            }
+        }
+    }
+    if let Some(heater) = settings.heater {
+        for hco in [heater.pair.power(), heater.pair.signal()] {
+            if let Some(valve) = defaults.hco_owner(hco) {
+                defmt::error!("heater output {} is also mapped to valve {}; the heater wins", hco, valve);
+            }
+        }
+        defmt::info!("heater on pair {}, NTC on {}, off until commanded at 0x2018", heater.pair, heater.ntc);
+        STORE.lock().await.heater_fitted = true;
+        control = control.with_heater(heater);
+    }
+    let control = CONTROL.init(control);
     spawner.spawn(run_control(control).unwrap());
 
     // --- sensors ------------------------------------------------------------

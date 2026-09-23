@@ -25,6 +25,10 @@ pub enum ValveKind {
     /// Hobby-style servo on a PWM output, optionally with a separate power output that lets us
     /// take it to [`crate::valves::ValveStatus::Unpowered`].
     Servo = 2,
+    /// Clock/direction stepper on the COM port, driven by [`crate::stepper`]. Uses no high
+    /// current output at all, so `power_hco` and `signal_hco` stay `None` and the rest of the
+    /// board's output arbitration never sees it.
+    Stepper = 3,
 }
 
 impl ValveKind {
@@ -33,6 +37,7 @@ impl ValveKind {
             0 => Some(Self::None),
             1 => Some(Self::Solenoid),
             2 => Some(Self::Servo),
+            3 => Some(Self::Stepper),
             _ => None,
         }
     }
@@ -120,6 +125,37 @@ impl ValveConfig {
         }
     }
 
+    /// The board's clock/direction stepper, as a valve slot.
+    ///
+    /// Everything about the actuator itself — travel in steps, speeds — lives in
+    /// [`super::StepperConfig`] rather than here, because there is only one of it per board. What
+    /// this slot contributes is the part every valve has: the command layer, the input clamp and
+    /// the fallback actions.
+    ///
+    /// `travel_ms` is left at the [`Self::unmapped`] default and never used: a stepper reports its
+    /// real position back through [`crate::valves::PositionFeedback`], so there is nothing to
+    /// estimate. It stays non-zero only because `sanity_check` insists on it for servos and a
+    /// single rule is easier to keep true than two.
+    pub const fn stepper() -> Self {
+        Self {
+            kind: ValveKind::Stepper,
+            power_hco: None,
+            signal_hco: None,
+            // Both stages keep the drive: ENABLE is strapped to 5 V and there is no output to
+            // drop, so an `unpower: true` here would be a promise the hardware cannot keep. The
+            // default is the truth rather than the inherited servo behaviour.
+            fallback_a: FallbackAction {
+                position: 0,
+                unpower: false,
+            },
+            fallback_b: FallbackAction {
+                position: PROMILLE_MAX,
+                unpower: false,
+            },
+            ..Self::unmapped()
+        }
+    }
+
     pub const fn solenoid_on(hco: HcoId) -> Self {
         Self {
             kind: ValveKind::Solenoid,
@@ -150,8 +186,17 @@ impl ValveConfig {
         promille.min(PROMILLE_MAX).clamp(self.min_promille, self.max_promille.min(PROMILLE_MAX))
     }
 
+    /// Is there something on this slot that can actually be commanded?
+    ///
+    /// A stepper is the one kind that is mapped without owning an output — its actuator hangs off
+    /// the COM port, and whether that port is configured is [`super::StepperConfig::is_mapped`]'s
+    /// question, cross-checked against this one in [`super::Config::sanity_check`].
     pub fn is_mapped(&self) -> bool {
-        self.kind != ValveKind::None && self.signal_hco.is_some()
+        match self.kind {
+            ValveKind::None => false,
+            ValveKind::Stepper => true,
+            ValveKind::Solenoid | ValveKind::Servo => self.signal_hco.is_some(),
+        }
     }
 }
 

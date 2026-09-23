@@ -20,9 +20,15 @@ default:
 build:
     cargo build --release {{ features }}
 
-# Build one node binary (node2..node7, node8reg, generic).
+# Build one node binary (node2..node7, node8reg, node9, generic).
 build-one board:
     cargo build --release {{ features }} --bin {{ board }}
+
+# node10 carries two actuators, which needs the `dual-stepper` pinout: PA3 becomes the second
+# step clock and both direction lines move to PC10/PA5. Kept out of `build` and `flash` because
+# the feature is a different pinout, not an addition — see src/board/stepper.rs.
+build-dual:
+    cargo build --release {{ features }},dual-stepper --bin node10
 
 # Build and flash every vehicle board over CAN. Keeps going if one board is silent.
 flash: build _cancan
@@ -45,19 +51,25 @@ flash: build _cancan
         exit 1
     fi
 
-# Build and flash one board over CAN, by binary name (node2..node7, node8reg, generic).
+# Build and flash one board over CAN, by binary name (node2..node7, node8reg, node9, node10,
+# node15, node16, generic).
 flash-one board: _cancan
     #!/usr/bin/env bash
     set -euo pipefail
     id=""
-    for entry in {{ boards }} generic:6; do
+    for entry in {{ boards }} generic:6 node8reg:8 node9:9 node10:10 node15:15 node16:16; do
         [ "${entry%%:*}" = "{{ board }}" ] && id="${entry##*:}"
     done
     if [ -z "${id}" ]; then
-        echo "unknown board '{{ board }}' — known: {{ boards }} generic:6" >&2
+        echo "unknown board '{{ board }}' — known: {{ boards }} generic:6 node8reg:8 node9:9 node10:10 node15:15 node16:16" >&2
         exit 1
     fi
-    cargo build --release {{ features }} --bin {{ board }}
+    extra=""
+    [ "{{ board }}" = "node10" ] && extra=",dual-stepper"
+    features="{{ features }}"
+    # node15/node16 are rev2 boards whatever `rev` is set to.
+    case "{{ board }}" in node15|node16) features="--no-default-features --features rev2,hardware" ;; esac
+    cargo build --release ${features}${extra} --bin {{ board }}
     {{ cancan }} {{ iface_arg }} flash "${id}" "{{ target_dir }}/{{ board }}"
 
 # List the boards answering on the bus (probes all 256 cancan node ids).

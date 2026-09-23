@@ -21,7 +21,12 @@ pub use high_current_outputs::*;
 
 pub mod ext_flash;
 pub mod leds;
+/// The clock/direction stepper port, on both revisions. rev2 used to spend TIM2 on its high
+/// current output software PWM; that moved to TIM5 so this could have PA2/PA3, which are the only
+/// COM pins with timer channels behind them. See [`HcoControllerRev2::new`].
+pub mod stepper;
 pub use leds::{LedsState, StateLedPub};
+pub use stepper::StepperPortTim2;
 mod hw;
 
 use crate::config::persist::NorConfigStore;
@@ -59,6 +64,9 @@ pub struct Board {
     pub can1: embassy_stm32::can::Can<'static>,
     #[cfg(feature = "rev3")]
     pub onboard_sens: OnboardSensRev3,
+    /// PA2 step, PA3 direction — COM4 on the rev3 silkscreen, COM3 on rev2's. Constructed unless
+    /// a heater NTC claims PA2; otherwise it stays idle until a config maps a stepper valve.
+    pub stepper: Option<StepperPortTim2>,
     /// `None` when the NOR flash did not identify itself, in which case the node runs on its
     /// compile-time factory defaults and refuses to persist. Both revisions populate the chip.
     pub config_store: Option<ConfigStore>,
@@ -107,7 +115,9 @@ embassy_stm32::bind_interrupts!(struct Irqs {
     DMA1_CHANNEL1 => dma::InterruptHandler<DMA1_CH1>;
 });
 
-pub async fn init_board(spawner: Spawner) -> Board {
+/// `heater_ntc` is the analog input a heating pad's NTC is on, if the node has one. The pin is
+/// only claimed when asked for.
+pub async fn init_board(spawner: Spawner, heater_ntc: Option<crate::heater::AnalogPin>) -> Board {
     let p = hw::setup();
 
     let mut iwdg = IndependentWatchdog::new(p.IWDG, WATCHDOG_TIMEOUT_US);
@@ -159,10 +169,36 @@ pub async fn init_board(spawner: Spawner) -> Board {
     let hco_initial = HcoState::default();
 
     #[cfg(feature = "rev2")]
-    let hco_controller = HcoControllerRev2::new(p.PC0, p.PC15, p.PB0, p.PB1, p.TIM2, p.TIM3, hco_initial).await;
+    let hco_controller = HcoControllerRev2::new(p.PC0, p.PC15, p.PB0, p.PB1, p.TIM5, p.TIM3, hco_initial).await;
 
     #[cfg(feature = "rev3")]
     let hco_controller = HcoControllerRev3::new(p.PA7, p.PA8, p.PB0, p.PB1, p.TIM1, p.TIM3, hco_initial).await;
+
+    // A heater NTC on PA2 takes the step clock pin, and with it the whole stepper port. Only on
+    // rev3: rev2 cannot read the NTC anyway, so it keeps its stepper.
+    #[cfg(feature = "rev3")]
+    let ntc_on_pa2 = heater_ntc == Some(crate::heater::AnalogPin::Pa2);
+    #[cfg(feature = "rev2")]
+    let ntc_on_pa2 = false;
+
+    // PA2/PA3 are the only COM pins on this board with timer channels behind them, which is what
+    // makes them the step clock and direction line. Same two pins on both revisions; only the
+    // silkscreen differs (COM4 on rev3, COM3 on rev2). See `board::stepper`.
+    //
+    // With two actuators PA3 becomes the second step clock and both direction lines move onto
+    // plain GPIO. PC10 and PA5 are unused by the firmware on both revisions; they are the two
+    // pins to check against the schematic, and the only two that can move without consequence.
+    #[cfg_attr(feature = "rev2", allow(unused_variables))]
+    let (stepper, pa2) = if ntc_on_pa2 {
+        defmt::info!("PA2 is the heater NTC input, no stepper port on this node");
+        (None, Some(p.PA2))
+    } else {
+        #[cfg(not(feature = "dual-stepper"))]
+        let stepper = StepperPortTim2::new(p.PA2, p.PA3, p.TIM2);
+        #[cfg(feature = "dual-stepper")]
+        let stepper = StepperPortTim2::new(p.PA2, p.PA3, p.PC10, p.PA5, p.TIM2);
+        (Some(stepper), None)
+    };
 
     // let can_open_interface =
     //     CanOpenInterface::new((can_out.publisher().unwrap(), can_in.subscriber().unwrap()), hco_controller);
@@ -178,6 +214,30 @@ pub async fn init_board(spawner: Spawner) -> Board {
     spawner.spawn(leds::run_leds(leds, LedsState::default(), led_pub_sub.subscriber().unwrap()).unwrap());
 
     #[cfg(feature = "rev3")]
+    let heater_ntc = {
+        use crate::heater::AnalogPin;
+        use embassy_stm32::adc::AdcChannel;
+        match heater_ntc {
+            None => None,
+            Some(AnalogPin::Pa2) => pa2.map(|pin| pin.degrade_adc()),
+            Some(AnalogPin::Pa6) => Some(p.PA6.degrade_adc()),
+            Some(AnalogPin::Pc5) => Some(p.PC5.degrade_adc()),
+            Some(AnalogPin::Pc4) => Some(p.PC4.degrade_adc()),
+            #[cfg(not(feature = "dual-stepper"))]
+            Some(AnalogPin::Pa5) => Some(p.PA5.degrade_adc()),
+            #[cfg(feature = "dual-stepper")]
+            Some(AnalogPin::Pa5) => {
+                defmt::error!("heater NTC on PA5, but this build drives a stepper direction line on it");
+                None
+            }
+        }
+    };
+    #[cfg(feature = "rev2")]
+    if heater_ntc.is_some() {
+        defmt::error!("heater configured, but rev2 has no ADC wired up; the pad stays off");
+    }
+
+    #[cfg(feature = "rev3")]
     let onboard_sens = OnboardSensRev3::new(
         p.ADC1,
         // The HCO pairs are crossed against the schematic label numbering on this revision: PA1
@@ -191,6 +251,7 @@ pub async fn init_board(spawner: Spawner) -> Board {
             v_hco12_supply: p.PC2,
             v_hco34_supply: p.PC3,
             v_temp: p.PA4,
+            heater_ntc,
         },
         adc::SampleTime::CYCLES7_5,
     )
@@ -204,6 +265,7 @@ pub async fn init_board(spawner: Spawner) -> Board {
         can1,
         #[cfg(feature = "rev3")]
         onboard_sens,
+        stepper,
         config_store,
         // for cancan's A/B image handling
         flash_peri: p.FLASH,
