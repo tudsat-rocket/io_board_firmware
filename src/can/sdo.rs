@@ -57,6 +57,8 @@ impl SdoServer {
             }
 
             if cob_id != SDO_REQUEST_BASE + self.node_id as u16 {
+                // NOTE: any message from master to node considered heartbeat
+                safety::note_master_heartbeat();
                 continue;
             }
 

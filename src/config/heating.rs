@@ -23,10 +23,66 @@
 //! convention [`super::ReliefConfig::threshold`] uses, and for the same reason: no conversion
 //! between the number in the config and the number on the wire, so none can be wrong.
 //!
+//! # Several pads, one thermostat
+//!
+//! A heater may switch more than one output ([`HcoSet`]): two pads bonded to the same valve, say,
+//! regulated on the one thermistor between them. They are one thermostat, not two — they share a
+//! setpoint, a dead band and a state at 0x2019, and switch on and off together. Two pads that
+//! should regulate independently belong in two heater entries, which may still watch one slot.
+//!
 //! All of it is runtime-writable (0x3080..0x3084) and persisted, so a pad can be re-aimed at a
 //! different slot, retuned, or switched off without a firmware build.
 
 use crate::index::{HcoId, SensorSlot};
+
+/// A set of high current outputs, as a bitmask: bit *n* is [`HcoId`] index *n*, so bit 0 is the
+/// output silkscreened 1. The same layout goes on the wire at 0x3081 and into flash.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, defmt::Format)]
+pub struct HcoSet(u8);
+
+impl HcoSet {
+    pub const EMPTY: Self = Self(0);
+    /// Every bit that names an output on this board.
+    const VALID: u8 = (1 << HcoId::COUNT) - 1;
+
+    pub const fn of(hco: HcoId) -> Self {
+        Self(1 << hco.index())
+    }
+
+    pub const fn with(self, hco: HcoId) -> Self {
+        Self(self.0 | Self::of(hco).0)
+    }
+
+    /// From a wire or flash byte. `None` for a bit past the last output — a mistake to reject,
+    /// not a bit to ignore.
+    pub const fn from_bits(bits: u8) -> Option<Self> {
+        if bits & !Self::VALID == 0 {
+            Some(Self(bits))
+        } else {
+            None
+        }
+    }
+
+    pub const fn bits(self) -> u8 {
+        self.0
+    }
+
+    pub const fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    pub const fn contains(self, hco: HcoId) -> bool {
+        self.0 & Self::of(hco).0 != 0
+    }
+
+    pub const fn intersects(self, other: Self) -> bool {
+        self.0 & other.0 != 0
+    }
+
+    pub fn iter(self) -> impl Iterator<Item = HcoId> {
+        HcoId::ALL.into_iter().filter(move |&hco| self.contains(hco))
+    }
+}
 
 /// The heating pad on one valve. See [`crate::heating`] for the thermostat itself.
 #[derive(Clone, Copy, Debug, defmt::Format)]
@@ -34,8 +90,9 @@ pub struct ValveHeatingConfig {
     /// Whether the thermostat runs. The switch a master flips to stop heating without forgetting
     /// how the pad is wired; `false` is also what an unconfigured slot has.
     pub enabled: bool,
-    /// The output that switches the pad. `None` means no pad on this valve.
-    pub hco: Option<HcoId>,
+    /// The outputs that switch the pad, or pads — all together, from the one thermostat. Empty
+    /// means no pad on this valve.
+    pub outputs: HcoSet,
     /// The slot reporting the pad's temperature. `None` means no pad on this valve: a thermostat
     /// with nothing to regulate on is not a thermostat, so this is as load-bearing as the output.
     pub sensor: Option<SensorSlot>,
@@ -60,7 +117,7 @@ impl ValveHeatingConfig {
     pub const fn none() -> Self {
         Self {
             enabled: false,
-            hco: None,
+            outputs: HcoSet::EMPTY,
             sensor: None,
             setpoint: i16::MIN,
             hysteresis: Self::DEFAULT_HYSTERESIS,
@@ -71,11 +128,17 @@ impl ValveHeatingConfig {
     pub const fn new(hco: HcoId, sensor: SensorSlot, setpoint: i16) -> Self {
         Self {
             enabled: true,
-            hco: Some(hco),
+            outputs: HcoSet::of(hco),
             sensor: Some(sensor),
             setpoint,
             ..Self::none()
         }
+    }
+
+    /// Switch another pad on `hco` from this same thermostat, so both follow the one sensor.
+    pub const fn also_on(mut self, hco: HcoId) -> Self {
+        self.outputs = self.outputs.with(hco);
+        self
     }
 
     /// Widen or narrow the dead band, in the sensor slot's unit.
@@ -90,12 +153,12 @@ impl ValveHeatingConfig {
         self
     }
 
-    /// Whether a pad is wired up at all — an output to switch and a slot to watch.
+    /// Whether a pad is wired up at all — at least one output to switch and a slot to watch.
     ///
     /// Both halves are required together. An output with no sensor would be a heater with no way
     /// to stop, and a sensor with no output is a temperature nobody acts on.
     pub const fn is_fitted(&self) -> bool {
-        self.hco.is_some() && self.sensor.is_some()
+        !self.outputs.is_empty() && self.sensor.is_some()
     }
 
     /// Whether the thermostat should run this tick.
@@ -103,9 +166,9 @@ impl ValveHeatingConfig {
         self.enabled && self.is_fitted()
     }
 
-    /// Whether `hco` is the output this pad switches.
-    pub fn switches(&self, hco: HcoId) -> bool {
-        self.hco == Some(hco)
+    /// Whether `hco` is one of the outputs this heater switches.
+    pub const fn switches(&self, hco: HcoId) -> bool {
+        self.outputs.contains(hco)
     }
 }
 
@@ -125,7 +188,7 @@ mod tests {
         assert!(!no_sensor.is_fitted(), "an output with no sensor is a heater with no way to stop");
 
         let mut no_output = full;
-        no_output.hco = None;
+        no_output.outputs = HcoSet::EMPTY;
         assert!(!no_output.is_fitted(), "a sensor with no output is a temperature nobody acts on");
 
         assert!(!full.disabled().is_armed(), "and it still has to be switched on");
@@ -144,5 +207,23 @@ mod tests {
         assert!(pad.switches(HcoId::Hco2));
         assert!(!pad.switches(HcoId::Hco3), "the other half of the pair is nothing to do with it");
         assert!(!ValveHeatingConfig::none().switches(HcoId::Hco2), "and an unfitted pad switches nothing");
+    }
+
+    #[test]
+    fn two_pads_can_follow_one_sensor() {
+        let pads = ValveHeatingConfig::new(HcoId::Hco2, SensorSlot::Slot0, 0).also_on(HcoId::Hco3);
+        assert!(pads.is_fitted());
+        assert!(pads.switches(HcoId::Hco2) && pads.switches(HcoId::Hco3));
+        assert!(!pads.switches(HcoId::Hco0));
+        assert_eq!(pads.outputs.iter().collect::<Vec<_>>(), [HcoId::Hco2, HcoId::Hco3]);
+        assert_eq!(pads.outputs.bits(), 0b1100, "bit n is output n+1 as silkscreened");
+    }
+
+    /// A bit past the fourth output names nothing on the board.
+    #[test]
+    fn an_output_set_rejects_bits_past_the_board() {
+        assert_eq!(HcoSet::from_bits(0b1111).map(|s| s.iter().count()), Some(4));
+        assert_eq!(HcoSet::from_bits(0), Some(HcoSet::EMPTY));
+        assert_eq!(HcoSet::from_bits(0b1_0000), None);
     }
 }

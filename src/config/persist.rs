@@ -11,7 +11,7 @@
 
 use embedded_storage_async::nor_flash::NorFlash;
 
-use super::ValveHeatingConfig;
+use super::{HcoSet, ValveHeatingConfig};
 use super::{
     Config, FallbackAction, ReliefConfig, SensorCalib, SensorKind, SensorSlotConfig, Unit, ValveConfig, ValveKind,
 };
@@ -32,7 +32,9 @@ const MAGIC: u32 = 0x4249_4F43; // "COIB", little-endian "IOCB"
 ///    unchanged — hence a bump rather than a silent widening.
 /// 5: each sensor slot gained the COM5/COM6 pin an `Ntc` kind reads (`SensorSlotConfig::analog`).
 /// 6: added the per-valve heating pads (`ValveHeatingConfig`), one block per `ValveId`.
-const VERSION: u16 = 6;
+/// 7: a heating pad switches a set of outputs (`HcoSet`, a bitmask) instead of one optional
+///    output. Same byte, different meaning — an old `2` (Hco2) would read as Hco1 — hence a bump.
+const VERSION: u16 = 7;
 
 const HEADER_LEN: usize = 12;
 const BODY_LEN: usize = 483;
@@ -227,7 +229,7 @@ fn write_body(cfg: &Config, out: &mut [u8]) -> usize {
 
     for h in cfg.heating.values() {
         w.u8(h.enabled as u8);
-        w.opt_id(h.hco);
+        w.u8(h.outputs.bits());
         w.opt_id(h.sensor);
         w.u16(h.setpoint as u16);
         w.u16(h.hysteresis);
@@ -320,7 +322,7 @@ fn read_body(body: &[u8]) -> Option<Config> {
     for i in ValveId::ALL {
         cfg.heating[i] = ValveHeatingConfig {
             enabled: r.u8() != 0,
-            hco: r.opt_id().ok()?,
+            outputs: HcoSet::from_bits(r.u8())?,
             sensor: r.opt_id().ok()?,
             setpoint: r.u16() as i16,
             hysteresis: r.u16(),
@@ -584,7 +586,7 @@ mod tests {
         use crate::config::ValveHeatingConfig;
         let cfg = Config::new().with_valve_heating(
             ValveId::Valve1,
-            ValveHeatingConfig::new(HcoId::Hco2, SensorSlot::Slot3, 3_500).with_hysteresis(250),
+            ValveHeatingConfig::new(HcoId::Hco2, SensorSlot::Slot3, 3_500).also_on(HcoId::Hco3).with_hysteresis(250),
         );
 
         let mut buf = [0u8; BUF_LEN];
@@ -593,7 +595,7 @@ mod tests {
 
         let h = back.heating[ValveId::Valve1];
         assert!(h.enabled && h.is_armed());
-        assert_eq!(h.hco, Some(HcoId::Hco2));
+        assert_eq!(h.outputs, HcoSet::of(HcoId::Hco2).with(HcoId::Hco3));
         assert_eq!(h.sensor, Some(SensorSlot::Slot3));
         assert_eq!(h.setpoint, 3_500);
         assert_eq!(h.hysteresis, 250);

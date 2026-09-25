@@ -319,7 +319,7 @@ impl<R: RailSensing + AnalogSensing> Control<R> {
             if inputs.raw_debug {
                 continue;
             }
-            if let Some(hco) = cfg.hco {
+            for hco in cfg.outputs.iter() {
                 desired[hco] = digital(on);
             }
         }
@@ -648,6 +648,35 @@ mod tests {
         let outcome = ctl.decide(tick);
         assert_eq!(outcome.heating_states[ValveId::Valve0], HeatingState::SensorFault as u8);
         assert_eq!(ctl.outputs.current()[HcoId::Hco2], digital(false));
+    }
+
+    /// Two pads on one thermostat: one cold reading switches both outputs, one warm reading both
+    /// off again.
+    #[test]
+    fn two_pads_follow_one_sensor_together() {
+        use crate::config::{SensorSlotConfig, ValveHeatingConfig};
+        use crate::index::{AnalogInput, HcoId, SensorSlot};
+
+        let mut ctl = test_control();
+        let cfg = Config::new()
+            .with_quiet_sensor(SensorSlot::Slot1, SensorSlotConfig::ntc(AnalogInput::Com5Pin1))
+            .with_valve_heating(
+                ValveId::Valve0,
+                ValveHeatingConfig::new(HcoId::Hco2, SensorSlot::Slot1, 3_000).also_on(HcoId::Hco3),
+            );
+        assert!(cfg.sanity_check().is_ok());
+
+        let mut tick = inputs(cfg.clone(), [0, 0, 0, 0], Instant::from_millis(0));
+        tick.sensor_value[SensorSlot::Slot1] = 2_000;
+        ctl.decide(tick);
+        assert_eq!(ctl.outputs.current()[HcoId::Hco2], digital(true));
+        assert_eq!(ctl.outputs.current()[HcoId::Hco3], digital(true));
+
+        let mut tick = inputs(cfg, [0, 0, 0, 0], Instant::from_millis(20));
+        tick.sensor_value[SensorSlot::Slot1] = 3_500;
+        ctl.decide(tick);
+        assert_eq!(ctl.outputs.current()[HcoId::Hco2], digital(false));
+        assert_eq!(ctl.outputs.current()[HcoId::Hco3], digital(false));
     }
 
     /// A heater regulates on its own, so a master that goes quiet must not stop it: a valve that

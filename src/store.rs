@@ -19,7 +19,7 @@ use embassy_sync::mutex::Mutex;
 use embassy_sync::signal::Signal;
 use zencan_common::sdo::AbortCode;
 
-use crate::config::{Config, SensorKind, SensorSlotConfig, Unit, ValveKind};
+use crate::config::{Config, HcoSet, SensorKind, SensorSlotConfig, Unit, ValveKind};
 use crate::index::{
     AmplifierId, AnalogInput, HcoId, I2cBus, Id, PdoSensorChannel, PerAdcSlot, PerAnalogInput, PerErrorCounter, PerHco,
     PerI2cBus, PerPdoSensor, PerRail, PerSensorSlot, PerValve, SensorSlot, ValveId,
@@ -395,7 +395,7 @@ pub fn read(store: &Store, index: u16, sub: u8) -> Result<OdValue, AbortCode> {
         RELIEF_COOLDOWN_MS => scalar(OdValue::u16(cfg.relief.cooldown_ms)),
 
         VALVE_HEATING_ENABLED => read_heating_array(cfg, sub, |h| OdValue::u8(h.enabled as u8)),
-        VALVE_HEATING_HCO => read_heating_array(cfg, sub, |h| OdValue::u8(hco_to_wire(h.hco))),
+        VALVE_HEATING_HCO => read_heating_array(cfg, sub, |h| OdValue::u8(h.outputs.bits())),
 
         VALVE_HEATING_SENSOR => {
             read_heating_array(cfg, sub, |h| OdValue::u8(h.sensor.map_or(NO_INDEX, SensorSlot::as_u8)))
@@ -897,7 +897,7 @@ pub fn write(store: &mut Store, index: u16, sub: u8, data: &[u8]) -> Result<(), 
         }
         VALVE_HEATING_HCO => {
             let i: ValveId = slot(sub)?;
-            store.config.heating[i].hco = hco_from_wire(as_u8(data)?)?;
+            store.config.heating[i].outputs = HcoSet::from_bits(as_u8(data)?).ok_or(AbortCode::InvalidValue)?;
             store.pending.config = true;
         }
 
@@ -1185,33 +1185,34 @@ mod tests {
         let mut s = store_with_servo();
         let sub = ValveId::Valve0.as_u8() + 1;
 
-        write(&mut s, od::VALVE_HEATING_HCO, sub, &[HcoId::Hco2.silkscreen()]).unwrap();
+        // A bitmask, bit n for output n+1: two pads on outputs 3 and 4, following the one slot.
+        write(&mut s, od::VALVE_HEATING_HCO, sub, &[0b1100]).unwrap();
         write(&mut s, od::VALVE_HEATING_SENSOR, sub, &[SensorSlot::Slot1.as_u8()]).unwrap();
         write(&mut s, od::VALVE_HEATING_SETPOINT, sub, &3_000i16.to_le_bytes()).unwrap();
         write(&mut s, od::VALVE_HEATING_HYSTERESIS, sub, &250u16.to_le_bytes()).unwrap();
         write(&mut s, od::VALVE_HEATING_ENABLED, sub, &[1]).unwrap();
 
         let h = s.config.heating[ValveId::Valve0];
-        assert_eq!(h.hco, Some(HcoId::Hco2));
+        assert_eq!(h.outputs, HcoSet::of(HcoId::Hco2).with(HcoId::Hco3));
         assert_eq!(h.sensor, Some(SensorSlot::Slot1));
         assert_eq!(h.setpoint, 3_000);
         assert_eq!(h.hysteresis, 250);
         assert!(h.is_armed());
 
-        assert_eq!(read(&s, od::VALVE_HEATING_HCO, sub).unwrap().data(), &[HcoId::Hco2.silkscreen()]);
+        assert_eq!(read(&s, od::VALVE_HEATING_HCO, sub).unwrap().data(), &[0b1100]);
         assert_eq!(read(&s, od::VALVE_HEATING_SETPOINT, sub).unwrap().data(), &3_000i16.to_le_bytes());
         assert_eq!(read(&s, od::VALVE_HEATING_SENSOR, sub).unwrap().data(), &[SensorSlot::Slot1.as_u8()]);
 
-        // Both "none" sentinels round-trip: 0 for an output, 0xFF for a slot.
+        // Both "none" sentinels round-trip: an empty set of outputs, 0xFF for a slot.
         write(&mut s, od::VALVE_HEATING_HCO, sub, &[0]).unwrap();
         write(&mut s, od::VALVE_HEATING_SENSOR, sub, &[NO_INDEX]).unwrap();
-        assert_eq!(s.config.heating[ValveId::Valve0].hco, None);
+        assert!(s.config.heating[ValveId::Valve0].outputs.is_empty());
         assert_eq!(s.config.heating[ValveId::Valve0].sensor, None);
         assert_eq!(read(&s, od::VALVE_HEATING_HCO, sub).unwrap().data(), &[0]);
         assert_eq!(read(&s, od::VALVE_HEATING_SENSOR, sub).unwrap().data(), &[NO_INDEX]);
 
-        // An output number that is not on the board is a mistake, not a wrapped index.
-        assert!(matches!(write(&mut s, od::VALVE_HEATING_HCO, sub, &[5]), Err(AbortCode::InvalidValue)));
+        // A bit past the fourth output names nothing on the board: a mistake, not a bit to ignore.
+        assert!(matches!(write(&mut s, od::VALVE_HEATING_HCO, sub, &[0b1_0000]), Err(AbortCode::InvalidValue)));
     }
 
     /// What the pad is doing is observation, not intent: the master reads it and cannot write it.

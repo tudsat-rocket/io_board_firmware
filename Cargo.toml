@@ -40,16 +40,23 @@ name = "node6"
 path = "src/bin/node6.rs"
 required-features = ["hardware"]
 
+# node7/node8/node9 run on rev2 boards. Requiring `rev2` keeps the rev3 build from producing (and
+# overwriting) them; the justfile builds them in a separate `--features rev2,hardware` pass.
+
 [[bin]]
 name = "node7"
 path = "src/bin/node7.rs"
-required-features = ["hardware"]
+required-features = ["hardware", "rev2"]
 
-# The self-regulating relief node: watches a transducer and bleeds its own valve.
 [[bin]]
-name = "node8reg"
-path = "src/bin/node8reg.rs"
-required-features = ["hardware"]
+name = "node8"
+path = "src/bin/node8.rs"
+required-features = ["hardware", "rev2"]
+
+[[bin]]
+name = "node9"
+path = "src/bin/node9.rs"
+required-features = ["hardware", "rev2"]
 
 # The bench node, for a board that is not installed in the vehicle.
 [[bin]]

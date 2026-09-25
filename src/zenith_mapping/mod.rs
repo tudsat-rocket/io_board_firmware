@@ -13,7 +13,7 @@
 use crate::index::{AmplifierId::*, AnalogInput::*, HcoId, HcoPair, I2cBus::*, SensorSlot::*, ValveId::*};
 use crate::zenith_mapping::sensors::Transducer;
 use crate::{
-    config::{Config, NodeSettings, ReliefConfig, SensorSlotConfig, ValveConfig, ValveHeatingConfig},
+    config::{Config, HcoSet, NodeSettings, ReliefConfig, SensorSlotConfig, ValveConfig, ValveHeatingConfig},
     index::{AnalogInput, SensorSlot},
 };
 
@@ -66,6 +66,9 @@ const fn ntc(input: crate::index::AnalogInput) -> SensorSlotConfig {
 ///     .with_quiet_sensor(Slot1, ntc(Com5Pin1))
 ///     .with_valve_heating(Valve0, heating(HcoId::Hco2, Slot1, 3_000))
 /// ```
+///
+/// A second pad on the same thermistor switches together with the first:
+/// `heating(HcoId::Hco2, Slot1, 3_000).also_on(HcoId::Hco3)`.
 #[allow(dead_code, reason = "a factory default waiting on the harness that uses it")]
 const fn heating(hco: HcoId, sensor: crate::index::SensorSlot, setpoint_centi_c: i16) -> ValveHeatingConfig {
     ValveHeatingConfig::new(hco, sensor, setpoint_centi_c)
@@ -82,16 +85,17 @@ pub const NODE4: NodeSettings = NodeSettings::new(
     4,
     Config::new()
         .with_valve(Valve0, ValveConfig::solenoid_on(HcoId::Hco0))
-        .with_sensor(SensorSlot::Slot0, SensorSlotConfig::ntc(AnalogInput::Com5Pin1))
+        .with_sensor(SensorSlot::Slot0, SensorSlotConfig::ntc_to_supply(AnalogInput::Com6Pin1))
         .with_valve_heating(
             Valve0,
             ValveHeatingConfig {
                 enabled: true,
-                hco: Some(HcoId::Hco2),
-                sensor: Some(Slot2),
+                outputs: HcoSet::of(HcoId::Hco2),
+                sensor: Some(Slot0),
                 setpoint: 4_000,
                 hysteresis: 500,
-            },
+            }
+            .also_on(HcoId::Hco3),
         ),
 );
 
@@ -132,29 +136,47 @@ pub const NODE6: NodeSettings = NodeSettings::new(
     // .with_sensor(Slot3, pressure(Bus1, Amp1, sensors::COMB_CHAMBER_2_P)),
 );
 
-/// Node 7 — lower propulsion, igniter control. Nothing wired yet.
 pub const NODE7: NodeSettings = NodeSettings::new(7, Config::new());
+pub const NODE8: NodeSettings = NodeSettings::new(8, Config::new());
+pub const NODE9: NodeSettings = NodeSettings::new(9, Config::new());
 
-/// 60 bar, in the centibar that a 100 bar transducer slot reports.
-pub const RELIEF_THRESHOLD_60_BAR: i16 = 6000;
+// /// 60 bar, in the centibar that a 100 bar transducer slot reports.
+// pub const RELIEF_THRESHOLD_60_BAR: i16 = 6000;
+//
+// /// Node 8 — self-regulating relief node.
+// ///
+// /// A tank that is being heated with every valve shut keeps rising in pressure on its own, and the
+// /// master may be slow to react or briefly off the bus when it happens. This node watches one
+// /// transducer and bleeds its own valve when the pressure gets away from it — see
+// /// [`crate::relief`]. The rest of the time it is an ordinary slave.
+// ///
+// /// The relief valve is a **solenoid** on HCO1 rather than a servo, deliberately: the relief pulse
+// /// is half a second, and a servo that takes a second and a half to travel would never reach the
+// /// open position within one. `Config::log_warnings` complains at boot if that combination is ever
+// /// configured by hand.
+// pub const NODE8_REG: NodeSettings = NodeSettings::new(
+//     8,
+//     Config::new()
+//         .with_valve(Valve0, ValveConfig::solenoid_on(HcoId::Hco0))
+//         .with_sensor(Slot0, pressure(Bus0, Amp0, sensors::OX_TANK_UPPER_P))
+//         .with_relief(
+//             ReliefConfig::new(Valve0, Slot0, RELIEF_THRESHOLD_60_BAR).with_pulse_ms(500).with_cooldown_ms(500),
+//         ),
+// );
+//
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-/// Node 8 — self-regulating relief node.
-///
-/// A tank that is being heated with every valve shut keeps rising in pressure on its own, and the
-/// master may be slow to react or briefly off the bus when it happens. This node watches one
-/// transducer and bleeds its own valve when the pressure gets away from it — see
-/// [`crate::relief`]. The rest of the time it is an ordinary slave.
-///
-/// The relief valve is a **solenoid** on HCO1 rather than a servo, deliberately: the relief pulse
-/// is half a second, and a servo that takes a second and a half to travel would never reach the
-/// open position within one. `Config::log_warnings` complains at boot if that combination is ever
-/// configured by hand.
-pub const NODE8_REG: NodeSettings = NodeSettings::new(
-    8,
-    Config::new()
-        .with_valve(Valve0, ValveConfig::solenoid_on(HcoId::Hco0))
-        .with_sensor(Slot0, pressure(Bus0, Amp0, sensors::OX_TANK_UPPER_P))
-        .with_relief(
-            ReliefConfig::new(Valve0, Slot0, RELIEF_THRESHOLD_60_BAR).with_pulse_ms(500).with_cooldown_ms(500),
-        ),
-);
+    /// `node::spawn_node` panics on a factory default that fails its own sanity check, and it
+    /// does so *before* cancan is spawned — so the image never confirms, the bootloader reverts
+    /// it, and the symptom on the bus is a board quietly running the previous firmware. That is
+    /// an expensive way to find a typo in this file, so every mapping in it is checked here.
+    #[test]
+    fn every_vehicle_mapping_boots() {
+        for settings in [NODE2, NODE3, NODE4, NODE5, NODE6, NODE7, NODE8_REG] {
+            let id = settings.node_id;
+            assert!(settings.config.sanity_check().is_ok(), "node {id}: {:?}", settings.config.sanity_check());
+        }
+    }
+}

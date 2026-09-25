@@ -837,11 +837,14 @@ pub const RELIEF_COOLDOWN_MS: u16 = 0x3056;
 /// on regardless can be driven from raw debug mode, where it is an explicit, visible decision.
 pub const VALVE_HEATING_ENABLED: u16 = 0x3080;
 
-/// Which high current output switches each valve's pad: 1..=4 as silkscreened, 0 for none.
-/// `uint8[4]`, read/write.
+/// Which high current outputs switch each valve's pad, as a bitmask: bit *n* is the output
+/// silkscreened *n + 1*, so `0b0100` is output 3 and `0b1100` is outputs 3 and 4. 0 for none.
+/// `uint8[4]`, read/write. Bits above the fourth are rejected.
 ///
-/// One output per pad: the pads this board drives are single-ended switches to one lead, so a
-/// second output would be a second pad, not more current through this one.
+/// Every output in the set is switched together by the one thermostat, so several pads — two
+/// bonded to the same valve, say — follow the one slot at [`VALVE_HEATING_SENSOR`] with one
+/// setpoint and dead band. Pads that should regulate independently belong under separate
+/// subindices, which may still name the same slot.
 ///
 /// Together with [`VALVE_HEATING_SENSOR`] this is what makes a pad *fitted*. Neither half works
 /// alone — an output with no slot to watch is a heater with no way to stop, and a slot with no

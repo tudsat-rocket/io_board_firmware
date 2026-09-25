@@ -723,11 +723,12 @@ access_type = "rw"
 array_size = 4
 default_value = [0, 0, 0, 0]
 
-# Which high current output switches the pad: 1..4 as silkscreened, 0 for none. One output per
-# pad. A pad needs both this and a sensor slot before anything switches.
+# Which high current outputs switch the pad, as a bitmask: bit n is output n+1 as silkscreened
+# (0x04 = HCO3, 0x0C = HCO3+HCO4), 0 for none. Every output in the set switches together from the
+# one sensor slot. A pad needs both this and a sensor slot before anything switches.
 [[objects]]
 index = 0x3081
-parameter_name = "valve heating output (0 = none)"
+parameter_name = "valve heating outputs, bitmask (0 = none)"
 object_type = "array"
 data_type = "uint8"
 access_type = "rw"

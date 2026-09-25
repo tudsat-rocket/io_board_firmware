@@ -37,7 +37,7 @@ use crate::index::{
     HcoId, I2cBus, PdoSensorChannel, PerAnalogInput, PerSensorSlot, PerTpdoKind, PerValve, SensorSlot, ValveId,
 };
 
-pub use heating::ValveHeatingConfig;
+pub use heating::{HcoSet, ValveHeatingConfig};
 pub use relief::ReliefConfig;
 pub use sensors::{
     AMPLIFIER_ADDRESSES, ENCODER_ADDRESS, ENCODER_FULL_SCALE, ENCODER_MAGNET_OK_BIT, ENCODER_PRESENT_BIT,
@@ -80,9 +80,9 @@ const DEFAULT_TPDO_MS: PerTpdoKind<u16> = PerTpdoKind::new([
     0,    // 11 Sensor2
     5000, // 12 SensorUnits
     1000, // 13 I2cScan
-    1000, // 14 RailVoltage
-    1000, // 15 RailCurrent
-    1000, // 16 Status
+    200,  // 14 RailVoltage
+    200,  // 15 RailCurrent
+    200,  // 16 Status
     0,    // 17 ValveCurrent
 ]);
 
@@ -282,7 +282,7 @@ impl Config {
             }
             // Two pads on one output would each switch it from its own dead band.
             for (other, g) in self.heating.iter().skip(id.index() + 1) {
-                if g.is_fitted() && g.hco == h.hco {
+                if g.is_fitted() && g.outputs.intersects(h.outputs) {
                     return Err(ConfigError::HeatingOutputSharedWithHeater(id, other));
                 }
             }
@@ -495,7 +495,7 @@ mod tests {
     fn a_pad_and_a_valve_may_not_share_an_output() {
         use crate::index::HcoId;
         let mut cfg = heated_valve();
-        cfg.heating[ValveId::Valve0].hco = Some(HcoId::Hco0); // the valve's own output
+        cfg.heating[ValveId::Valve0] = cfg.heating[ValveId::Valve0].also_on(HcoId::Hco0); // the valve's own output
         assert!(matches!(cfg.sanity_check(), Err(ConfigError::HeatingOutputShared(ValveId::Valve0, ValveId::Valve0))));
 
         // Two pads on one output is the same mistake between two heaters.
@@ -505,6 +505,28 @@ mod tests {
             cfg.sanity_check(),
             Err(ConfigError::HeatingOutputSharedWithHeater(ValveId::Valve0, ValveId::Valve1))
         ));
+
+        // Overlapping in one output of several is still sharing it.
+        let mut cfg = heated_valve();
+        cfg.heating[ValveId::Valve1] = ValveHeatingConfig::new(HcoId::Hco3, SensorSlot::Slot1, 3_000).also_on(HcoId::Hco2);
+        assert!(matches!(
+            cfg.sanity_check(),
+            Err(ConfigError::HeatingOutputSharedWithHeater(ValveId::Valve0, ValveId::Valve1))
+        ));
+    }
+
+    /// Several pads on one thermistor, either as one thermostat or as independent ones: the slot
+    /// is only read, so sharing it is fine where sharing an output is not.
+    #[test]
+    fn several_pads_may_follow_one_sensor() {
+        use crate::index::HcoId;
+        let mut cfg = heated_valve();
+        cfg.heating[ValveId::Valve0] = cfg.heating[ValveId::Valve0].also_on(HcoId::Hco3);
+        assert!(cfg.sanity_check().is_ok(), "{:?}", cfg.sanity_check());
+
+        let mut cfg = heated_valve();
+        cfg.heating[ValveId::Valve1] = ValveHeatingConfig::new(HcoId::Hco3, SensorSlot::Slot1, 2_000);
+        assert!(cfg.sanity_check().is_ok(), "{:?}", cfg.sanity_check());
     }
 
     /// Two slots on one channel means one of them silently never reaches the bus, and which one

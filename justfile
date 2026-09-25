@@ -2,10 +2,14 @@ cancan_cli := env_var("HOME") / "rapid/cancan/cancan-cli"
 cancan_target := justfile_directory() / "target/cancan-cli"
 cancan := cancan_target / "release/cancan"
 
-rev := "rev3"
-features := "--no-default-features --features " + rev + ",hardware"
+features := "--no-default-features --features rev3,hardware"
+features_rev2 := "--no-default-features --features rev2,hardware"
 
-boards := "node3:3 node4:4 node5:5 node6:6 node7:7"
+# Vehicle boards as bin:node_id, split by hardware revision. The rev2 bins carry
+# `required-features = ["rev2"]` in Cargo.toml, so the rev3 build skips them.
+boards := "node3:3 node4:4 node5:5 node6:6"
+boards_rev2 := "node7:7 node8:8 node9:9"
+rev2_bins := "--bin node7 --bin node8 --bin node9"
 
 target_dir := justfile_directory() / "target/thumbv7m-none-eabi/release"
 
@@ -16,20 +20,21 @@ iface_arg := if iface == "" { "" } else { "--iface " + iface }
 default:
     @just --list
 
-# Build every node binary.
+# Build every node binary (rev3 boards, then the rev2 ones).
 build:
     cargo build --release {{ features }}
+    cargo build --release {{ features_rev2 }} {{ rev2_bins }}
 
-# Build one node binary (node2..node7, node8reg, generic).
+# Build one node binary (node2..node9, generic), picking its board revision.
 build-one board:
-    cargo build --release {{ features }} --bin {{ board }}
+    cargo build --release {{ if board =~ '^node[789]$' { features_rev2 } else { features } }} --bin {{ board }}
 
 # Build and flash every vehicle board over CAN. Keeps going if one board is silent.
 flash: build _cancan
     #!/usr/bin/env bash
     set -uo pipefail
     failed=()
-    for entry in {{ boards }}; do
+    for entry in {{ boards }} {{ boards_rev2 }}; do
         bin="${entry%%:*}"; id="${entry##*:}"
         echo
         echo "==> ${bin} (node ${id})"
@@ -39,25 +44,25 @@ flash: build _cancan
     done
     echo
     if [ ${#failed[@]} -eq 0 ]; then
-        echo "all boards flashed: {{ boards }}"
+        echo "all boards flashed: {{ boards }} {{ boards_rev2 }}"
     else
         echo "FAILED: ${failed[*]}" >&2
         exit 1
     fi
 
-# Build and flash one board over CAN, by binary name (node2..node7, node8reg, generic).
+# Build and flash one board over CAN, by binary name (node3..node9, generic).
 flash-one board: _cancan
     #!/usr/bin/env bash
     set -euo pipefail
     id=""
-    for entry in {{ boards }} generic:6; do
+    for entry in {{ boards }} {{ boards_rev2 }} generic:6; do
         [ "${entry%%:*}" = "{{ board }}" ] && id="${entry##*:}"
     done
     if [ -z "${id}" ]; then
-        echo "unknown board '{{ board }}' — known: {{ boards }} generic:6" >&2
+        echo "unknown board '{{ board }}' — known: {{ boards }} {{ boards_rev2 }} generic:6" >&2
         exit 1
     fi
-    cargo build --release {{ features }} --bin {{ board }}
+    just build-one {{ board }}
     {{ cancan }} {{ iface_arg }} flash "${id}" "{{ target_dir }}/{{ board }}"
 
 # List the boards answering on the bus (probes all 256 cancan node ids).
@@ -77,7 +82,7 @@ bootloader:
 
 # Flash one node binary with probe-rs instead of over CAN (needs a debugger, gives RTT logs).
 probe-flash board:
-    cargo run --release {{ features }} --bin {{ board }}
+    cargo run --release {{ if board =~ '^node[789]$' { features_rev2 } else { features } }} --bin {{ board }}
 
 # Host-side unit tests (the pure logic, `hardware` off).
 test:
