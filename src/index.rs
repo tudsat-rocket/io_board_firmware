@@ -138,6 +138,25 @@ id_domain!(
 );
 
 id_domain!(
+    /// One analog pin an external NTC can be wired to: the two pins of COM5 and the two of COM6.
+    ///
+    /// These are the STM32's own ADC inputs (`A_IN_0`..`A_IN_3`) rather than an amplifier on an
+    /// I2C bus, which is why a [`crate::config::SensorKind::Ntc`] slot names one of these instead
+    /// of a bus and an address strap:
+    ///
+    /// | input      | label    | rev3 pin | rev2 pin |
+    /// |------------|----------|----------|----------|
+    /// | `Com5Pin1` | `A_IN_0` | PA6      | PA7      |
+    /// | `Com5Pin2` | `A_IN_1` | PA5      | PA6      |
+    /// | `Com6Pin1` | `A_IN_2` | PC5      | PC5      |
+    /// | `Com6Pin2` | `A_IN_3` | PC4      | PC4      |
+    ///
+    /// Only rev3 reads them: rev2 has no ADC wired up at all, so a slot configured onto one there
+    /// reports no reading rather than a wrong one.
+    AnalogInput, PerAnalogInput, 4, [Com5Pin1, Com5Pin2, Com6Pin1, Com6Pin2]
+);
+
+id_domain!(
     /// An index into [`crate::config::AMPLIFIER_ADDRESSES`] — an address strap combination, never
     /// a raw I2C address. The index is what travels over CAN, so a nine-entry bitmap fits a `u16`.
     AmplifierId, PerAmplifier, 9, [Amp0, Amp1, Amp2, Amp3, Amp4, Amp5, Amp6, Amp7, Amp8]

@@ -21,8 +21,8 @@ use zencan_common::sdo::AbortCode;
 
 use crate::config::{Config, SensorKind, SensorSlotConfig, Unit, ValveKind};
 use crate::index::{
-    AmplifierId, HcoId, I2cBus, Id, PdoSensorChannel, PerAdcSlot, PerErrorCounter, PerHco, PerI2cBus, PerPdoSensor,
-    PerRail, PerSensorSlot, PerValve, SensorSlot, ValveId,
+    AmplifierId, AnalogInput, HcoId, I2cBus, Id, PdoSensorChannel, PerAdcSlot, PerAnalogInput, PerErrorCounter, PerHco,
+    PerI2cBus, PerPdoSensor, PerRail, PerSensorSlot, PerValve, SensorSlot, ValveId,
 };
 use crate::valves::position_of;
 
@@ -92,6 +92,13 @@ pub struct Store {
     pub raw_adc: PerAdcSlot<u16>,
     /// Raw AS5600 angle per bus, [`RAW_INVALID`] when no encoder answered.
     pub raw_angle: PerI2cBus<u16>,
+    /// 0x2007. Raw 12-bit counts on each COM5/COM6 pin, [`RAW_INVALID`] for a pin this build did
+    /// not hand over or has not sampled yet.
+    ///
+    /// Written by the control task, which owns the STM32's ADC, and read by the sensor task,
+    /// which calibrates it into whatever [`SensorKind::Ntc`] slot names the pin. The two never
+    /// touch each other; this field is the whole of the handover.
+    pub raw_analog: PerAnalogInput<u16>,
     pub i2c_present: PerI2cBus<u16>,
     pub i2c_sweeps: u32,
     pub sensor_value: PerSensorSlot<i16>,
@@ -112,6 +119,8 @@ pub struct Store {
     pub valve_current_ma: PerValve<u16>,
     /// 0x2015, a [`crate::relief::ReliefState`] discriminant.
     pub relief_state: u8,
+    /// 0x2019, a [`crate::heating::HeatingState`] discriminant per valve.
+    pub valve_heating_state: PerValve<u8>,
 
     pub hco_digital: PerHco<u8>,
     pub hco_pwm_us: PerHco<u16>,
@@ -160,6 +169,7 @@ impl Store {
         Self {
             raw_adc: PerAdcSlot::splat(RAW_INVALID),
             raw_angle: PerI2cBus::splat(RAW_INVALID),
+            raw_analog: PerAnalogInput::splat(RAW_INVALID),
             i2c_present: PerI2cBus::splat(0),
             i2c_sweeps: 0,
             sensor_value: PerSensorSlot::splat(SENSOR_INVALID),
@@ -172,6 +182,7 @@ impl Store {
             valve_status: PerValve::splat(0),
             valve_current_ma: PerValve::splat(0),
             relief_state: crate::relief::ReliefState::Disabled as u8,
+            valve_heating_state: PerValve::splat(crate::heating::HeatingState::Disabled as u8),
             hco_digital: PerHco::splat(0),
             hco_pwm_us: PerHco::splat(0),
             hco_owner: PerHco::splat(0),
@@ -323,6 +334,14 @@ fn read_valve_array<F: Fn(&crate::config::ValveConfig) -> OdValue>(
     read_array(cfg.valves.as_slice(), sub, |v| field(&v))
 }
 
+fn read_heating_array<F: Fn(&crate::config::ValveHeatingConfig) -> OdValue>(
+    cfg: &Config,
+    sub: u8,
+    field: F,
+) -> Result<OdValue, AbortCode> {
+    read_array(cfg.heating.as_slice(), sub, |h| field(&h))
+}
+
 fn read_sensor_array<F: Fn(&SensorSlotConfig) -> OdValue>(
     cfg: &Config,
     sub: u8,
@@ -357,6 +376,7 @@ pub fn read(store: &Store, index: u16, sub: u8) -> Result<OdValue, AbortCode> {
         SENSOR_VALUE => read_array(store.sensor_value.as_slice(), sub, OdValue::i16),
         SENSOR_UNIT => read_array(store.sensor_unit.as_slice(), sub, OdValue::u8),
         RAW_ENCODER => read_array(store.raw_angle.as_slice(), sub, OdValue::u16),
+        RAW_ANALOG => read_array(store.raw_analog.as_slice(), sub, OdValue::u16),
 
         VALVE_COMMANDED => read_array(store.valve_commanded.as_slice(), sub, OdValue::u16),
         VALVE_TARGET => read_array(store.valve_target.as_slice(), sub, OdValue::u16),
@@ -364,6 +384,7 @@ pub fn read(store: &Store, index: u16, sub: u8) -> Result<OdValue, AbortCode> {
         VALVE_STATUS => read_array(store.valve_status.as_slice(), sub, OdValue::u8),
         VALVE_CURRENT => read_array(store.valve_current_ma.as_slice(), sub, OdValue::u16),
         RELIEF_STATE => scalar(OdValue::u8(store.relief_state)),
+        VALVE_HEATING_STATE => read_array(store.valve_heating_state.as_slice(), sub, OdValue::u8),
 
         RELIEF_ENABLED => scalar(OdValue::u8(cfg.relief.enabled as u8)),
         RELIEF_VALVE => scalar(OdValue::u8(cfg.relief.valve.map_or(0xFF, ValveId::as_u8))),
@@ -372,6 +393,15 @@ pub fn read(store: &Store, index: u16, sub: u8) -> Result<OdValue, AbortCode> {
         RELIEF_POSITION => scalar(OdValue::u16(cfg.relief.position)),
         RELIEF_PULSE_MS => scalar(OdValue::u16(cfg.relief.pulse_ms)),
         RELIEF_COOLDOWN_MS => scalar(OdValue::u16(cfg.relief.cooldown_ms)),
+
+        VALVE_HEATING_ENABLED => read_heating_array(cfg, sub, |h| OdValue::u8(h.enabled as u8)),
+        VALVE_HEATING_HCO => read_heating_array(cfg, sub, |h| OdValue::u8(hco_to_wire(h.hco))),
+
+        VALVE_HEATING_SENSOR => {
+            read_heating_array(cfg, sub, |h| OdValue::u8(h.sensor.map_or(NO_INDEX, SensorSlot::as_u8)))
+        }
+        VALVE_HEATING_SETPOINT => read_heating_array(cfg, sub, |h| OdValue::i16(h.setpoint)),
+        VALVE_HEATING_HYSTERESIS => read_heating_array(cfg, sub, |h| OdValue::u16(h.hysteresis)),
 
         HCO_DIGITAL => read_array(store.hco_digital.as_slice(), sub, OdValue::u8),
         HCO_PWM_US => read_array(store.hco_pwm_us.as_slice(), sub, OdValue::u16),
@@ -413,6 +443,7 @@ pub fn read(store: &Store, index: u16, sub: u8) -> Result<OdValue, AbortCode> {
 
         SENSOR_BUS => read_sensor_array(cfg, sub, |s| OdValue::u8(s.bus.map_or(0xFF, I2cBus::as_u8))),
         SENSOR_AMPLIFIER => read_sensor_array(cfg, sub, |s| OdValue::u8(s.amplifier.as_u8())),
+        SENSOR_ANALOG_INPUT => read_sensor_array(cfg, sub, |s| OdValue::u8(s.analog.as_u8())),
         SENSOR_KIND => read_sensor_array(cfg, sub, |s| OdValue::u8(s.kind as u8)),
         SENSOR_OFFSET => read_sensor_array(cfg, sub, |s| OdValue::i32(s.calib.offset_milli)),
         SENSOR_SLOPE => read_sensor_array(cfg, sub, |s| OdValue::i32(s.calib.slope_nano)),
@@ -749,6 +780,11 @@ pub fn write(store: &mut Store, index: u16, sub: u8, data: &[u8]) -> Result<(), 
             store.config.sensors[i].amplifier = AmplifierId::from_u8(as_u8(data)?).ok_or(AbortCode::ValueTooHigh)?;
             store.pending.config = true;
         }
+        SENSOR_ANALOG_INPUT => {
+            let i: SensorSlot = slot(sub)?;
+            store.config.sensors[i].analog = AnalogInput::from_u8(as_u8(data)?).ok_or(AbortCode::ValueTooHigh)?;
+            store.pending.config = true;
+        }
         SENSOR_KIND => {
             let i: SensorSlot = slot(sub)?;
             let kind = SensorKind::from_u8(as_u8(data)?).ok_or(AbortCode::InvalidValue)?;
@@ -854,10 +890,39 @@ pub fn write(store: &mut Store, index: u16, sub: u8, data: &[u8]) -> Result<(), 
             store.pending.config = true;
         }
 
+        VALVE_HEATING_ENABLED => {
+            let i: ValveId = slot(sub)?;
+            store.config.heating[i].enabled = as_u8(data)? != 0;
+            store.pending.config = true;
+        }
+        VALVE_HEATING_HCO => {
+            let i: ValveId = slot(sub)?;
+            store.config.heating[i].hco = hco_from_wire(as_u8(data)?)?;
+            store.pending.config = true;
+        }
+
+        VALVE_HEATING_SENSOR => {
+            let i: ValveId = slot(sub)?;
+            store.config.heating[i].sensor = opt_id_from_wire(as_u8(data)?)?;
+            store.pending.config = true;
+        }
+        VALVE_HEATING_SETPOINT => {
+            let i: ValveId = slot(sub)?;
+            store.config.heating[i].setpoint = as_u16(data)? as i16;
+            store.pending.config = true;
+        }
+        VALVE_HEATING_HYSTERESIS => {
+            let i: ValveId = slot(sub)?;
+            store.config.heating[i].hysteresis = as_u16(data)?;
+            store.pending.config = true;
+        }
+
         // Everything else in the 0x2000 block is process data we produce.
-        RAW_ADC_BUS0 | RAW_ADC_BUS1 | RAW_ENCODER | I2C_PRESENT | I2C_SWEEPS | SENSOR_VALUE | SENSOR_UNIT
-        | VALVE_TARGET | VALVE_MEASURED | VALVE_STATUS | VALVE_CURRENT | RELIEF_STATE | HCO_OWNER | LINK_STATE
-        | MS_SINCE_HEARTBEAT | RAIL_CURRENT | RAIL_VOLTAGE => return Err(AbortCode::ReadOnly),
+        RAW_ADC_BUS0 | RAW_ADC_BUS1 | RAW_ENCODER | RAW_ANALOG | I2C_PRESENT | I2C_SWEEPS | SENSOR_VALUE
+        | SENSOR_UNIT | VALVE_TARGET | VALVE_MEASURED | VALVE_STATUS | VALVE_CURRENT | RELIEF_STATE | HCO_OWNER
+        | VALVE_HEATING_STATE | LINK_STATE | MS_SINCE_HEARTBEAT | RAIL_CURRENT | RAIL_VOLTAGE => {
+            return Err(AbortCode::ReadOnly);
+        }
 
         _ => return Err(AbortCode::NoSuchObject),
     }
@@ -1069,6 +1134,96 @@ mod tests {
         // ...and reads back as what was written.
         assert_eq!(read(&s, od::SENSOR_PDO_CHANNEL, sub).unwrap().data(), &[PdoSensorChannel::Ch9.as_u8()]);
         assert_eq!(read(&s, od::SENSOR_SLOPE, sub).unwrap().data(), &(-976_563i32).to_le_bytes());
+    }
+
+    /// The same story for an NTC, and the reason its pin is its own object: the slot is complete
+    /// after one write, and moving it to another COM pin never touches the bus or the strap.
+    #[test]
+    fn writing_only_the_kind_gives_a_working_ntc_on_com5() {
+        use crate::config::SensorKind;
+        use crate::index::AnalogInput;
+        use crate::sensors::calibrate;
+
+        let mut s = Store::new();
+        let sub = SensorSlot::Slot0.as_u8() + 1;
+        write(&mut s, od::SENSOR_KIND, sub, &[SensorKind::Ntc as u8]).unwrap();
+
+        let cfg = &s.config.sensors[SensorSlot::Slot0];
+        assert_eq!(cfg.unit, Unit::CentiCelsius);
+        assert_eq!(cfg.analog, AnalogInput::Com5Pin1, "no bus to set, and COM5 pin 1 by default");
+        assert_eq!(calibrate(cfg, Some(2048)), 2_500, "25.00 C straight off the curve");
+
+        // And it moves to another pin without disturbing anything else, reading back as written.
+        write(&mut s, od::SENSOR_ANALOG_INPUT, sub, &[AnalogInput::Com6Pin2.as_u8()]).unwrap();
+        let cfg = &s.config.sensors[SensorSlot::Slot0];
+        assert_eq!(cfg.analog, AnalogInput::Com6Pin2);
+        assert_eq!(calibrate(cfg, Some(2048)), 2_500);
+        assert_eq!(read(&s, od::SENSOR_ANALOG_INPUT, sub).unwrap().data(), &[AnalogInput::Com6Pin2.as_u8()]);
+
+        // There are four pins; a fifth is a mistake worth an abort rather than a wrapped index.
+        assert!(matches!(write(&mut s, od::SENSOR_ANALOG_INPUT, sub, &[4]), Err(AbortCode::ValueTooHigh)));
+    }
+
+    /// The four COM5/COM6 pins are read-only process data like the raw amplifier counts, and
+    /// start invalid: nothing has sampled them until the control task's first tick.
+    #[test]
+    fn the_raw_analog_array_is_four_long_and_starts_invalid() {
+        let s = store_with_servo();
+        assert_eq!(read(&s, od::RAW_ANALOG, 0).unwrap().data(), &[crate::config::NUM_ANALOG_INPUTS as u8]);
+        assert_eq!(read(&s, od::RAW_ANALOG, 1).unwrap().data(), &RAW_INVALID.to_le_bytes());
+        assert!(read(&s, od::RAW_ANALOG, 4).is_ok());
+        assert!(matches!(read(&s, od::RAW_ANALOG, 5), Err(AbortCode::NoSuchSubIndex)));
+        assert!(matches!(write(&mut store_with_servo(), od::RAW_ANALOG, 1, &[0, 0]), Err(AbortCode::ReadOnly)));
+    }
+
+    /// A pad is configured entirely over the bus, so every field has to survive a write and read
+    /// back as what was written — and the state it reports has to stay read-only.
+    #[test]
+    fn a_heating_pad_can_be_configured_over_the_bus() {
+        use crate::index::HcoId;
+
+        let mut s = store_with_servo();
+        let sub = ValveId::Valve0.as_u8() + 1;
+
+        write(&mut s, od::VALVE_HEATING_HCO, sub, &[HcoId::Hco2.silkscreen()]).unwrap();
+        write(&mut s, od::VALVE_HEATING_SENSOR, sub, &[SensorSlot::Slot1.as_u8()]).unwrap();
+        write(&mut s, od::VALVE_HEATING_SETPOINT, sub, &3_000i16.to_le_bytes()).unwrap();
+        write(&mut s, od::VALVE_HEATING_HYSTERESIS, sub, &250u16.to_le_bytes()).unwrap();
+        write(&mut s, od::VALVE_HEATING_ENABLED, sub, &[1]).unwrap();
+
+        let h = s.config.heating[ValveId::Valve0];
+        assert_eq!(h.hco, Some(HcoId::Hco2));
+        assert_eq!(h.sensor, Some(SensorSlot::Slot1));
+        assert_eq!(h.setpoint, 3_000);
+        assert_eq!(h.hysteresis, 250);
+        assert!(h.is_armed());
+
+        assert_eq!(read(&s, od::VALVE_HEATING_HCO, sub).unwrap().data(), &[HcoId::Hco2.silkscreen()]);
+        assert_eq!(read(&s, od::VALVE_HEATING_SETPOINT, sub).unwrap().data(), &3_000i16.to_le_bytes());
+        assert_eq!(read(&s, od::VALVE_HEATING_SENSOR, sub).unwrap().data(), &[SensorSlot::Slot1.as_u8()]);
+
+        // Both "none" sentinels round-trip: 0 for an output, 0xFF for a slot.
+        write(&mut s, od::VALVE_HEATING_HCO, sub, &[0]).unwrap();
+        write(&mut s, od::VALVE_HEATING_SENSOR, sub, &[NO_INDEX]).unwrap();
+        assert_eq!(s.config.heating[ValveId::Valve0].hco, None);
+        assert_eq!(s.config.heating[ValveId::Valve0].sensor, None);
+        assert_eq!(read(&s, od::VALVE_HEATING_HCO, sub).unwrap().data(), &[0]);
+        assert_eq!(read(&s, od::VALVE_HEATING_SENSOR, sub).unwrap().data(), &[NO_INDEX]);
+
+        // An output number that is not on the board is a mistake, not a wrapped index.
+        assert!(matches!(write(&mut s, od::VALVE_HEATING_HCO, sub, &[5]), Err(AbortCode::InvalidValue)));
+    }
+
+    /// What the pad is doing is observation, not intent: the master reads it and cannot write it.
+    #[test]
+    fn the_heating_state_is_read_only_and_starts_disabled() {
+        let mut s = store_with_servo();
+        assert_eq!(read(&s, od::VALVE_HEATING_STATE, 0).unwrap().data(), &[NUM_VALVES as u8]);
+        assert_eq!(
+            read(&s, od::VALVE_HEATING_STATE, 1).unwrap().data(),
+            &[crate::heating::HeatingState::Disabled as u8]
+        );
+        assert!(matches!(write(&mut s, od::VALVE_HEATING_STATE, 1, &[1]), Err(AbortCode::ReadOnly)));
     }
 
     /// Slot 12 exists at all only because there are sixteen now; the wire has to agree.

@@ -14,12 +14,14 @@ use embassy_time::Instant;
 use crate::config::{Config, ValveConfig};
 use crate::cpu::CpuMonitor;
 use crate::hco::{HcoState, Level, State};
-use crate::index::{HcoId, PerHco, PerSensorSlot, PerValve, ValveId};
+use crate::heating::{Heating, HeatingState};
+use crate::index::{HcoId, PerAnalogInput, PerHco, PerSensorSlot, PerValve, ValveId};
 use crate::leds::{LedsState, StateLedPub};
 use crate::outputs::{Outputs, digital, pwm};
 use crate::rail_sense::{NoRails, RailSensing, Rails};
 use crate::relief::Relief;
 use crate::safety::{self, FallbackLatch};
+use crate::sensors::AnalogSensing;
 use crate::store::{CONTROL_WAKE, LinkState, SENSOR_INVALID, STORE};
 use crate::valves::{
     NoFeedback, PositionFeedback, Valve, ValveDrive, ValveStatus, is_unpowered, position_of, unpowered_at,
@@ -31,7 +33,7 @@ const TICK: embassy_time::Duration = embassy_time::Duration::from_millis(20);
 
 /// Generic over rail sensing so this whole task can be built and driven by a host test against
 /// [`NoRails`] and a mocked [`crate::hco::HcoControl`], not just against real hardware.
-pub struct Control<R: RailSensing = NoRails> {
+pub struct Control<R: RailSensing + AnalogSensing = NoRails> {
     outputs: Outputs,
     valves: PerValve<Valve>,
     /// Position feedback from anything that is not a configured sensor slot.
@@ -44,6 +46,7 @@ pub struct Control<R: RailSensing = NoRails> {
     // TODO: document what exactly latch is, or choose a better name
     latch: FallbackLatch,
     relief: Relief,
+    heating: PerValve<Heating>,
     /// Desired state of each output from the direct-control path. Owns whichever outputs no valve
     /// claims; in raw debug mode it can also override an owned one.
     direct: HcoState,
@@ -123,6 +126,8 @@ struct TickOutcome {
     statuses: PerValve<u8>,
     currents: PerValve<u16>,
     relief_state: u8,
+    /// 0x2019, a [`crate::heating::HeatingState`] discriminant per valve.
+    heating_states: PerValve<u8>,
     link: LinkState,
     /// `Some` only when the LED state actually changed this tick, which is what keeps the `STORE`
     /// write and the pubsub publish conditional. Packing into 0x2030's byte happens at the store
@@ -130,7 +135,7 @@ struct TickOutcome {
     leds: Option<LedsState>,
 }
 
-impl<R: RailSensing> Control<R> {
+impl<R: RailSensing + AnalogSensing> Control<R> {
     pub fn new(outputs: Outputs, rails: R, leds: StateLedPub) -> Self {
         let now = Instant::now();
         Self {
@@ -139,6 +144,7 @@ impl<R: RailSensing> Control<R> {
             feedback: NoFeedback,
             latch: FallbackLatch::new(),
             relief: Relief::new(),
+            heating: PerValve::from_fn(|_| Heating::new()),
             direct: HcoState::splat(State::Digital(Level::Low)),
             rails,
             leds,
@@ -176,6 +182,12 @@ impl<R: RailSensing> Control<R> {
             (store.config.clone(), store.valve_commanded, store.sensor_value, store.raw_debug, pending)
         };
 
+        // The COM5/COM6 pins are on this task's ADC but belong to the sensor plane: sampled here,
+        // left in the store, and calibrated by the sensor task into whatever slot named the pin.
+        // Only the pins a slot actually names are converted, so a board with no NTC fitted spends
+        // nothing on this.
+        let raw_analog = self.read_analog(&config).await;
+
         let direct_writes = if pending.outputs {
             let mut store = STORE.lock().await;
             let dirty = core::mem::take(&mut store.hco_direct_dirty);
@@ -206,11 +218,13 @@ impl<R: RailSensing> Control<R> {
         // --- write observation back ----------------------------------------
         let hco = self.outputs.current();
         let mut store = STORE.lock().await;
+        store.raw_analog = raw_analog;
         store.valve_target = outcome.targets;
         store.valve_measured = outcome.measured;
         store.valve_status = outcome.statuses;
         store.valve_current_ma = outcome.currents;
         store.relief_state = outcome.relief_state;
+        store.valve_heating_state = outcome.heating_states;
         store.link_state = outcome.link;
         store.ms_since_heartbeat = since_heartbeat;
         for (id, state) in hco.iter() {
@@ -296,6 +310,20 @@ impl<R: RailSensing> Control<R> {
             statuses[valve] = self.valves[valve].status() as u8;
         }
 
+        // --- heating pads ---------------------------------------------------
+        let mut heating_states = PerValve::splat(HeatingState::Disabled as u8);
+        for (valve, cfg) in inputs.config.heating.iter() {
+            let reading = cfg.sensor.map_or(SENSOR_INVALID, |slot| inputs.sensor_value[slot]);
+            let on = self.heating[valve].update(cfg, reading);
+            heating_states[valve] = self.heating[valve].state() as u8;
+            if inputs.raw_debug {
+                continue;
+            }
+            if let Some(hco) = cfg.hco {
+                desired[hco] = digital(on);
+            }
+        }
+
         self.outputs.drive(desired);
 
         let leds = self.decide_leds(link, inputs.raw_debug, &statuses, inputs.now);
@@ -306,6 +334,7 @@ impl<R: RailSensing> Control<R> {
             statuses,
             currents,
             relief_state: self.relief.state() as u8,
+            heating_states,
             link,
             leds,
         }
@@ -401,6 +430,15 @@ impl<R: RailSensing> Control<R> {
 
     async fn read_rails(&mut self) -> Option<Rails> {
         self.rails.read().await
+    }
+
+    /// Sample the COM5/COM6 pins a [`crate::config::SensorKind::Ntc`] slot is configured onto.
+    ///
+    /// [`crate::store::RAW_INVALID`] for the rest, which covers three things the sensor plane
+    /// treats alike: a pin nothing is configured on, a pin this build did not hand over, and a
+    /// conversion that never happened.
+    async fn read_analog(&mut self, config: &Config) -> PerAnalogInput<u16> {
+        self.rails.read_analog(config.analog_inputs_used()).await
     }
 
     /// Decide the LED state and publish it if it changed, returning the state to mirror into the
@@ -573,6 +611,89 @@ mod tests {
 
         assert_eq!(outcome.targets[ValveId::Valve0], 1000, "the target is still fully open");
         assert_eq!(position_of(outcome.measured[ValveId::Valve0]), 120, "but the encoder says otherwise");
+    }
+
+    /// The heating pad end to end: a cold slot switches a real output on, a warm one switches it
+    /// off, and the valve beside it is untouched throughout.
+    #[test]
+    fn a_heating_pad_switches_its_output_from_the_sensor_slot() {
+        use crate::config::{SensorSlotConfig, ValveHeatingConfig};
+        use crate::index::{AnalogInput, HcoId, SensorSlot};
+
+        let mut ctl = test_control();
+        let cfg = Config::new()
+            .with_valve(ValveId::Valve0, ValveConfig::solenoid_on(HcoId::Hco0))
+            .with_quiet_sensor(SensorSlot::Slot1, SensorSlotConfig::ntc(AnalogInput::Com5Pin1))
+            .with_valve_heating(ValveId::Valve0, ValveHeatingConfig::new(HcoId::Hco2, SensorSlot::Slot1, 3_000));
+        assert!(cfg.sanity_check().is_ok());
+
+        // 20.00 C against a 30.00 C setpoint: pad on, and the valve stays where it was commanded.
+        let mut tick = inputs(cfg.clone(), [0, 0, 0, 0], Instant::from_millis(0));
+        tick.sensor_value[SensorSlot::Slot1] = 2_000;
+        let outcome = ctl.decide(tick);
+        assert_eq!(outcome.heating_states[ValveId::Valve0], HeatingState::Heating as u8);
+        assert_eq!(ctl.outputs.current()[HcoId::Hco2], digital(true));
+        assert_eq!(ctl.outputs.current()[HcoId::Hco0], digital(false), "the valve is not commanded open");
+
+        // 35.00 C: past the top of the dead band, pad off.
+        let mut tick = inputs(cfg.clone(), [0, 0, 0, 0], Instant::from_millis(20));
+        tick.sensor_value[SensorSlot::Slot1] = 3_500;
+        let outcome = ctl.decide(tick);
+        assert_eq!(outcome.heating_states[ValveId::Valve0], HeatingState::Idle as u8);
+        assert_eq!(ctl.outputs.current()[HcoId::Hco2], digital(false));
+
+        // A dead thermistor is not "cold": the pad must not come back on.
+        let mut tick = inputs(cfg, [0, 0, 0, 0], Instant::from_millis(40));
+        tick.sensor_value[SensorSlot::Slot1] = SENSOR_INVALID;
+        let outcome = ctl.decide(tick);
+        assert_eq!(outcome.heating_states[ValveId::Valve0], HeatingState::SensorFault as u8);
+        assert_eq!(ctl.outputs.current()[HcoId::Hco2], digital(false));
+    }
+
+    /// A heater regulates on its own, so a master that goes quiet must not stop it: a valve that
+    /// freezes shut during an outage is the failure the pad exists to prevent.
+    #[test]
+    fn a_heating_pad_keeps_regulating_through_a_fallback() {
+        use crate::config::{SensorSlotConfig, ValveHeatingConfig};
+        use crate::index::{AnalogInput, HcoId, SensorSlot};
+
+        let mut ctl = test_control();
+        let mut cfg = Config::new()
+            .with_quiet_sensor(SensorSlot::Slot1, SensorSlotConfig::ntc(AnalogInput::Com5Pin1))
+            .with_valve_heating(ValveId::Valve0, ValveHeatingConfig::new(HcoId::Hco2, SensorSlot::Slot1, 3_000));
+        cfg.fallback_enabled = true;
+
+        let mut tick = inputs(cfg, [0, 0, 0, 0], Instant::from_millis(0));
+        tick.sensor_value[SensorSlot::Slot1] = 2_000;
+        tick.since_heartbeat = u32::MAX; // well past both fallback stages
+        let outcome = ctl.decide(tick);
+
+        assert_eq!(outcome.link, LinkState::FallbackB);
+        assert_eq!(outcome.heating_states[ValveId::Valve0], HeatingState::Heating as u8);
+        assert_eq!(ctl.outputs.current()[HcoId::Hco2], digital(true), "still holding the valve warm");
+    }
+
+    /// Raw debug hands every output back to direct control, pads included — which is also the
+    /// only way to force a pad on with a dead thermistor, and it takes a deliberate mode change.
+    #[test]
+    fn raw_debug_takes_the_pad_back_from_the_thermostat() {
+        use crate::config::{SensorSlotConfig, ValveHeatingConfig};
+        use crate::index::{AnalogInput, HcoId, SensorSlot};
+
+        let mut ctl = test_control();
+        let cfg = Config::new()
+            .with_quiet_sensor(SensorSlot::Slot1, SensorSlotConfig::ntc(AnalogInput::Com5Pin1))
+            .with_valve_heating(ValveId::Valve0, ValveHeatingConfig::new(HcoId::Hco2, SensorSlot::Slot1, 3_000));
+
+        let mut tick = inputs(cfg, [0, 0, 0, 0], Instant::from_millis(0));
+        tick.sensor_value[SensorSlot::Slot1] = 2_000; // cold: the thermostat would switch it on
+        tick.raw_debug = true;
+        let outcome = ctl.decide(tick);
+
+        // The state is still reported — an operator can see what the thermostat wanted — but the
+        // output is left to 0x2020.
+        assert_eq!(outcome.heating_states[ValveId::Valve0], HeatingState::Heating as u8);
+        assert_eq!(ctl.outputs.current()[HcoId::Hco2], digital(false), "direct control has it");
     }
 
     /// An encoder that drops off the bus must not freeze the valve at its last reading — the

@@ -11,11 +11,12 @@
 
 use embedded_storage_async::nor_flash::NorFlash;
 
+use super::ValveHeatingConfig;
 use super::{
     Config, FallbackAction, ReliefConfig, SensorCalib, SensorKind, SensorSlotConfig, Unit, ValveConfig, ValveKind,
 };
 use crate::errors::{ErrorCounter, bump};
-use crate::index::{AmplifierId, HcoId, I2cBus, Id, PdoSensorChannel, SensorSlot, ValveId};
+use crate::index::{AmplifierId, AnalogInput, HcoId, I2cBus, Id, PdoSensorChannel, SensorSlot, ValveId};
 
 const MAGIC: u32 = 0x4249_4F43; // "COIB", little-endian "IOCB"
 
@@ -29,10 +30,12 @@ const MAGIC: u32 = 0x4249_4F43; // "COIB", little-endian "IOCB"
 ///    a position sensor; the calibration record became kind-agnostic (`SensorCalib`), which
 ///    changes what a Pt1000 slot's three coefficients *mean* even though their layout is
 ///    unchanged — hence a bump rather than a silent widening.
-const VERSION: u16 = 4;
+/// 5: each sensor slot gained the COM5/COM6 pin an `Ntc` kind reads (`SensorSlotConfig::analog`).
+/// 6: added the per-valve heating pads (`ValveHeatingConfig`), one block per `ValveId`.
+const VERSION: u16 = 6;
 
 const HEADER_LEN: usize = 12;
-const BODY_LEN: usize = 439;
+const BODY_LEN: usize = 483;
 #[cfg(test)]
 const RECORD_LEN: usize = HEADER_LEN + BODY_LEN + 4;
 
@@ -202,6 +205,7 @@ fn write_body(cfg: &Config, out: &mut [u8]) -> usize {
         w.u8(s.kind as u8);
         w.opt_id(s.bus);
         w.id(s.amplifier);
+        w.id(s.analog);
         w.u8(s.unit as u8);
         w.opt_id(s.pdo_channel);
         w.i32(s.calib.offset_milli);
@@ -220,6 +224,14 @@ fn write_body(cfg: &Config, out: &mut [u8]) -> usize {
     w.u16(cfg.relief.position);
     w.u16(cfg.relief.pulse_ms);
     w.u16(cfg.relief.cooldown_ms);
+
+    for h in cfg.heating.values() {
+        w.u8(h.enabled as u8);
+        w.opt_id(h.hco);
+        w.opt_id(h.sensor);
+        w.u16(h.setpoint as u16);
+        w.u16(h.hysteresis);
+    }
 
     w.pos
 }
@@ -273,12 +285,14 @@ fn read_body(body: &[u8]) -> Option<Config> {
         let kind = SensorKind::from_u8(r.u8())?;
         let bus: Option<I2cBus> = r.opt_id().ok()?;
         let amplifier: AmplifierId = r.id().ok()?;
+        let analog: AnalogInput = r.id().ok()?;
         let unit = Unit::from_u8(r.u8())?;
         let pdo_channel: Option<PdoSensorChannel> = r.opt_id().ok()?;
         cfg.sensors[i] = SensorSlotConfig {
             kind,
             bus,
             amplifier,
+            analog,
             unit,
             pdo_channel,
             calib: SensorCalib {
@@ -302,6 +316,16 @@ fn read_body(body: &[u8]) -> Option<Config> {
         pulse_ms: r.u16(),
         cooldown_ms: r.u16(),
     };
+
+    for i in ValveId::ALL {
+        cfg.heating[i] = ValveHeatingConfig {
+            enabled: r.u8() != 0,
+            hco: r.opt_id().ok()?,
+            sensor: r.opt_id().ok()?,
+            setpoint: r.u16() as i16,
+            hysteresis: r.u16(),
+        };
+    }
 
     Some(cfg)
 }
@@ -551,6 +575,52 @@ mod tests {
         assert_eq!(back.sensors[SensorSlot::Slot9].calib, SensorCalib::MCP9700);
         // Slots past the twelfth are only reachable at all because the record now carries sixteen.
         assert_eq!(back.sensors[SensorSlot::Slot9].kind as u8, SensorKind::Mcp9700 as u8);
+    }
+
+    /// A heater that came back from flash pointing at the wrong output or the wrong slot would
+    /// switch something else on a schedule of its own, so every field has to survive.
+    #[test]
+    fn valve_heating_survives_a_round_trip() {
+        use crate::config::ValveHeatingConfig;
+        let cfg = Config::new().with_valve_heating(
+            ValveId::Valve1,
+            ValveHeatingConfig::new(HcoId::Hco2, SensorSlot::Slot3, 3_500).with_hysteresis(250),
+        );
+
+        let mut buf = [0u8; BUF_LEN];
+        write_record(&cfg, 1, &mut buf);
+        let (_, back) = read_record(&buf).expect("record should validate");
+
+        let h = back.heating[ValveId::Valve1];
+        assert!(h.enabled && h.is_armed());
+        assert_eq!(h.hco, Some(HcoId::Hco2));
+        assert_eq!(h.sensor, Some(SensorSlot::Slot3));
+        assert_eq!(h.setpoint, 3_500);
+        assert_eq!(h.hysteresis, 250);
+
+        // And an unfitted slot comes back unfitted, setpoint included: `i16::MIN` asks for no
+        // heat, so a record that rounded it to zero would ask a cold valve to warm up.
+        let none = back.heating[ValveId::Valve0];
+        assert!(!none.is_fitted() && !none.enabled);
+        assert_eq!(none.setpoint, i16::MIN);
+    }
+
+    /// Which COM pin an NTC is on is the whole of its addressing, so a save that lost it would
+    /// bring the board back reading a different connector.
+    #[test]
+    fn an_ntc_slot_keeps_its_analog_pin_across_a_round_trip() {
+        use crate::index::AnalogInput;
+        let cfg = Config::new().with_sensor(SensorSlot::Slot4, SensorSlotConfig::ntc(AnalogInput::Com6Pin2));
+
+        let mut buf = [0u8; BUF_LEN];
+        write_record(&cfg, 1, &mut buf);
+        let (_, back) = read_record(&buf).expect("record should validate");
+
+        let slot = back.sensors[SensorSlot::Slot4];
+        assert_eq!(slot.kind as u8, SensorKind::Ntc as u8);
+        assert_eq!(slot.analog, AnalogInput::Com6Pin2);
+        assert_eq!(slot.bus, None, "and it still needs no bus");
+        assert_eq!(slot.calib, SensorCalib::UNITY);
     }
 
     /// A record from before the slot count doubled describes a different object dictionary, so it

@@ -6,13 +6,16 @@
 //! rebuild; this file is the fallback, and the place to record a configuration once it has been
 //! proven.
 
-use crate::config::{Config, NodeSettings, ReliefConfig, SensorSlotConfig, ValveConfig};
 #[allow(
     unused_imports,
     reason = "SensorSlot's later variants are only used by node configs that do not exist yet"
 )]
-use crate::index::{AmplifierId::*, HcoId, HcoPair, I2cBus::*, SensorSlot::*, ValveId::*};
+use crate::index::{AmplifierId::*, AnalogInput::*, HcoId, HcoPair, I2cBus::*, SensorSlot::*, ValveId::*};
 use crate::zenith_mapping::sensors::Transducer;
+use crate::{
+    config::{Config, NodeSettings, ReliefConfig, SensorSlotConfig, ValveConfig, ValveHeatingConfig},
+    index::{AnalogInput, SensorSlot},
+};
 
 pub mod sensors;
 pub mod valves;
@@ -43,6 +46,31 @@ const fn encoder(bus: crate::index::I2cBus, zero_counts: u16, counts: i16) -> Se
     SensorSlotConfig::encoder(bus, zero_counts, counts)
 }
 
+/// A 10k NTC on one of the COM5/COM6 pins, reporting centicelsius off the hardcoded curve.
+///
+/// 10k from the pin to +3.3V and the thermistor to ground; use [`SensorSlotConfig::ntc_to_supply`]
+/// for a harness wired the other way round, which reads a mirrored curve otherwise.
+#[allow(dead_code, reason = "a factory default waiting on the harness that uses it")]
+const fn ntc(input: crate::index::AnalogInput) -> SensorSlotConfig {
+    SensorSlotConfig::ntc(input)
+}
+
+/// A heating pad on `hco`, holding its valve at `setpoint_centi_c` as measured by `sensor`.
+///
+/// `sensor` is an ordinary slot that this same config has to fit — in practice an [`ntc`] beside
+/// it — and the setpoint is in that slot's unit, so 3_000 is 30.00 degC:
+///
+/// ```ignore
+/// Config::new()
+///     .with_valve(Valve0, ValveConfig::solenoid_on(HcoId::Hco0))
+///     .with_quiet_sensor(Slot1, ntc(Com5Pin1))
+///     .with_valve_heating(Valve0, heating(HcoId::Hco2, Slot1, 3_000))
+/// ```
+#[allow(dead_code, reason = "a factory default waiting on the harness that uses it")]
+const fn heating(hco: HcoId, sensor: crate::index::SensorSlot, setpoint_centi_c: i16) -> ValveHeatingConfig {
+    ValveHeatingConfig::new(hco, sensor, setpoint_centi_c)
+}
+
 /// Node 2 — nosecone / recovery. One temperature probe, no valves.
 pub const NODE2: NodeSettings = NodeSettings::new(2, Config::new().with_sensor(Slot0, pt1000(Bus0, Amp0)));
 
@@ -50,8 +78,22 @@ pub const NODE2: NodeSettings = NodeSettings::new(2, Config::new().with_sensor(S
 pub const NODE3: NodeSettings = NodeSettings::new(3, Config::new());
 
 /// Node 4 — upper propulsion. Oxidizer vent solenoid on HCO1.
-pub const NODE4: NodeSettings =
-    NodeSettings::new(4, Config::new().with_valve(Valve0, ValveConfig::solenoid_on(HcoId::Hco0)));
+pub const NODE4: NodeSettings = NodeSettings::new(
+    4,
+    Config::new()
+        .with_valve(Valve0, ValveConfig::solenoid_on(HcoId::Hco0))
+        .with_sensor(SensorSlot::Slot0, SensorSlotConfig::ntc(AnalogInput::Com5Pin1))
+        .with_valve_heating(
+            Valve0,
+            ValveHeatingConfig {
+                enabled: true,
+                hco: Some(HcoId::Hco2),
+                sensor: Some(Slot2),
+                setpoint: 4_000,
+                hysteresis: 500,
+            },
+        ),
+);
 
 /// Node 5 — upper propulsion: pressurization and pressurant vent, tank and regulator sensing.
 pub const NODE5: NodeSettings = NodeSettings::new(

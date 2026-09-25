@@ -14,14 +14,18 @@
 //! Only [`calibrate`] and its supporting arithmetic are unconditional; the sampling loop needs
 //! embassy's clock and an I2C bus, so it is gated behind `hardware` (or `test`, against a mock).
 //!
-//! # One pipeline, four kinds
+//! # One pipeline, every kind
 //!
-//! What differs between a pressure transducer, a Pt1000, an MCP9700 and a rotary encoder is
-//! confined to two places: [`linearise`], which turns a raw device number into thousandths of
+//! What differs between a pressure transducer, a Pt1000, an MCP9700, an NTC and a rotary encoder
+//! is confined to two places: [`linearise`], which turns a raw device number into thousandths of
 //! whatever the sensor is actually linear in, and `calibrate`'s choice of a wrapping zero for the
 //! encoder. Everything downstream — the affine trim, the scale to the slot's unit, the i16
 //! saturation, the wire — is shared, which is what makes recalibrating any of them the same three
 //! SDO writes.
+//!
+//! The NTC kinds are the ones that are not on an I2C bus: they sit on a COM5/COM6 pin of the
+//! STM32's own ADC, which the control task owns. That sampling reaches this module through the
+//! store — see [`AnalogSensing`] — and joins the same pipeline from [`linearise`] onwards.
 
 #[cfg(any(feature = "hardware", test))]
 pub mod ext_adc;
@@ -42,6 +46,9 @@ use crate::config::{ENCODER_FULL_SCALE, SensorKind, SensorSlotConfig, Unit};
 use crate::errors::{ErrorCounter, bump};
 #[cfg(any(feature = "hardware", test))]
 use crate::index::{AdcSlot, I2cBus, PerAdcSlot, PerI2cBus, PerSensorSlot};
+// Ungated: `AnalogSensing` is part of the calibration half of this module, which builds on the
+// host with no hardware feature at all.
+use crate::index::PerAnalogInput;
 use crate::store::SENSOR_INVALID;
 #[cfg(any(feature = "hardware", test))]
 use crate::store::{RAW_INVALID, STORE};
@@ -82,6 +89,121 @@ pub fn pt1000_milli_celsius(raw: u16) -> i32 {
     ((400_000_000 * n) / denominator) as i32
 }
 
+/// The 10k NTC's curve, sampled every [`NTC_CURVE_STEP_C`] from [`NTC_CURVE_MIN_C`]: the 12-bit
+/// ADC reading at each temperature. It falls as the thermistor heats.
+///
+/// Tabulated for a 10k upper leg to +3.3V and the NTC to ground, with R25 = 10k and B = 3950 K —
+/// the divider the heating pads are wired with, and the one an NTC on COM5/COM6 is expected to
+/// use. The beta is **unmeasured**; regenerate if it or the fixed leg differs:
+///
+/// ```text
+///   R_ntc(T) = 10k * exp(3950 * (1/T - 1/298.15))
+///   counts(T) = 4095 * R_ntc / (10k + R_ntc)
+/// ```
+///
+/// The reading is ratiometric as long as the divider is fed from the same +3.3V as the ADC
+/// reference. Fed from 5V, the table is wrong, and the pin can be driven above its rating when
+/// the NTC opens.
+///
+/// Hardcoded rather than configurable on purpose: the curve is a property of the part, the same
+/// way a Pt1000's bridge is a property of the board. What varies between installations is the
+/// tolerance of the two resistances, and that is what the slot's own
+/// [`crate::config::SensorCalib`] trims — see [`crate::config::SensorKind::Ntc`].
+const NTC_CURVE: [u16; 34] = [
+    3996, // -40 C
+    3955, // -35 C
+    3900, // -30 C
+    3830, // -25 C
+    3740, // -20 C
+    3629, // -15 C
+    3495, // -10 C
+    3337, //  -5 C
+    3156, //   0 C
+    2955, //   5 C
+    2738, //  10 C
+    2510, //  15 C
+    2278, //  20 C
+    2048, //  25 C
+    1825, //  30 C
+    1614, //  35 C
+    1419, //  40 C
+    1241, //  45 C
+    1081, //  50 C
+    940,  //  55 C
+    815,  //  60 C
+    707,  //  65 C
+    613,  //  70 C
+    532,  //  75 C
+    462,  //  80 C
+    401,  //  85 C
+    350,  //  90 C
+    305,  //  95 C
+    267,  // 100 C
+    234,  // 105 C
+    206,  // 110 C
+    181,  // 115 C
+    160,  // 120 C
+    142,  // 125 C
+];
+
+/// Full scale of the STM32's 12-bit ADC, which is what [`NTC_CURVE`] is tabulated against.
+pub const ADC_FULL_SCALE: u16 = 4095;
+
+/// Temperature of `NTC_CURVE[0]`, in degrees Celsius.
+const NTC_CURVE_MIN_C: i32 = -40;
+/// Spacing between adjacent `NTC_CURVE` entries, in degrees Celsius.
+const NTC_CURVE_STEP_C: i32 = 5;
+
+/// Convert a raw 12-bit reading of an NTC divider to millidegrees Celsius, interpolating between
+/// the points of [`NTC_CURVE`].
+///
+/// `None` for anything off the ends of the curve. That covers an open thermistor (pin pulled to
+/// +3.3V) and a short (pin at ground) — the two failures that must not be reported as a
+/// plausible temperature: anything regulating on one of them would act on a number that is not a
+/// temperature at all.
+pub fn ntc_milli_celsius(counts: u16) -> Option<i32> {
+    // Descending curve, so the bracket is `curve[i] >= counts >= curve[i + 1]`.
+    if counts > NTC_CURVE[0] || counts < NTC_CURVE[NTC_CURVE.len() - 1] {
+        return None;
+    }
+
+    let mut i = 0;
+    while NTC_CURVE[i + 1] > counts {
+        i += 1;
+    }
+
+    let (high, low) = (NTC_CURVE[i] as i32, NTC_CURVE[i + 1] as i32);
+    let base_milli_c = (NTC_CURVE_MIN_C + i as i32 * NTC_CURVE_STEP_C) * 1000;
+    Some(base_milli_c + (NTC_CURVE_STEP_C * 1000 * (high - counts as i32)) / (high - low))
+}
+
+/// Where the raw counts for a [`crate::config::SensorSource::Analog`] slot come from.
+///
+/// The COM5/COM6 pins are on the STM32's own ADC, which belongs to the control task — the sensor
+/// task owns the two I2C buses and nothing else. So the control task samples them each tick and
+/// leaves the counts in [`crate::store::Store::raw_analog`], where the sensor task picks them up
+/// and calibrates them like any other slot. This trait is what lets that sampling be mocked on
+/// the host, the way [`crate::rail_sense::RailSensing`] is.
+#[allow(async_fn_in_trait)]
+pub trait AnalogSensing {
+    /// Raw 12-bit counts on each COM5/COM6 pin `wanted` asks for, [`crate::store::RAW_INVALID`]
+    /// for the rest and for any pin this build did not hand over — rev2, which has no ADC wired
+    /// up at all.
+    ///
+    /// Every pin in one call, rather than one call per pin, so that the conversions and the loop
+    /// around them stay inside this implementation instead of unrolling into the control task's
+    /// own state machine. On a board with 114 KiB for the whole application, where that future
+    /// ends up is worth a line of trait design.
+    async fn read_analog(&mut self, wanted: PerAnalogInput<bool>) -> PerAnalogInput<u16>;
+}
+
+/// rev2 has no ADC wired up at all, so no analog slot on it ever reads.
+impl AnalogSensing for crate::rail_sense::NoRails {
+    async fn read_analog(&mut self, _wanted: PerAnalogInput<bool>) -> PerAnalogInput<u16> {
+        PerAnalogInput::splat(crate::store::RAW_INVALID)
+    }
+}
+
 /// A kind's raw device number, linearised into *thousandths* of the quantity its calibration is
 /// affine in.
 ///
@@ -99,6 +221,12 @@ pub fn linearise(kind: SensorKind, raw: u16) -> Option<i32> {
         // has to wrap, which is `calibrate`'s choice of `apply_wrapped` over `apply`.
         SensorKind::Pressure | SensorKind::Mcp9700 | SensorKind::Angle => Some(raw as i32 * 1000),
         SensorKind::Pt1000 => Some(pt1000_milli_celsius(raw)),
+        // The one kind that can refuse a reading here: off either end of the curve is an open or
+        // shorted thermistor, not a very hot or very cold one, and the slot reports nothing.
+        SensorKind::Ntc => ntc_milli_celsius(raw),
+        // The same curve read from the other end: swapping the two legs of a divider turns `x`
+        // into `full scale - x`, and with a 10k fixed leg that is exact.
+        SensorKind::NtcToSupply => ntc_milli_celsius(ADC_FULL_SCALE.saturating_sub(raw)),
     }
 }
 
@@ -235,6 +363,10 @@ pub struct Sensors<I0: I2c, I1: I2c> {
     /// Last raw angle from each bus's AS5600, or [`RAW_INVALID`]. Published at 0x2006 so an
     /// encoder can be zeroed against its valve's stops without first guessing a calibration.
     raw_angle: PerI2cBus<u16>,
+    /// Last raw counts from each COM5/COM6 pin, copied out of the store where the control task
+    /// left them. Not sampled here: the STM32's own ADC belongs to the control task, and this
+    /// task owns the two I2C buses and nothing else — see [`AnalogSensing`].
+    raw_analog: PerAnalogInput<u16>,
     scan: ScanCursor,
     sweeps: u32,
 }
@@ -255,6 +387,7 @@ impl<I0: I2c, I1: I2c> Sensors<I0, I1> {
             present: PerI2cBus::splat(0),
             raw: PerAdcSlot::splat(RAW_INVALID),
             raw_angle: PerI2cBus::splat(RAW_INVALID),
+            raw_analog: PerAnalogInput::splat(RAW_INVALID),
             scan: ScanCursor::new(Instant::now()),
             sweeps: 0,
         }
@@ -340,7 +473,13 @@ impl<I0: I2c, I1: I2c> Sensors<I0, I1> {
 
     pub async fn run(&mut self) -> ! {
         loop {
-            let config = { STORE.lock().await.config.clone() };
+            // The analog counts come out of the store in the same lock as the config: the
+            // control task put them there on its own tick, and this task only calibrates them.
+            let (config, raw_analog) = {
+                let store = STORE.lock().await;
+                (store.config.clone(), store.raw_analog)
+            };
+            self.raw_analog = raw_analog;
             let now = Instant::now();
 
             self.sample(&config).await;
@@ -440,6 +579,10 @@ impl<I0: I2c, I1: I2c> Sensors<I0, I1> {
         let raw = match slot.source()? {
             SensorSource::Adc(adc) => self.raw[adc],
             SensorSource::Encoder(bus) => self.raw_angle[bus],
+            // Invalid until the control task has sampled the pin, and again if this build never
+            // handed that pin over — which counts as a missing source for the same reason an
+            // amplifier that is not wired up does.
+            SensorSource::Analog(input) => self.raw_analog[input],
         };
         if raw == RAW_INVALID {
             bump(ErrorCounter::SensorSourceMissing);
@@ -679,6 +822,31 @@ mod tests {
         assert_eq!(crate::errors::count(ErrorCounter::I2cDeviceLost), 1);
     }
 
+    /// The handover from the control task: counts arrive in `raw_analog` and are calibrated like
+    /// any other slot's. Nothing here touches I2C, which is the point — the pin is on the
+    /// STM32's own ADC.
+    #[test]
+    fn an_ntc_slot_reads_the_counts_the_control_task_left_behind() {
+        let _guard = crate::errors::test_lock();
+        crate::errors::reset_all();
+
+        use crate::index::AnalogInput;
+        let mut sensors = sensors_with(MockI2c::new(), MockI2c::new());
+        let slot = SensorSlotConfig::ntc(AnalogInput::Com6Pin1);
+
+        // Before the control task has sampled anything, the slot has no reading — the same
+        // answer, and the same counter, as an amplifier that is not wired up.
+        assert_eq!(calibrate(&slot, sensors.raw_for(&slot)), SENSOR_INVALID);
+        assert_eq!(crate::errors::count(ErrorCounter::SensorSourceMissing), 1);
+
+        sensors.raw_analog[AnalogInput::Com6Pin1] = 2048;
+        assert_eq!(calibrate(&slot, sensors.raw_for(&slot)), 2_500, "25.00 C");
+
+        // And only the pin it names: the other three are nothing to do with this slot.
+        sensors.raw_analog[AnalogInput::Com5Pin1] = 1825;
+        assert_eq!(calibrate(&slot, sensors.raw_for(&slot)), 2_500);
+    }
+
     /// A sensor pointed at hardware that is not there never transitions, so nothing event-based
     /// would ever fire — this is the counter that catches a board wired differently from its
     /// config.
@@ -717,6 +885,80 @@ mod tests {
     fn pt1000_matches_the_float_derivation() {
         // Worked through the float chain by hand: 600 counts -> 8.489 degrees C.
         assert_eq!(pt1000_milli_celsius(600), 8488);
+    }
+
+    /// The lookup brackets on a descending curve, so a table that stopped descending would send
+    /// it past the end of its own array.
+    #[test]
+    fn the_ntc_curve_descends() {
+        for pair in NTC_CURVE.windows(2) {
+            assert!(pair[0] > pair[1], "NTC_CURVE must fall monotonically: {pair:?}");
+        }
+    }
+
+    #[test]
+    fn every_ntc_curve_point_maps_back_to_its_own_temperature() {
+        for (i, &counts) in NTC_CURVE.iter().enumerate() {
+            let expected = (NTC_CURVE_MIN_C + i as i32 * NTC_CURVE_STEP_C) * 1000;
+            assert_eq!(ntc_milli_celsius(counts), Some(expected), "curve point {i}");
+        }
+    }
+
+    /// 25 C sits at mid-scale with a 10k/10k divider, and an open or shorted thermistor has no
+    /// temperature at all rather than the coldest or hottest one on the curve.
+    #[test]
+    fn the_ntc_curve_reads_room_temperature_at_mid_scale() {
+        assert_eq!(ntc_milli_celsius(2048), Some(25_000));
+        assert_eq!(ntc_milli_celsius(4095), None, "open thermistor");
+        assert_eq!(ntc_milli_celsius(0), None, "shorted thermistor");
+    }
+
+    /// An NTC slot is complete as soon as its kind is written: the curve is the part's, so the
+    /// trim starts at unity and the slot reports centicelsius off the COM5/COM6 pin.
+    #[test]
+    fn an_untrimmed_ntc_slot_reports_the_curve_verbatim() {
+        let slot = SensorSlotConfig::ntc(crate::index::AnalogInput::Com5Pin1);
+        assert_eq!(calibrate(&slot, Some(2048)), 2_500, "25.00 C in centicelsius");
+        // Off the curve is no reading, not a clamp to the end of it: an open thermistor must not
+        // look like a very cold one.
+        assert_eq!(calibrate(&slot, Some(4095)), SENSOR_INVALID);
+        assert_eq!(calibrate(&slot, None), SENSOR_INVALID);
+    }
+
+    /// The other way of wiring the divider reads the same curve from the other end. A slot on
+    /// the wrong one of the two is the failure this kind exists to prevent: 25 C read as a
+    /// plausible, wrong temperature that moves the wrong way.
+    #[test]
+    fn the_two_ntc_wirings_mirror_each_other() {
+        use crate::index::AnalogInput;
+        let to_ground = SensorSlotConfig::ntc(AnalogInput::Com5Pin1);
+        let to_supply = SensorSlotConfig::ntc_to_supply(AnalogInput::Com5Pin1);
+
+        // Mid-scale is 25 C either way round: that is where the two legs are equal.
+        assert_eq!(calibrate(&to_ground, Some(2048)), 2_500);
+        assert_eq!(calibrate(&to_supply, Some(ADC_FULL_SCALE - 2048)), 2_500);
+
+        // And they move in opposite directions from there.
+        assert!(calibrate(&to_ground, Some(1825)) > 2_500, "falls as it heats");
+        assert!(calibrate(&to_supply, Some(1825)) < 2_500, "rises as it heats");
+    }
+
+    /// What an operator actually does with an NTC: read it against a thermometer and shift it.
+    /// The offset is in millidegrees, like a Pt1000's, because both linearise to millicelsius.
+    #[test]
+    fn an_ntc_offset_trim_shifts_the_reading() {
+        let mut slot = SensorSlotConfig::ntc(crate::index::AnalogInput::Com6Pin1);
+        slot.calib.constant_milli = -1_500;
+        assert_eq!(calibrate(&slot, Some(2048)), 2_350, "25.00 C trimmed down by 1.5 C");
+    }
+
+    /// The raw-counts unit bypasses the curve for every kind, which is how a pin gets read while
+    /// its divider is still being worked out.
+    #[test]
+    fn an_ntc_slot_in_raw_counts_passes_the_reading_through() {
+        let mut slot = SensorSlotConfig::ntc(crate::index::AnalogInput::Com5Pin2);
+        slot.unit = Unit::RawCounts;
+        assert_eq!(calibrate(&slot, Some(4095)), 4095, "off the curve, but still a number");
     }
 
     /// A slot that has been told what it is but not what its numbers mean must say so, rather

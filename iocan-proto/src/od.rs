@@ -139,6 +139,18 @@ pub const SENSOR_UNIT: u16 = 0x2005;
 /// number at [`SENSOR_VALUE`].
 pub const RAW_ENCODER: u16 = 0x2006;
 
+/// Raw 12-bit counts on each of the four COM5/COM6 analog pins. `uint16[4]`, read-only.
+/// [`RAW_INVALID`] for a pin this board did not hand over or has not sampled yet.
+///
+/// The order is the analog-input order: COM5 pin 1, COM5 pin 2, COM6 pin 1, COM6 pin 2, which is
+/// also what [`SENSOR_ANALOG_INPUT`] takes. These are the STM32's own ADC pins rather than an
+/// amplifier on an I2C bus, so they never appear in [`I2C_PRESENT`]: an NTC that is not wired up
+/// reads one end of its curve, which is what [`SENSOR_VALUE`] refusing a reading tells you.
+///
+/// Uncalibrated, and what commissioning an NTC slot runs on. A pin reading near 4095 or near 0
+/// is an open or shorted thermistor.
+pub const RAW_ANALOG: u16 = 0x2007;
+
 // --- valves: the three-layer state -----------------------------------------
 
 /// What the master asked for, as a position word. `uint16[4]`, **read/write**.
@@ -192,6 +204,24 @@ pub const VALVE_CURRENT: u16 = 0x2014;
 ///
 /// See [`RELIEF_ENABLED`] for what the loop does and why `inhibited` does not vent.
 pub const RELIEF_STATE: u16 = 0x2015;
+
+/// State of each valve's heating pad. `uint8[4]`, read-only.
+///
+/// | code | meaning                                                                  |
+/// |------|--------------------------------------------------------------------------|
+/// | 0    | idle — at or above the dead band, pad off                                 |
+/// | 1    | heating — below the dead band, pad on                                     |
+/// | 2    | sensor fault — armed, but the watched slot has no valid reading, pad off  |
+/// | 3    | disabled — no pad on this valve, or switched off at [`VALVE_HEATING_ENABLED`] |
+///
+/// The *temperature* is not repeated here: it is the reading of the slot at
+/// [`VALVE_HEATING_SENSOR`], published at [`SENSOR_VALUE`] like any other sensor, and that is the
+/// same number the thermostat acts on. This object says only what the pad is doing about it.
+///
+/// Code 2 is the one to alarm on. It means the pad is switched off because the node no longer
+/// knows how warm the valve is — see [`VALVE_HEATING_ENABLED`] for why that is the only safe
+/// answer, and why there is no mode that heats without a reading.
+pub const VALVE_HEATING_STATE: u16 = 0x2019;
 
 // --- direct high current output control ------------------------------------
 
@@ -556,16 +586,32 @@ pub const VALVE_POSITION_SENSOR: u16 = 0x301B;
 /// Which I2C bus each sensor slot reads from: 0, 1, or [`NO_INDEX`] for an unused slot.
 /// `uint8[16]`, read/write.
 ///
-/// Together with [`SENSOR_KIND`] this is the whole of a slot's addressing. An angle slot is the
-/// AS5600 on this bus — fixed address 0x36, so at most one per bus, and [`SENSOR_AMPLIFIER`] is
-/// ignored. Every other kind is the amplifier named by [`SENSOR_AMPLIFIER`] on this bus.
+/// Together with [`SENSOR_KIND`] this is the whole of a slot's addressing, for every kind that is
+/// on a bus. An angle slot is the AS5600 on this bus — fixed address 0x36, so at most one per
+/// bus, and [`SENSOR_AMPLIFIER`] is ignored. A pressure, Pt1000 or MCP9700 slot is the amplifier
+/// named by [`SENSOR_AMPLIFIER`] on this bus. An NTC slot is on none of them: it names a COM5 or
+/// COM6 pin at [`SENSOR_ANALOG_INPUT`] instead, and ignores this object.
 pub const SENSOR_BUS: u16 = 0x3020;
 
 /// Which amplifier on the slot's bus, as an index into the board's address table (0..=8) — not a
 /// raw I2C address. `uint8[16]`, read/write.
 ///
-/// Ignored for an angle slot, whose device has no address straps.
+/// Ignored for an angle slot, whose device has no address straps, and for an NTC slot, which is
+/// not on a bus at all.
 pub const SENSOR_AMPLIFIER: u16 = 0x3021;
+
+/// Which COM5/COM6 pin an NTC slot reads: 0 = COM5 pin 1, 1 = COM5 pin 2, 2 = COM6 pin 1,
+/// 3 = COM6 pin 2. `uint8[16]`, read/write.
+///
+/// Ignored by every kind other than an NTC (codes 5 and 6), the kinds that are not on an I2C
+/// bus: they are a divider straight onto one of the STM32's own ADC pins, so this object replaces
+/// [`SENSOR_BUS`] and [`SENSOR_AMPLIFIER`] rather than adding to them. The raw counts on all
+/// four pins are at [`RAW_ANALOG`], in this same order.
+///
+/// Defaults to 0 (COM5 pin 1), so writing nothing but the kind gives a working slot. A board can
+/// decline to hand a pin over — rev2 has no ADC at all — and a slot on such a pin reports no
+/// reading rather than somebody else's voltage.
+pub const SENSOR_ANALOG_INPUT: u16 = 0x3028;
 
 /// What kind of sensor is in each slot. `uint8[16]`, read/write.
 ///
@@ -576,9 +622,21 @@ pub const SENSOR_AMPLIFIER: u16 = 0x3021;
 /// | 2    | Pt1000 temperature                       |
 /// | 3    | MCP9700 temperature (linear)             |
 /// | 4    | AS5600 magnetic rotary encoder           |
+/// | 5    | 10k NTC on a COM5/COM6 pin, to ground    |
+/// | 6    | the same NTC, wired to +3.3V instead     |
 ///
 /// The kind decides which device the slot is read from and how that device's raw number is
 /// linearised. Everything after that is [`SENSOR_OFFSET`]..[`SENSOR_CONSTANT`].
+///
+/// Kinds 1..4 are on an I2C bus and are addressed by [`SENSOR_BUS`] and [`SENSOR_AMPLIFIER`];
+/// kinds 5 and 6 are a divider on one of the STM32's own ADC pins and are addressed by
+/// [`SENSOR_ANALOG_INPUT`] instead.
+///
+/// The two NTC codes are the two ways to wire that divider, and which one a slot is on changes
+/// what a raw count means: **5** is 10k from the pin to +3.3V with the thermistor to ground, so
+/// the reading falls as it heats, and **6** is the two legs swapped. A slot on the wrong one of
+/// the two reports a plausible temperature that moves the wrong way, which is why the wiring is
+/// part of the kind rather than something to remember.
 ///
 /// # Write the kind first
 ///
@@ -587,11 +645,12 @@ pub const SENSOR_AMPLIFIER: u16 = 0x3021;
 /// Writing the same kind again is a no-op, so a master that resends its whole configuration will
 /// not wipe the coefficients it just sent.
 ///
-/// For kinds 2 and 3 the re-seeded calibration is complete and working: the Pt1000 bridge is the
-/// board's own resistors and the MCP9700's curve is in its datasheet, so one write is enough to
-/// get a real temperature. Kinds 1 and 4 have no honest default — a transducer's slope comes off
-/// the bench and an encoder's from where its magnet ended up — so they are left uncalibrated and
-/// report no reading (see [`SENSOR_SLOPE`]) until the coefficients arrive.
+/// For kinds 2, 3, 5 and 6 the re-seeded calibration is complete and working: the Pt1000 bridge is
+/// the board's own resistors, the MCP9700's curve is in its datasheet, and the NTC's is the
+/// thermistor's own (10k at 25 degC, B = 3950 K, in a 10k divider to +3.3V), so one write is
+/// enough to get a real temperature. Kinds 1 and 4 have no honest default — a transducer's slope
+/// comes off the bench and an encoder's from where its magnet ended up — so they are left
+/// uncalibrated and report no reading (see [`SENSOR_SLOPE`]) until the coefficients arrive.
 pub const SENSOR_KIND: u16 = 0x3022;
 
 /// Calibration offset, in thousandths of the linearised input. `int32[16]`, read/write.
@@ -615,6 +674,7 @@ pub const SENSOR_KIND: u16 = 0x3022;
 /// | pressure  | milli-counts | milli-counts | nanobar per count        | millibar       |
 /// | MCP9700   | milli-counts | milli-counts | nanocelsius per count    | millicelsius   |
 /// | Pt1000    | millicelsius | millicelsius | nanocelsius per mC, 1e9 = unity | millicelsius |
+/// | NTC (5, 6)| millicelsius | millicelsius | nanocelsius per mC, 1e9 = unity | millicelsius |
 /// | angle     | milli-counts | milli-counts | see below                | milli-promille |
 ///
 /// A transducer's bench calibration is recorded as `pressure_bar = (reading - offset) * factor`,
@@ -625,7 +685,10 @@ pub const SENSOR_KIND: u16 = 0x3022;
 ///
 /// For a Pt1000 the bridge inversion is fixed, since it is the board's resistors rather than the
 /// probe, so a virgin slot is offset 0, slope 1e9, constant 0 and the three fields exist to trim
-/// out amplifier offset and gain error against a known bath.
+/// out amplifier offset and gain error against a known bath. An NTC is the same shape: the curve
+/// is the part's, and what a virgin slot is short of is the tolerance of the divider and the
+/// thermistor's beta spread. Set the constant to the millidegrees a thermometer says the reading
+/// is out by; the offset and slope are there for a two-point trim.
 ///
 /// For an angle slot, park the valve on each stop, read the raw angle ([`RAW_ENCODER`]), then set
 /// this to `closed_counts * 1000` and the slope to `1e9 / (open_counts - closed_counts)`. That
@@ -747,6 +810,78 @@ pub const RELIEF_PULSE_MS: u16 = 0x3055;
 /// vessel.
 pub const RELIEF_COOLDOWN_MS: u16 = 0x3056;
 
+// --- valve heating ---------------------------------------------------------
+
+/// Whether each valve's heating pad thermostat runs. `uint8[4]`, read/write.
+///
+/// A pad is a resistive heater on a high current output, holding a valve at
+/// [`VALVE_HEATING_SETPOINT`] as measured by the sensor slot at [`VALVE_HEATING_SENSOR`]. It is
+/// configuration rather than a command: a node brought up on a saved configuration starts
+/// regulating on its own, and keeps regulating through a master outage, because a valve that
+/// freezes shut while the bus is quiet is the failure this exists to prevent.
+///
+/// # The pad owns its outputs
+///
+/// Whatever [`VALVE_HEATING_HCO`] names is the thermostat's, in every link state. A configuration
+/// that also maps a valve onto that output is refused outright rather than arbitrated. The one
+/// exception is raw debug mode ([`RAW_DEBUG_MODE`]), where every output goes back to direct
+/// control at [`HCO_DIGITAL`].
+///
+/// # No reading means no heat
+///
+/// If the watched slot reports [`SENSOR_INVALID`] — an open or shorted thermistor, a slot that
+/// was never configured, an amplifier that stopped answering — the pad switches **off** and
+/// [`VALVE_HEATING_STATE`] reports a sensor fault. There is deliberately no mode that heats
+/// without feedback: an unregulated heater keeps heating until something else gives, and a
+/// broken thermistor is exactly when such a mode would be reached for. A pad that must be forced
+/// on regardless can be driven from raw debug mode, where it is an explicit, visible decision.
+pub const VALVE_HEATING_ENABLED: u16 = 0x3080;
+
+/// Which high current output switches each valve's pad: 1..=4 as silkscreened, 0 for none.
+/// `uint8[4]`, read/write.
+///
+/// One output per pad: the pads this board drives are single-ended switches to one lead, so a
+/// second output would be a second pad, not more current through this one.
+///
+/// Together with [`VALVE_HEATING_SENSOR`] this is what makes a pad *fitted*. Neither half works
+/// alone — an output with no slot to watch is a heater with no way to stop, and a slot with no
+/// output is a temperature nobody acts on — so a heater switched on with only one of them set is
+/// refused.
+pub const VALVE_HEATING_HCO: u16 = 0x3081;
+
+/// Which sensor slot reports the pad's temperature, or [`NO_INDEX`] for none. `uint8[4]`,
+/// read/write.
+///
+/// Any slot that reports a temperature will do — an NTC on a COM5/COM6 pin
+/// ([`SENSOR_ANALOG_INPUT`]), a Pt1000, an MCP9700. The node refuses a configuration naming an
+/// empty slot or one reporting something that is not a temperature, rather than holding a valve
+/// at "30 hundredths of a bar".
+///
+/// Regulating on a published slot rather than on a private pin is deliberate: the reading the
+/// thermostat acts on is the same one a master reads at [`SENSOR_VALUE`], trimmed by the same
+/// calibration ([`SENSOR_OFFSET`]..[`SENSOR_CONSTANT`]), so the two can never disagree.
+pub const VALVE_HEATING_SENSOR: u16 = 0x3082;
+
+/// Temperature to hold, in the watched slot's own unit ([`SENSOR_UNIT`]). `int16[4]`,
+/// read/write.
+///
+/// A slot reporting centicelsius — what every temperature kind reports by default — takes 3000
+/// for 30.00 degC. Same convention as [`RELIEF_THRESHOLD`], and for the same reason: the number
+/// written here and the number read back at [`SENSOR_VALUE`] are in the same unit, so no
+/// conversion sits between them to be wrong.
+///
+/// An unconfigured slot holds `i16::MIN`, which asks for no heat at all — so a pad switched on
+/// before it is configured does nothing, rather than heating to 0.00 degC.
+pub const VALVE_HEATING_SETPOINT: u16 = 0x3083;
+
+/// Half-width of the dead band, in the watched slot's unit. `uint16[4]`, read/write.
+///
+/// The pad switches on below `setpoint - hysteresis` and off above `setpoint + hysteresis`, and
+/// inside the band it keeps doing whatever it was doing. Without that the pad would switch on and
+/// off at the resolution of one ADC count. Defaults to 100, one degree either side of the
+/// setpoint for a slot reporting centicelsius.
+pub const VALVE_HEATING_HYSTERESIS: u16 = 0x3084;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -797,6 +932,7 @@ mod tests {
             SENSOR_VALUE,
             SENSOR_UNIT,
             RAW_ENCODER,
+            RAW_ANALOG,
             VALVE_COMMANDED,
             VALVE_TARGET,
             VALVE_MEASURED,
@@ -837,6 +973,7 @@ mod tests {
             VALVE_POSITION_SENSOR,
             SENSOR_BUS,
             SENSOR_AMPLIFIER,
+            SENSOR_ANALOG_INPUT,
             SENSOR_KIND,
             SENSOR_OFFSET,
             SENSOR_SLOPE,
@@ -853,6 +990,12 @@ mod tests {
             RELIEF_POSITION,
             RELIEF_PULSE_MS,
             RELIEF_COOLDOWN_MS,
+            VALVE_HEATING_STATE,
+            VALVE_HEATING_ENABLED,
+            VALVE_HEATING_HCO,
+            VALVE_HEATING_SENSOR,
+            VALVE_HEATING_SETPOINT,
+            VALVE_HEATING_HYSTERESIS,
         ];
         let mut sorted = all;
         sorted.sort_unstable();

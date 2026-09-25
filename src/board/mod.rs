@@ -99,6 +99,8 @@ pub fn pet_watchdog() {
 }
 
 // current sensing
+#[cfg(feature = "rev3")]
+use embassy_stm32::adc::AdcChannel;
 use embassy_stm32::dma;
 use embassy_stm32::peripherals::{ADC1, DMA1_CH1};
 use embassy_stm32::{adc, peripherals};
@@ -191,6 +193,12 @@ pub async fn init_board(spawner: Spawner) -> Board {
             v_hco12_supply: p.PC2,
             v_hco34_supply: p.PC3,
             v_temp: p.PA4,
+            analog: crate::index::PerAnalogInput::new([
+                Some(p.PA6.degrade_adc()), // COM5 pin 1, A_IN_0
+                Some(p.PA5.degrade_adc()), // COM5 pin 2, A_IN_1
+                Some(p.PC5.degrade_adc()), // COM6 pin 1, A_IN_2
+                Some(p.PC4.degrade_adc()), // COM6 pin 2, A_IN_3
+            ]),
         },
         adc::SampleTime::CYCLES7_5,
     )

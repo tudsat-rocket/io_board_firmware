@@ -1,7 +1,8 @@
 use crate::board::pins_rev3::{HC_SENSE, HC2_SENSE, I_SENSE_1, I_SENSE_2, I_SENSE_3, TH_SENSE, V_MAIN_SENSE};
+use crate::index::PerAnalogInput;
 use embassy_stm32::{
     Peri,
-    adc::{Adc, SampleTime},
+    adc::{Adc, AnyAdcChannel, SampleTime},
     peripherals::ADC1,
 };
 
@@ -60,6 +61,9 @@ pub struct OnboardSens3Peri {
     pub v_hco12_supply: Peri<'static, HC2_SENSE>,
     pub v_hco34_supply: Peri<'static, HC_SENSE>,
     pub v_temp: Peri<'static, TH_SENSE>,
+    /// The four COM5/COM6 pins, for the [`crate::config::SensorKind::Ntc`] sensor slots.
+    /// None, if the pin is used somewhere else or unused
+    pub analog: PerAnalogInput<Option<AnyAdcChannel<'static, ADC1>>>,
 }
 
 impl OnboardSensRev3 {
@@ -133,6 +137,29 @@ impl VoltageSens for OnboardSensRev3 {
         reading_v_to_system_v(self.reading_to_mv(reading))
     }
 }
+impl crate::sensors::AnalogSensing for OnboardSensRev3 {
+    async fn read_analog(&mut self, wanted: PerAnalogInput<bool>) -> PerAnalogInput<u16> {
+        // NOTE: number of samples chosen arbitrarily
+        const SAMPLES: u32 = 4;
+
+        let mut raw = PerAnalogInput::splat(crate::store::RAW_INVALID);
+        for (input, &wanted) in wanted.iter() {
+            // Taken out and put back so the borrow of the pin does not overlap the borrow of
+            // `self` the conversion needs; nothing else can observe the gap, since this is the
+            // only task that touches the ADC.
+            if let (true, Some(mut pin)) = (wanted, self.pins.analog[input].take()) {
+                let mut sum = 0u32;
+                for _ in 0..SAMPLES {
+                    sum += self.adc.read(&mut pin, SampleTime::CYCLES239_5).await as u32;
+                }
+                raw[input] = (sum / SAMPLES) as u16;
+                self.pins.analog[input] = Some(pin);
+            }
+        }
+        raw
+    }
+}
+
 impl crate::rail_sense::RailSensing for OnboardSensRev3 {
     async fn read(&mut self) -> Option<crate::rail_sense::Rails> {
         // Both arrays are in `RailId` order: Logic, Hco12, Hco34.

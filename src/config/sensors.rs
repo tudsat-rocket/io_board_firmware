@@ -10,10 +10,10 @@
 //! 3. **What to report it as** — [`Unit`], which is per slot rather than global because no single
 //!    scale works for a 400 bar transducer, a Pt1000 and a valve angle at once.
 //!
-//! All of it is runtime-writable (0x3020..0x3027) and persisted, so a sensor can be recalibrated,
+//! All of it is runtime-writable (0x3020..0x3028) and persisted, so a sensor can be recalibrated,
 //! moved to a different amplifier, or taken off the process data plane without a firmware build.
 
-use crate::index::{AdcSlot, AmplifierId, I2cBus, PdoSensorChannel, PerAmplifier, SensorSlot};
+use crate::index::{AdcSlot, AmplifierId, AnalogInput, I2cBus, PdoSensorChannel, PerAmplifier, SensorSlot};
 
 /// Sizes of the sensor-side domains. See the note in [`super`] on why these exist as plain
 /// numbers at all.
@@ -24,6 +24,8 @@ pub const NUM_SENSOR_SLOTS: usize = SensorSlot::COUNT;
 /// How many of those slots can be on the bus as process data at once. Fewer than
 /// [`NUM_SENSOR_SLOTS`] on purpose — see [`PdoSensorChannel`].
 pub const NUM_PDO_SENSOR_CHANNELS: usize = PdoSensorChannel::COUNT;
+/// The STM32's own ADC pins an external NTC can sit on: both pins of COM5 and both of COM6.
+pub const NUM_ANALOG_INPUTS: usize = AnalogInput::COUNT;
 
 /// ADC101C027 amplifier addresses, in scan order. Everything that talks about an "amplifier
 /// index" means an [`AmplifierId`], never a raw I2C address — the index is what travels over CAN,
@@ -85,6 +87,28 @@ pub enum SensorKind {
     /// *modulo a full turn* rather than linearly — see [`SensorCalib::apply_wrapped`] — so a
     /// valve whose closed position sits near the wrap point still reads sensibly.
     Angle = 4,
+    /// 10k NTC thermistor in a divider on one of the STM32's own ADC pins ([`AnalogInput`]),
+    /// i.e. on COM5 or COM6 rather than on an I2C amplifier. **10k from the pin to +3.3V and the
+    /// thermistor from the pin to ground**, so the reading falls as it heats; the other way round
+    /// is [`Self::NtcToSupply`].
+    ///
+    /// The curve is hardcoded — it belongs to the part number, not to the installation — so the
+    /// calibration on top of it is a trim, the same way a [`Self::Pt1000`]'s is. See
+    /// `crate::sensors::ntc_milli_celsius`.
+    ///
+    /// This and [`Self::NtcToSupply`] are the kinds whose slot names an
+    /// [`SensorSlotConfig::analog`] input instead of a bus and an address strap.
+    Ntc = 5,
+    /// [`Self::Ntc`] with the two legs of the divider swapped: the thermistor to +3.3V and the
+    /// 10k to ground, so the reading *rises* as it heats. The same curve, read from the other
+    /// end — with a 10k fixed leg, swapping the legs turns a reading `x` into `full scale - x`
+    /// exactly.
+    ///
+    /// Its own kind rather than a flag because the wiring changes what a raw count *means*, and
+    /// a slot on the wrong one of the two reads a mirrored curve: a plausible temperature that
+    /// moves the wrong way. That is worth a wire code of its own, so which one a slot is on is
+    /// visible in the same object that says it is a thermistor at all.
+    NtcToSupply = 6,
 }
 
 impl SensorKind {
@@ -95,6 +119,8 @@ impl SensorKind {
             2 => Some(Self::Pt1000),
             3 => Some(Self::Mcp9700),
             4 => Some(Self::Angle),
+            5 => Some(Self::Ntc),
+            6 => Some(Self::NtcToSupply),
             _ => None,
         }
     }
@@ -104,8 +130,21 @@ impl SensorKind {
         match self {
             Self::None => Unit::CentiBar,
             Self::Pressure => Unit::CentiBar,
-            Self::Pt1000 | Self::Mcp9700 => Unit::CentiCelsius,
+            Self::Pt1000 | Self::Mcp9700 | Self::Ntc | Self::NtcToSupply => Unit::CentiCelsius,
             Self::Angle => Unit::Promille,
+        }
+    }
+
+    /// Whether this kind is read over I2C, i.e. whether the slot's bus and address strap mean
+    /// anything.
+    ///
+    /// False only for the [`Self::Ntc`] kinds, which are on the board's own ADC pins. Written as
+    /// a question about the kind rather than checked at each call site so that a new kind on a
+    /// new transport has one place to declare itself.
+    pub const fn is_on_i2c(self) -> bool {
+        match self {
+            Self::Pressure | Self::Pt1000 | Self::Mcp9700 | Self::Angle => true,
+            Self::None | Self::Ntc | Self::NtcToSupply => false,
         }
     }
 
@@ -118,6 +157,11 @@ impl SensorKind {
     ///   before the calibration is reached, so a unity trim is the honest starting point and a
     ///   slot that is never trimmed still reads a real temperature.
     /// - [`Self::Mcp9700`] — 10 mV/degC and 500 mV at zero are in the datasheet.
+    /// - [`Self::Ntc`] — the thermistor curve is the part's (10k at 25 degC, B = 3950 K) and the
+    ///   divider is the harness's, both already applied before the calibration is reached. What
+    ///   is left for the trim is the tolerance of the two resistances and the thermistor's own
+    ///   beta spread, which is what the offset is for — measured against a thermometer, the same
+    ///   way a Pt1000's is against a bath.
     ///
     /// The other kinds get [`SensorCalib::ZERO`], which reports nothing at all rather than a
     /// confident wrong number, because their curve belongs to the individual sensor rather than
@@ -127,7 +171,9 @@ impl SensorKind {
     /// one that says it has no reading.
     pub const fn default_calib(self) -> SensorCalib {
         match self {
-            Self::Pt1000 => SensorCalib::UNITY,
+            // Both already arrive in millicelsius, from a curve that is a property of the board
+            // or the part rather than of the installation, so the trim starts at unity.
+            Self::Pt1000 | Self::Ntc | Self::NtcToSupply => SensorCalib::UNITY,
             Self::Mcp9700 => SensorCalib::MCP9700,
             Self::None | Self::Pressure | Self::Angle => SensorCalib::ZERO,
         }
@@ -244,12 +290,13 @@ pub enum UnitPrefix {
 /// | [`SensorKind::Pressure`] | milli-counts | milli-counts | nanobar per count | millibar |
 /// | [`SensorKind::Mcp9700`] | milli-counts | milli-counts | nanocelsius per count | millicelsius |
 /// | [`SensorKind::Pt1000`] | millicelsius | millicelsius | nanocelsius per millicelsius, unity `1e9` | millicelsius |
+/// | [`SensorKind::Ntc`] | millicelsius | millicelsius | nanocelsius per millicelsius, unity `1e9` | millicelsius |
 /// | [`SensorKind::Angle`] | milli-counts | milli-counts, wrapping | see [`Self::angle_over`] | milli-promille |
 ///
 /// Everything a slot reports is then scaled from those thousandths to its own [`Unit`], which is
 /// what lets a slot's unit change without any of its coefficients moving.
 ///
-/// Counting the raw side in thousandths is what makes one record serve all four: it gives the
+/// Counting the raw side in thousandths is what makes one record serve every kind: it gives the
 /// analogue kinds a sub-count offset (which is how the bench calibrations are recorded) and the
 /// Pt1000 a millidegree one, out of the same field.
 ///
@@ -311,7 +358,8 @@ impl SensorCalib {
     /// A pass-through: the linearised value, in its own milli-units, is the answer.
     ///
     /// The starting point for [`SensorKind::Pt1000`], whose bridge inversion already produces
-    /// millicelsius — the trim exists to correct the amplifier, not to define the curve.
+    /// millicelsius, and for [`SensorKind::Ntc`], whose curve does — in both cases the trim
+    /// exists to correct the parts, not to define the curve.
     pub const UNITY: Self = Self {
         offset_milli: 0,
         slope_nano: 1_000_000_000,
@@ -403,26 +451,39 @@ impl SensorCalib {
 
 /// Where a slot's raw number comes from.
 ///
-/// Derived from the slot's kind and bus rather than configured separately: an encoder's address
-/// is fixed in the part, so naming the bus names the device, and every other kind is an
-/// amplifier at a strap. That keeps 0x3020/0x3021 meaning exactly what they always meant and
-/// leaves one fewer object for an operator to get out of step with the kind.
+/// Derived from the slot's kind and its addressing fields rather than configured separately: an
+/// encoder's address is fixed in the part, so naming the bus names the device; an NTC is on one
+/// of the board's own ADC pins, so naming the pin names it; and every other kind is an amplifier
+/// at a strap. That keeps 0x3020/0x3021 meaning exactly what they always meant and leaves one
+/// fewer object for an operator to get out of step with the kind.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, defmt::Format)]
 pub enum SensorSource {
     /// An ADC101C027 amplifier channel.
     Adc(AdcSlot),
     /// The AS5600 on this bus.
     Encoder(I2cBus),
+    /// One of the STM32's own ADC pins on COM5 or COM6, sampled by the control task rather than
+    /// over I2C — see [`crate::sensors::AnalogSensing`].
+    Analog(AnalogInput),
 }
 
 #[derive(Clone, Copy, Debug, defmt::Format)]
 pub struct SensorSlotConfig {
     pub kind: SensorKind,
-    /// Which I2C bus, or `None` for an unused slot.
+    /// Which I2C bus, or `None` for an unused slot. Ignored for the [`SensorKind::Ntc`] kinds,
+    /// which are not on a bus at all.
     pub bus: Option<I2cBus>,
     /// Which address strap, i.e. which entry of [`AMPLIFIER_ADDRESSES`]. Ignored for
-    /// [`SensorKind::Angle`], whose device has no address straps.
+    /// [`SensorKind::Angle`], whose device has no address straps, and for [`SensorKind::Ntc`].
     pub amplifier: AmplifierId,
+    /// Which COM5/COM6 pin, for the two [`SensorKind::Ntc`] wirings. Ignored by every other kind.
+    ///
+    /// A separate field rather than a reinterpretation of `bus` or `amplifier`: those two name a
+    /// device on an I2C bus, an NTC is a voltage on one of the STM32's own pins, and giving one
+    /// object two meanings depending on a third is how a slot ends up reading a pin nobody
+    /// intended. The default is [`AnalogInput::Com5Pin1`], so writing nothing but the kind over
+    /// SDO (0x3022 = 5) lands on COM5 pin 1 and reads a real temperature.
+    pub analog: AnalogInput,
     pub unit: Unit,
     pub calib: SensorCalib,
     /// Which TPDO sensor channel broadcasts this slot, if any.
@@ -440,6 +501,7 @@ impl SensorSlotConfig {
             kind: SensorKind::None,
             bus: None,
             amplifier: AmplifierId::Amp0,
+            analog: AnalogInput::Com5Pin1,
             unit: Unit::CentiBar,
             calib: SensorCalib::ZERO,
             pdo_channel: None,
@@ -480,6 +542,30 @@ impl SensorSlotConfig {
         Self::from_kind(SensorKind::Mcp9700, bus, amplifier)
     }
 
+    /// A 10k NTC in a divider on one of the COM5/COM6 pins, thermistor to ground.
+    ///
+    /// No bus and no strap: the pin is the whole address. Like the other kinds whose curve comes
+    /// with the part, this is complete as it stands — the slot reads a real temperature before
+    /// anyone trims it, and the trim is [`SensorCalib::constant_milli`] in millidegrees.
+    pub const fn ntc(analog: AnalogInput) -> Self {
+        Self::ntc_wired(SensorKind::Ntc, analog)
+    }
+
+    /// [`Self::ntc`] with the divider the other way round: thermistor to +3.3V, 10k to ground.
+    pub const fn ntc_to_supply(analog: AnalogInput) -> Self {
+        Self::ntc_wired(SensorKind::NtcToSupply, analog)
+    }
+
+    const fn ntc_wired(kind: SensorKind, analog: AnalogInput) -> Self {
+        Self {
+            kind,
+            analog,
+            unit: kind.natural_unit(),
+            calib: kind.default_calib(),
+            ..Self::unused()
+        }
+    }
+
     /// The AS5600 on `bus`, reporting promille of a valve travel that spans `counts` of the turn
     /// starting at `zero_counts`. Negative `counts` for a valve that opens counter-clockwise —
     /// see [`SensorCalib::angle_over`].
@@ -506,17 +592,28 @@ impl SensorSlotConfig {
     /// to get wrong — the only remaining questions are whether a bus is set and which kind of
     /// device is on it.
     pub const fn source(&self) -> Option<SensorSource> {
-        let Some(bus) = self.bus else {
-            return None;
-        };
         // Exhaustive rather than a catch-all, so a new kind has to say here which device it is
         // read from instead of silently defaulting to an amplifier strap.
         match self.kind {
             SensorKind::None => None,
-            SensorKind::Angle => Some(SensorSource::Encoder(bus)),
-            SensorKind::Pressure | SensorKind::Pt1000 | SensorKind::Mcp9700 => {
-                Some(SensorSource::Adc(AdcSlot::new(bus, self.amplifier)))
-            }
+            // The kinds that are not on a bus, answered before the bus is looked at.
+            SensorKind::Ntc | SensorKind::NtcToSupply => Some(SensorSource::Analog(self.analog)),
+            SensorKind::Angle => match self.bus {
+                Some(bus) => Some(SensorSource::Encoder(bus)),
+                None => None,
+            },
+            SensorKind::Pressure | SensorKind::Pt1000 | SensorKind::Mcp9700 => match self.bus {
+                Some(bus) => Some(SensorSource::Adc(AdcSlot::new(bus, self.amplifier))),
+                None => None,
+            },
+        }
+    }
+
+    /// Which COM5/COM6 pin this slot reads, or `None` for anything that is not an NTC.
+    pub const fn analog_input(&self) -> Option<AnalogInput> {
+        match self.source() {
+            Some(SensorSource::Analog(input)) => Some(input),
+            _ => None,
         }
     }
 
@@ -547,6 +644,32 @@ mod tests {
         assert_eq!(SensorSlotConfig::unused().source(), None);
     }
 
+    /// An NTC is on one of the board's own pins, so it needs no bus at all — and must not be
+    /// held back by one, since nothing would ever set it.
+    #[test]
+    fn an_ntc_slot_needs_no_bus() {
+        let ntc = SensorSlotConfig::ntc(AnalogInput::Com6Pin2);
+        assert_eq!(ntc.bus, None);
+        assert_eq!(ntc.source(), Some(SensorSource::Analog(AnalogInput::Com6Pin2)));
+        assert_eq!(ntc.analog_input(), Some(AnalogInput::Com6Pin2));
+        assert_eq!(ntc.adc_slot(), None, "an NTC is not on an amplifier strap");
+        // Nothing else reads the analog field, however it happens to be set.
+        let mut probe = SensorSlotConfig::pt1000(I2cBus::Bus0, AmplifierId::Amp0);
+        probe.analog = AnalogInput::Com6Pin2;
+        assert_eq!(probe.analog_input(), None);
+    }
+
+    /// A bare `0x3022 = 5` write has to leave a slot that reads a real temperature off COM5, the
+    /// way a bare Pt1000 write does — so the kind's own defaults are what the constructor uses.
+    #[test]
+    fn a_fresh_ntc_slot_is_already_calibrated() {
+        let ntc = SensorSlotConfig::ntc(AnalogInput::Com5Pin1);
+        assert_eq!(ntc.unit, Unit::CentiCelsius);
+        assert_eq!(ntc.calib, SensorCalib::UNITY);
+        assert!(ntc.calib.is_calibrated());
+        assert_eq!(SensorSlotConfig::unused().analog, AnalogInput::Com5Pin1);
+    }
+
     /// The decomposition the unit codes are really made of, kept as accessors so the wire code
     /// stays one stable byte.
     #[test]
@@ -565,6 +688,8 @@ mod tests {
         assert_eq!(Unit::from_u8(3), Some(Unit::RawCounts));
         assert_eq!(SensorKind::from_u8(1), Some(SensorKind::Pressure));
         assert_eq!(SensorKind::from_u8(2), Some(SensorKind::Pt1000));
-        assert_eq!(SensorKind::from_u8(5), None);
+        assert_eq!(SensorKind::from_u8(5), Some(SensorKind::Ntc));
+        assert_eq!(SensorKind::from_u8(6), Some(SensorKind::NtcToSupply));
+        assert_eq!(SensorKind::from_u8(7), None);
     }
 }

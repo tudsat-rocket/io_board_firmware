@@ -34,7 +34,7 @@ pub async fn spawn(
 ) {
     info!("Can task spawner activated");
     can.modify_config().set_loopback(false).set_silent(false);
-    can.set_bitrate(125_000);
+    can.set_bitrate(500_000);
     let catch_all = filter::Mask32::accept_all();
     can.modify_filters().enable_bank(0, Fifo::Fifo0, catch_all).enable_bank(1, Fifo::Fifo1, catch_all);
     can.enable().await;
