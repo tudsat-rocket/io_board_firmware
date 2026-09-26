@@ -120,6 +120,18 @@ impl ValveConfig {
         }
     }
 
+    pub const fn servo_on_inversed_pair(pair: HcoPair, closed_us: u16, open_us: u16, travel_ms: u16) -> Self {
+        Self {
+            kind: ValveKind::Servo,
+            power_hco: Some(pair.signal()),
+            signal_hco: Some(pair.power()),
+            closed_us,
+            open_us,
+            travel_ms,
+            ..Self::unmapped()
+        }
+    }
+
     pub const fn solenoid_on(hco: HcoId) -> Self {
         Self {
             kind: ValveKind::Solenoid,

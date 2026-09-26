@@ -136,8 +136,16 @@ pub const NODE6: NodeSettings = NodeSettings::new(
     // .with_sensor(Slot3, pressure(Bus1, Amp1, sensors::COMB_CHAMBER_2_P)),
 );
 
-pub const NODE7: NodeSettings = NodeSettings::new(7, Config::new());
-pub const NODE8: NodeSettings = NodeSettings::new(8, Config::new());
+pub const NODE7: NodeSettings = NodeSettings::new(
+    7,
+    Config::new()
+        // external ox fill
+        .with_valve(Valve0, ValveConfig::solenoid_on(HcoId::Hco0))
+        // external ox depressure
+        .with_valve(Valve1, ValveConfig::solenoid_on(HcoId::Hco1)),
+);
+// igniter on Hco12
+pub const NODE8: NodeSettings = NodeSettings::new(8, Config::new().with_valve(Valve0, valves::ext_n2(HcoPair::B)));
 pub const NODE9: NodeSettings = NodeSettings::new(9, Config::new());
 
 // /// 60 bar, in the centibar that a 100 bar transducer slot reports.

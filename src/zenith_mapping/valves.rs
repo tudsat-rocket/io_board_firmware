@@ -41,6 +41,12 @@ pub const fn pressurization(pair: HcoPair) -> ValveConfig {
     servo(pair, 2310, 1230)
 }
 
+pub const fn ext_n2(pair: HcoPair) -> ValveConfig {
+    let open_us = 1410;
+    let closed_us = 2390;
+    ValveConfig::servo_on_inversed_pair(pair, closed_us, open_us, UNMEASURED_TRAVEL_MS)
+}
+
 /// Mid-range travel for bench work with an uncharacterised servo.
 pub const fn placeholder_servo(pair: HcoPair) -> ValveConfig {
     servo(pair, 2000, 1000)
