@@ -63,8 +63,12 @@ pub const D_40BAR: Transducer = centibar(-385.0, 0.0535);
 // --- 100 bar --------------------------------------------------------------
 
 /// At R_gain = 100R, ref = 0V
-// pub const A_100BAR: Transducer = centibar(47.0, 0.10604454);
-pub const A_100BAR: Transducer = centibar(1.0, 0.10604454);
+///
+/// Read 14.05 bar high against B_100BAR with an offset of 1.0, so the offset moves up by
+/// 14.05 / 0.10604454 = 132.49 counts. The ADC sits at 0 counts below ~21 bar, so nothing
+/// under that can be recovered here.
+pub const A_100BAR: Transducer = centibar(132.49, 0.10604454);
+// pub const A_100BAR: Transducer = centibar(1.0, 0.10604454);
 /// At R_gain = 220R, ref = 0V
 pub const B_100BAR: Transducer = centibar(88.0, 0.22675737);
 /// At R_gain = 120R, ref = 0V

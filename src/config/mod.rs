@@ -111,7 +111,7 @@ impl Config {
             master_node_id: 1,
             fallback_a_ms: 3_000,
             fallback_b_ms: 300_000,
-            fallback_enabled: false,
+            fallback_enabled: true,
             heartbeat_period_ms: 1000,
             valves: PerValve::splat(ValveConfig::unmapped()),
             heating: PerValve::splat(ValveHeatingConfig::none()),
@@ -508,7 +508,8 @@ mod tests {
 
         // Overlapping in one output of several is still sharing it.
         let mut cfg = heated_valve();
-        cfg.heating[ValveId::Valve1] = ValveHeatingConfig::new(HcoId::Hco3, SensorSlot::Slot1, 3_000).also_on(HcoId::Hco2);
+        cfg.heating[ValveId::Valve1] =
+            ValveHeatingConfig::new(HcoId::Hco3, SensorSlot::Slot1, 3_000).also_on(HcoId::Hco2);
         assert!(matches!(
             cfg.sanity_check(),
             Err(ConfigError::HeatingOutputSharedWithHeater(ValveId::Valve0, ValveId::Valve1))

@@ -84,7 +84,12 @@ pub const NODE3: NodeSettings = NodeSettings::new(3, Config::new());
 pub const NODE4: NodeSettings = NodeSettings::new(
     4,
     Config::new()
+        // upper oxidizer tank
+        .with_sensor(Slot1, pressure(Bus0, Amp0, sensors::OX_TANK_UPPER_P))
+        // solenoid
         .with_valve(Valve0, ValveConfig::solenoid_on(HcoId::Hco0))
+        .with_relief(ReliefConfig::new(Valve0, Slot1, 5400).with_pulse_ms(500).with_cooldown_ms(500))
+        // ntc for heat pad
         .with_sensor(SensorSlot::Slot0, SensorSlotConfig::ntc_to_supply(AnalogInput::Com6Pin1))
         .with_valve_heating(
             Valve0,
@@ -110,8 +115,6 @@ pub const NODE5: NodeSettings = NodeSettings::new(
         // regulator, upper and lower
         .with_sensor(Slot1, pressure(Bus0, Amp1, sensors::REG_2_P))
         .with_sensor(Slot2, pressure(Bus0, Amp2, sensors::REG_1_P))
-        // upper oxidizer tank
-        .with_sensor(Slot3, pressure(Bus1, Amp0, sensors::OX_TANK_UPPER_P))
         // pressurant (N2) tank — 400 bar
         .with_sensor(Slot4, pressure(Bus1, Amp1, sensors::PRESSURANT_TANK_P)),
 );
