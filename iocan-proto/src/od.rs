@@ -303,6 +303,12 @@ pub const CPU_LOAD_UNKNOWN: u16 = u16::MAX;
 /// and this says how far the worst one overshot.
 pub const CONTROL_TICK_PEAK_US: u16 = 0x2035;
 
+/// COM4 "GO" beacon. `uint8`, **read/write**. Volatile: not persisted, and cleared by any reset.
+///
+/// While 1, the node writes `GO\n` on COM4's TX line (pin 1) every 500 ms, at 115200 baud 8N1
+/// with no flow control. Any other value stops it.
+pub const COM4_GO: u16 = 0x2036;
+
 /// Rail currents in milliamps: logic, HCO1+2, HCO3+4. `uint16[3]`, read-only.
 ///
 /// rev3 only; reads 0 on rev2, which has no on-board sensing — which is also why stall detection
@@ -951,6 +957,7 @@ mod tests {
             MS_SINCE_HEARTBEAT,
             CPU_LOAD,
             CONTROL_TICK_PEAK_US,
+            COM4_GO,
             RAIL_CURRENT,
             RAIL_VOLTAGE,
             ERROR_COUNTERS,

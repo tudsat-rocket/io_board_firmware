@@ -3,11 +3,12 @@ use embassy_stm32::exti::ExtiInput;
 use embassy_stm32::gpio::{Level as GpioLevel, Output, Pull, Speed};
 use embassy_stm32::spi::{self, Spi};
 use embassy_stm32::time::Hertz;
+use embassy_stm32::usart;
 use embassy_stm32::wdg::IndependentWatchdog;
 use embassy_stm32::{
     Peri,
     i2c::{I2c, Master},
-    mode::Async,
+    mode::{Async, Blocking},
 };
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embassy_sync::mutex::Mutex;
@@ -155,6 +156,22 @@ pub async fn init_board(spawner: Spawner) -> Board {
     let debug_button = ExtiInput::new(p.PC6, p.EXTI6, Pull::Up, hw::Irqs);
     spawner.spawn(watch_debug_button(debug_button).unwrap());
 
+    // COM4 pin 1 as a TX-only UART at 115200 8N1, no flow control. Blocking: USART2's TX DMA
+    // channel (DMA1_CH7) is I2C1's, and UART5 has none. Three bytes busy-wait ~260 us.
+    let mut com4_config = usart::Config::default();
+    com4_config.baudrate = 115_200;
+    com4_config.data_bits = usart::DataBits::DataBits8;
+    com4_config.parity = usart::Parity::ParityNone;
+    com4_config.stop_bits = usart::StopBits::STOP1;
+    #[cfg(feature = "rev3")]
+    let com4 = usart::UartTx::new_blocking(p.USART2, p.PA2, com4_config);
+    #[cfg(feature = "rev2")]
+    let com4 = usart::UartTx::new_blocking(p.UART5, p.PC12, com4_config);
+    match com4 {
+        Ok(tx) => spawner.spawn(run_com4_go(tx).unwrap()),
+        Err(e) => defmt::error!("com4 uart config rejected: {}", defmt::Debug2Format(&e)),
+    }
+
     // Every output starts de-energised, which is also what the hardware does on its own: the gate
     // drives have 12k pulldowns, so power-on, reset and a panic all land on "off" before this line
     // runs. The control task takes over from here and is the only thing that moves them after.
@@ -215,6 +232,20 @@ pub async fn init_board(spawner: Spawner) -> Board {
         config_store,
         // for cancan's A/B image handling
         flash_peri: p.FLASH,
+    }
+}
+
+/// Send `GO\n` on COM4 every 500 ms while 0x2036 is 1.
+#[embassy_executor::task]
+async fn run_com4_go(mut tx: usart::UartTx<'static, Blocking>) -> ! {
+    let mut ticker = embassy_time::Ticker::every(embassy_time::Duration::from_millis(500));
+    loop {
+        ticker.next().await;
+        if crate::store::STORE.lock().await.com4_go {
+            if let Err(e) = tx.blocking_write(b"GO\n") {
+                defmt::warn!("com4: write failed: {}", defmt::Debug2Format(&e));
+            }
+        }
     }
 }
 

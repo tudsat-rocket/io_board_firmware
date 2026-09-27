@@ -280,6 +280,15 @@ data_type = "uint16"
 access_type = "ro"
 default_value = 0
 
+# While 1, "GO\n" goes out on COM4 TX every 500 ms (115200 8N1). Volatile.
+[[objects]]
+index = 0x2036
+parameter_name = "com4 GO beacon (volatile, this boot only)"
+object_type = "var"
+data_type = "uint8"
+access_type = "rw"
+default_value = 0
+
 # rev3 only; reads 0 on rev2, which has no on-board sensing.
 [[objects]]
 index = 0x2040

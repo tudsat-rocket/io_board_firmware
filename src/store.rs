@@ -136,6 +136,9 @@ pub struct Store {
     pub leds: u8,
     /// 0x2031. Volatile by design: cleared by every reset, never persisted.
     pub raw_debug: bool,
+    /// 0x2036. While set, the COM4 UART task sends `GO\n` every 500 ms. Volatile, like
+    /// `raw_debug`.
+    pub com4_go: bool,
     pub link_state: LinkState,
     pub ms_since_heartbeat: u32,
 
@@ -190,6 +193,7 @@ impl Store {
             hco_direct_pwm: PerHco::splat(false),
             leds: 0,
             raw_debug: false,
+            com4_go: false,
             link_state: LinkState::NeverSeen,
             ms_since_heartbeat: 0,
             rail_current_ma: PerRail::splat(0),
@@ -413,6 +417,7 @@ pub fn read(store: &Store, index: u16, sub: u8) -> Result<OdValue, AbortCode> {
         MS_SINCE_HEARTBEAT => scalar(OdValue::u32(store.ms_since_heartbeat)),
         CPU_LOAD => scalar(OdValue::u16(store.cpu_load_permille)),
         CONTROL_TICK_PEAK_US => scalar(OdValue::u16(store.control_tick_peak_us)),
+        COM4_GO => scalar(OdValue::u8(store.com4_go as u8)),
         RAIL_CURRENT => read_array(store.rail_current_ma.as_slice(), sub, OdValue::u16),
         RAIL_VOLTAGE => read_array(store.rail_voltage_mv.as_slice(), sub, OdValue::u16),
         ERROR_COUNTERS => read_array(store.error_counts.as_slice(), sub, OdValue::u32),
@@ -658,6 +663,10 @@ pub fn write(store: &mut Store, index: u16, sub: u8, data: &[u8]) -> Result<(), 
             }
             store.raw_debug = on;
             store.pending.outputs = true;
+        }
+        COM4_GO => {
+            expect_scalar(sub)?;
+            store.com4_go = as_u8(data)? == 1;
         }
 
         MASTER_NODE_ID => {
