@@ -10,6 +10,7 @@
 
 use crate::index::PerTemp;
 use crate::rail_sense::NoRails;
+use crate::sensors::ntc_curve_milli_celsius;
 use crate::store::{RAW_INVALID, TEMPERATURE_INVALID};
 
 /// One sweep of the on-board temperature channels.
@@ -65,7 +66,7 @@ impl TemperatureSensing for NoRails {
 // and this module is not gated behind the `hardware` feature — so they are covered by the host
 // test suite rather than only by a board on a bench.
 
-/// TH1's curve, sampled every [`NTC_CURVE_STEP_C`] from [`NTC_CURVE_MIN_C`]: the 12-bit ADC
+/// TH1's curve, on the grid [`ntc_curve_milli_celsius`] interpolates over: the 12-bit ADC
 /// reading the divider produces at each temperature, which falls monotonically as the NTC heats.
 ///
 /// Generated from the beta equation for the fitted part — Murata `NCP18XH103F03RB`, R25 = 10k,
@@ -123,11 +124,6 @@ const NTC_CURVE: [u16; 34] = [
     418,  //  125 C
 ];
 
-/// Temperature of `NTC_CURVE[0]`, in degrees Celsius.
-const NTC_CURVE_MIN_C: i32 = -40;
-/// Spacing between adjacent `NTC_CURVE` entries, in degrees Celsius.
-const NTC_CURVE_STEP_C: i32 = 5;
-
 /// Convert a raw 12-bit reading of the `TH_sense` divider to millidegrees Celsius.
 ///
 /// [`TEMPERATURE_INVALID`] for anything off the ends of [`NTC_CURVE`], which is also what an
@@ -136,20 +132,7 @@ const NTC_CURVE_STEP_C: i32 = 5;
 /// -40 C or 125 C would be worse than reporting nothing, because a master cannot tell a real
 /// reading at the rail from a broken sensor.
 pub fn ntc_counts_to_milli_c(counts: u16) -> i32 {
-    // Descending curve, so the bracket is `curve[i] >= counts >= curve[i + 1]`.
-    if counts > NTC_CURVE[0] || counts < NTC_CURVE[NTC_CURVE.len() - 1] {
-        return TEMPERATURE_INVALID;
-    }
-
-    let mut i = 0;
-    while NTC_CURVE[i + 1] > counts {
-        i += 1;
-    }
-
-    let (high, low) = (NTC_CURVE[i] as i32, NTC_CURVE[i + 1] as i32);
-    let base_milli_c = (NTC_CURVE_MIN_C + i as i32 * NTC_CURVE_STEP_C) * 1000;
-    // `high > low` for every adjacent pair in the curve, so this never divides by zero.
-    base_milli_c + (NTC_CURVE_STEP_C * 1000 * (high - counts as i32)) / (high - low)
+    ntc_curve_milli_celsius(&NTC_CURVE, counts).unwrap_or(TEMPERATURE_INVALID)
 }
 
 /// The die sensor's output at 25 C, in microvolts. STM32F1 datasheet typical; the spread is
@@ -174,6 +157,7 @@ pub fn mcu_sense_uv_to_milli_c(v_sense_uv: u32) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sensors::{NTC_CURVE_MIN_C, NTC_CURVE_STEP_C};
 
     /// The divider is sized so that 25 C sits near mid-scale; if this moves, the curve was
     /// regenerated against the wrong part or the wrong upper leg.

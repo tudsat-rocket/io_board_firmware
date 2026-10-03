@@ -149,10 +149,10 @@ const NTC_CURVE: [u16; 34] = [
 /// Full scale of the STM32's 12-bit ADC, which is what [`NTC_CURVE`] is tabulated against.
 pub const ADC_FULL_SCALE: u16 = 4095;
 
-/// Temperature of `NTC_CURVE[0]`, in degrees Celsius.
-const NTC_CURVE_MIN_C: i32 = -40;
-/// Spacing between adjacent `NTC_CURVE` entries, in degrees Celsius.
-const NTC_CURVE_STEP_C: i32 = 5;
+/// Temperature of the first entry of an NTC curve, in degrees Celsius.
+pub const NTC_CURVE_MIN_C: i32 = -40;
+/// Spacing between adjacent entries of an NTC curve, in degrees Celsius.
+pub const NTC_CURVE_STEP_C: i32 = 5;
 
 /// Convert a raw 12-bit reading of an NTC divider to millidegrees Celsius, interpolating between
 /// the points of [`NTC_CURVE`].
@@ -162,18 +162,28 @@ const NTC_CURVE_STEP_C: i32 = 5;
 /// plausible temperature: anything regulating on one of them would act on a number that is not a
 /// temperature at all.
 pub fn ntc_milli_celsius(counts: u16) -> Option<i32> {
+    ntc_curve_milli_celsius(&NTC_CURVE, counts)
+}
+
+/// The interpolation behind [`ntc_milli_celsius`], over any curve tabulated the same way: counts
+/// falling monotonically, one entry every [`NTC_CURVE_STEP_C`] from [`NTC_CURVE_MIN_C`].
+///
+/// Separate from the curve because the board's own thermistor sits in a different divider and so
+/// has its own table — see [`crate::temp_sense`].
+pub fn ntc_curve_milli_celsius(curve: &[u16], counts: u16) -> Option<i32> {
     // Descending curve, so the bracket is `curve[i] >= counts >= curve[i + 1]`.
-    if counts > NTC_CURVE[0] || counts < NTC_CURVE[NTC_CURVE.len() - 1] {
+    if counts > curve[0] || counts < curve[curve.len() - 1] {
         return None;
     }
 
     let mut i = 0;
-    while NTC_CURVE[i + 1] > counts {
+    while curve[i + 1] > counts {
         i += 1;
     }
 
-    let (high, low) = (NTC_CURVE[i] as i32, NTC_CURVE[i + 1] as i32);
+    let (high, low) = (curve[i] as i32, curve[i + 1] as i32);
     let base_milli_c = (NTC_CURVE_MIN_C + i as i32 * NTC_CURVE_STEP_C) * 1000;
+    // `high > low` for every adjacent pair of a descending curve, so this never divides by zero.
     Some(base_milli_c + (NTC_CURVE_STEP_C * 1000 * (high - counts as i32)) / (high - low))
 }
 
