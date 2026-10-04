@@ -53,45 +53,24 @@ const fn decibar(offset: f32, bar_per_count: f32) -> Transducer {
 }
 
 // --- 40 bar ---------------------------------------------------------------
-
-// NOTE: not optimized, may change
-// pub const C_40BAR: Transducer = centibar(15.0, 0.0855);
 pub const C_40BAR: Transducer = centibar(1.0, 0.0855);
-// NOTE: not optimized, may change
 pub const D_40BAR: Transducer = centibar(-385.0, 0.0535);
+pub const E_40BAR: Transducer = centibar(341.5, 0.1250);
+pub const F_40BAR: Transducer = centibar(341.5, 0.1250);
 
 // --- 100 bar --------------------------------------------------------------
-
-/// At R_gain = 100R, ref = 0V
-///
-/// Read 14.05 bar high against B_100BAR with an offset of 1.0, so the offset moves up by
-/// 14.05 / 0.10604454 = 132.49 counts. The ADC sits at 0 counts below ~21 bar, so nothing
-/// under that can be recovered here.
-pub const A_100BAR: Transducer = centibar(132.49, 0.10604454);
-// pub const A_100BAR: Transducer = centibar(1.0, 0.10604454);
-/// At R_gain = 220R, ref = 0V
-pub const B_100BAR: Transducer = centibar(88.0, 0.22675737);
-/// At R_gain = 120R, ref = 0V
-pub const C_100BAR: Transducer = centibar(27.0, 0.12578616);
-/// At R_gain = 120R, ref = 0V
-pub const D_100BAR: Transducer = centibar(15.5, 0.12594458);
-/// At R_gain = 120R, ref = 0V
+pub const A_100BAR: Transducer = centibar(262.0, 0.15528);
+pub const B_100BAR: Transducer = centibar(413.7, 0.334);
+pub const C_100BAR: Transducer = centibar(370.3, 0.1815);
+pub const D_100BAR: Transducer = centibar(360.55, 0.1822);
 pub const E_100BAR: Transducer = centibar(233.0, 0.12787724);
-/// At R_gain = 120R, ref = 0V
 pub const F_100BAR: Transducer = centibar(200.0, 0.12771392);
-/// At R_gain = 220R, ref = 1.65V
 pub const G_100BAR: Transducer = centibar(496.0, 0.23419204);
-// NOTE: not optimized, may change
-/// At R_gain = 220R, ref = 0V
-pub const H_100BAR: Transducer = centibar(74.0, 0.232);
+pub const H_100BAR: Transducer = centibar(404.5, 0.3368);
 
 // --- 400 bar --------------------------------------------------------------
-
-/// At R_gain = 220R, ref = 1.65V
 pub const B_400BAR: Transducer = centibar(439.0, 0.91116173);
-// NOTE: not optimized, may change
-/// At R_gain = 220R, ref = 0V
-pub const C_400BAR: Transducer = centibar(-49.0, 0.888);
+pub const C_400BAR: Transducer = centibar(319.4, 1.2934);
 
 /// An uncalibrated slot: reports raw ADC counts, which is where a calibration starts.
 pub const PLACEHOLDER_P: Transducer = Transducer {

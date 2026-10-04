@@ -128,53 +128,15 @@ pub const NODE6: NodeSettings = NodeSettings::new(
         .with_sensor(Slot0, pressure(Bus0, Amp0, sensors::OX_TANK_LOWER_P))
         .with_sensor(Slot2, pt1000(Bus0, Amp2))
         // 40bar-F = D
-        .with_sensor(Slot1, pressure(Bus1, Amp0, sensors::COMB_CHAMBER_1_P))
+        .with_sensor(Slot1, pressure(Bus1, Amp0, sensors::F_40BAR))
         // 40bar-E = C
-        .with_sensor(Slot3, pressure(Bus1, Amp1, sensors::COMB_CHAMBER_2_P)),
-    // .with_valve(Valve0, valves::main_valve(HcoPair::A))
-    // .with_valve(Valve1, valves::ox_fill_and_dump(HcoPair::B))
-    // .with_sensor(Slot0, pressure(Bus0, Amp0, sensors::OX_TANK_LOWER_P))
-    // .with_sensor(Slot1, pressure(Bus0, Amp1, sensors::COMB_CHAMBER_1_P))
-    // .with_sensor(Slot2, pt1000(Bus0, Amp2))
-    // .with_sensor(Slot3, pressure(Bus1, Amp1, sensors::COMB_CHAMBER_2_P)),
+        .with_sensor(Slot3, pressure(Bus1, Amp1, sensors::E_40BAR)),
 );
-
-pub const NODE7: NodeSettings = NodeSettings::new(
-    7,
-    Config::new()
-        // external ox fill
-        .with_valve(Valve0, ValveConfig::solenoid_on(HcoId::Hco0))
-        // external ox depressure
-        .with_valve(Valve1, ValveConfig::solenoid_on(HcoId::Hco1)),
-);
+pub const NODE7: NodeSettings = NodeSettings::new(7, Config::new());
 // igniter on Hco12
 pub const NODE8: NodeSettings = NodeSettings::new(8, Config::new().with_valve(Valve0, valves::ext_n2(HcoPair::B)));
 pub const NODE9: NodeSettings = NodeSettings::new(9, Config::new());
 
-// /// 60 bar, in the centibar that a 100 bar transducer slot reports.
-// pub const RELIEF_THRESHOLD_60_BAR: i16 = 6000;
-//
-// /// Node 8 — self-regulating relief node.
-// ///
-// /// A tank that is being heated with every valve shut keeps rising in pressure on its own, and the
-// /// master may be slow to react or briefly off the bus when it happens. This node watches one
-// /// transducer and bleeds its own valve when the pressure gets away from it — see
-// /// [`crate::relief`]. The rest of the time it is an ordinary slave.
-// ///
-// /// The relief valve is a **solenoid** on HCO1 rather than a servo, deliberately: the relief pulse
-// /// is half a second, and a servo that takes a second and a half to travel would never reach the
-// /// open position within one. `Config::log_warnings` complains at boot if that combination is ever
-// /// configured by hand.
-// pub const NODE8_REG: NodeSettings = NodeSettings::new(
-//     8,
-//     Config::new()
-//         .with_valve(Valve0, ValveConfig::solenoid_on(HcoId::Hco0))
-//         .with_sensor(Slot0, pressure(Bus0, Amp0, sensors::OX_TANK_UPPER_P))
-//         .with_relief(
-//             ReliefConfig::new(Valve0, Slot0, RELIEF_THRESHOLD_60_BAR).with_pulse_ms(500).with_cooldown_ms(500),
-//         ),
-// );
-//
 #[cfg(test)]
 mod tests {
     use super::*;

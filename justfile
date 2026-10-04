@@ -30,7 +30,8 @@ build-one board:
     cargo build --release {{ if board =~ '^node[789]$' { features_rev2 } else { features } }} --bin {{ board }}
 
 # Build and flash every vehicle board over CAN. Keeps going if one board is silent.
-flash: build _cancan
+# Extra arguments go to cancan, e.g. `just flash --iface can0`.
+flash *args: build _cancan
     #!/usr/bin/env bash
     set -uo pipefail
     failed=()
@@ -38,7 +39,7 @@ flash: build _cancan
         bin="${entry%%:*}"; id="${entry##*:}"
         echo
         echo "==> ${bin} (node ${id})"
-        if ! {{ cancan }} {{ iface_arg }} flash "${id}" "{{ target_dir }}/${bin}"; then
+        if ! {{ cancan }} {{ iface_arg }} {{ args }} flash "${id}" "{{ target_dir }}/${bin}"; then
             failed+=("${bin}")
         fi
     done
@@ -51,7 +52,8 @@ flash: build _cancan
     fi
 
 # Build and flash one board over CAN, by binary name (node3..node9, generic).
-flash-one board: _cancan
+# Extra arguments go to cancan, e.g. `just flash-one node5 --iface can0`.
+flash-one board *args: _cancan
     #!/usr/bin/env bash
     set -euo pipefail
     id=""
@@ -63,7 +65,7 @@ flash-one board: _cancan
         exit 1
     fi
     just build-one {{ board }}
-    {{ cancan }} {{ iface_arg }} flash "${id}" "{{ target_dir }}/{{ board }}"
+    {{ cancan }} {{ iface_arg }} {{ args }} flash "${id}" "{{ target_dir }}/{{ board }}"
 
 # List the boards answering on the bus (probes all 256 cancan node ids).
 scan: _cancan
