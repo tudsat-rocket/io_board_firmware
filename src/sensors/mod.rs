@@ -257,6 +257,13 @@ pub trait AnalogSensing {
     /// own state machine. On a board with 114 KiB for the whole application, where that future
     /// ends up is worth a line of trait design.
     async fn read_analog(&mut self, wanted: PerAnalogInput<bool>) -> PerAnalogInput<u16>;
+
+    /// The MCU die sensor, in millidegrees Celsius (see [`mcu_sense_uv_to_milli_c`]), or `None`
+    /// on a board that cannot read it.
+    ///
+    /// On this trait rather than a slot of its own because the die sensor is not a ratiometric
+    /// pin: turning its counts into a voltage needs VREFINT, which only the ADC's owner has.
+    async fn read_mcu_temperature_milli_c(&mut self) -> Option<i32>;
 }
 
 /// rev2 has no ADC wired up at all, so no analog slot on it ever reads.
@@ -264,6 +271,29 @@ impl AnalogSensing for crate::rail_sense::NoRails {
     async fn read_analog(&mut self, _wanted: PerAnalogInput<bool>) -> PerAnalogInput<u16> {
         PerAnalogInput::splat(crate::store::RAW_INVALID)
     }
+
+    async fn read_mcu_temperature_milli_c(&mut self) -> Option<i32> {
+        None
+    }
+}
+
+/// The die sensor's output at 25 C, in microvolts. STM32F1 datasheet typical; the spread is
+/// 1.34..1.52 V, which is +-20 C of uncorrected offset on its own.
+const MCU_V25_UV: i64 = 1_430_000;
+/// The die sensor's slope, in microvolts per degree Celsius. Negative-going: V_sense falls as the
+/// die heats, which is why the numerator below is `V25 - V_sense` rather than the other way round.
+const MCU_AVG_SLOPE_UV_PER_C: i64 = 4_300;
+
+/// Convert the STM32's internal temperature sensor output to millidegrees Celsius, per the
+/// datasheet's `T = (V25 - V_sense) / Avg_Slope + 25`.
+///
+/// Uncalibrated, and this part has no factory calibration values to apply: the datasheet's own
+/// figure for absolute accuracy is tens of degrees, essentially all of it a fixed offset from the
+/// V25 spread. Read it as a trend and as a differential against the board thermistor, not as a
+/// thermometer. It is still the only thing on the board that can see the die rather than the
+/// copper next to it.
+pub fn mcu_sense_uv_to_milli_c(v_sense_uv: u32) -> i32 {
+    (25_000 + ((MCU_V25_UV - v_sense_uv as i64) * 1000) / MCU_AVG_SLOPE_UV_PER_C) as i32
 }
 
 /// A kind's raw device number, linearised into *thousandths* of the quantity its calibration is
@@ -919,10 +949,13 @@ mod tests {
         crate::errors::reset_all();
 
         let mut sensors = sensors_with(MockI2c::new(), MockI2c::new());
-        let config = Config::new().with_sensor(
+        let mut config = Config::new().with_sensor(
             crate::index::SensorSlot::Slot0,
             SensorSlotConfig::pressure(I2cBus::Bus0, AmplifierId::Amp0, Unit::CentiBar, SensorCalib::UNITY),
         );
+        // Only the slot under test: rev3's default board thermistor has no counts here either,
+        // and would count alongside it.
+        config.sensors[crate::config::BOARD_NTC_SLOT] = SensorSlotConfig::unused();
 
         block_on(sensors.publish(&config));
         assert_eq!(crate::errors::count(ErrorCounter::SensorSourceMissing), 1);
@@ -985,6 +1018,18 @@ mod tests {
             let expected = (NTC_CURVE_MIN_C + i as i32 * NTC_CURVE_STEP_C) * 1000;
             assert_eq!(board_ntc_milli_celsius(counts), Some(expected), "curve point {i}");
         }
+    }
+
+    #[test]
+    fn the_die_sensor_reads_25_c_at_its_datasheet_reference() {
+        assert_eq!(mcu_sense_uv_to_milli_c(1_430_000), 25_000);
+    }
+
+    /// The slope is negative-going: less voltage means a hotter die.
+    #[test]
+    fn a_lower_die_voltage_is_a_higher_temperature() {
+        assert_eq!(mcu_sense_uv_to_milli_c(1_430_000 - 43_000), 35_000);
+        assert_eq!(mcu_sense_uv_to_milli_c(1_430_000 + 43_000), 15_000);
     }
 
     /// TH1 under 5k1 puts 25 C at 4095 * 10k / 15k1. If this moves, the curve was regenerated

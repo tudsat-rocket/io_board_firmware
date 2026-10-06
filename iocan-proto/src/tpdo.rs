@@ -135,6 +135,11 @@ pub enum TpdoFrame {
     },
     /// Mirrors [`crate::od::VALVE_CURRENT`], one entry per valve.
     ValveCurrent([u16; 4]),
+    /// Mirrors [`crate::od::TEMPERATURE`]: the on-board thermistor, then the MCU die sensor, each
+    /// in centicelsius, in the first two 16-bit words — the same i16 layout as
+    /// [`Self::Sensor0`]. [`crate::od::SENSOR_INVALID`] for either one that has no reading. The
+    /// remaining 4 bytes are unused padding.
+    Temperature { board: i16, mcu: i16 },
 }
 
 impl TpdoFrame {
@@ -159,6 +164,7 @@ impl TpdoFrame {
             Self::RailCurrent(_) => TpdoKind::RailCurrent,
             Self::Status { .. } => TpdoKind::Status,
             Self::ValveCurrent(_) => TpdoKind::ValveCurrent,
+            Self::Temperature { .. } => TpdoKind::Temperature,
         }
     }
 
@@ -195,6 +201,7 @@ impl TpdoFrame {
             Self::I2cScan { present, sweeps } => u16x4_to_bytes([present[0], present[1], sweeps, 0]),
             Self::RailVoltage(v) => u16x4_to_bytes([v[0], v[1], v[2], 0]),
             Self::RailCurrent(v) => u16x4_to_bytes([v[0], v[1], v[2], 0]),
+            Self::Temperature { board, mcu } => i16x4_to_bytes([board, mcu, 0, 0]),
             Self::Status {
                 link_state,
                 raw_debug,
@@ -248,6 +255,13 @@ impl TpdoFrame {
             TpdoKind::RailCurrent => {
                 let words = u16x4_from_bytes(bytes);
                 Self::RailCurrent([words[0], words[1], words[2]])
+            }
+            TpdoKind::Temperature => {
+                let words = i16x4_from_bytes(bytes);
+                Self::Temperature {
+                    board: words[0],
+                    mcu: words[1],
+                }
             }
             TpdoKind::Status => Self::Status {
                 link_state: bytes[0],
@@ -364,6 +378,10 @@ mod tests {
                 ms_since_heartbeat: 0x0102_0304,
             },
             TpdoFrame::ValveCurrent([50, 60, 70, 80]),
+            TpdoFrame::Temperature {
+                board: 2_512,
+                mcu: -1_234,
+            },
         ];
 
         for frame in samples {
@@ -386,6 +404,18 @@ mod tests {
         assert_eq!(bytes[1], 0);
         assert_eq!(bytes[2], 0b0000_0100);
         assert_eq!(&bytes[4..], &0x0102_0304u32.to_le_bytes());
+    }
+
+    #[test]
+    fn temperature_puts_board_then_mcu_in_the_first_two_words() {
+        let bytes = TpdoFrame::Temperature {
+            board: 2_512,
+            mcu: -1_234,
+        }
+        .encode();
+        assert_eq!(&bytes[0..2], &2_512i16.to_le_bytes());
+        assert_eq!(&bytes[2..4], &(-1_234i16).to_le_bytes());
+        assert_eq!(&bytes[4..], &[0; 4]);
     }
 
     #[test]

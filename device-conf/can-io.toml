@@ -309,6 +309,17 @@ access_type = "ro"
 array_size = 3
 default_value = [0, 0, 0]
 
+# Board temperatures in centicelsius: on-board thermistor TH1, then the MCU die sensor (uncalibrated,
+# a trend only). -32768 = no reading. rev3 only. Broadcast as TPDO kind 18.
+[[objects]]
+index = 0x2042
+parameter_name = "board temperatures in centicelsius (th1, mcu)"
+object_type = "array"
+data_type = "int16"
+access_type = "ro"
+array_size = 2
+default_value = [-32768, -32768]
+
 # One free-running counter per failure kind, sub n+1 = iocan_proto::od::ErrorCounter n. Poll and
 # difference; only a reset clears them.
 [[objects]]
@@ -648,8 +659,8 @@ parameter_name = "tpdo broadcast period per kind, milliseconds"
 object_type = "array"
 data_type = "uint16"
 access_type = "rw"
-array_size = 18
-default_value = [500, 500, 200, 500, 500, 500, 100, 0, 100, 0, 0, 50, 0, 5000, 1000, 1000, 1000, 0]
+array_size = 19
+default_value = [500, 500, 200, 500, 500, 500, 100, 0, 100, 0, 0, 50, 0, 5000, 1000, 1000, 1000, 0, 2000]
 
 # ============================================================================
 # 0x3050 — overpressure relief: the one decision a node makes for itself.

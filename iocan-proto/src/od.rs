@@ -319,6 +319,20 @@ pub const RAIL_CURRENT: u16 = 0x2040;
 /// Rail voltages in millivolts: logic, HCO1+2, HCO3+4. `uint16[3]`, read-only. rev3 only.
 pub const RAIL_VOLTAGE: u16 = 0x2041;
 
+/// Board temperatures in centicelsius: the on-board thermistor TH1, then the MCU die sensor.
+/// `int16[2]`, read-only. [`SENSOR_INVALID`] for either one with no reading. rev3 only; both
+/// read invalid on rev2, which has no ADC wired up.
+///
+/// The thermistor entry is the first slot of kind 7 ([`SENSOR_KIND`]) reporting centicelsius,
+/// so it carries that slot's calibration — rev3 factory defaults fit one, quietly, on the last
+/// slot. Without one it reads invalid.
+///
+/// The die sensor is uncalibrated: the part's own datasheet spread is about +-20 degC of fixed
+/// offset. Read it as a trend, and as a differential against the thermistor.
+///
+/// Broadcast as TPDO [`crate::TpdoKind::Temperature`].
+pub const TEMPERATURE: u16 = 0x2042;
+
 /// Error counters, one per failure kind. `uint32[NUM_ERROR_COUNTERS]`, read-only.
 ///
 /// Sub-index *n + 1* is the counter named by [`ErrorCounter`] with discriminant *n*. Everything
@@ -758,7 +772,7 @@ pub const SENSOR_INTERVAL_MS: u16 = 0x3030;
 /// newly plugged-in amplifier boards does not disturb the sample rate during assembly.
 pub const SCAN_INTERVAL_MS: u16 = 0x3031;
 
-/// TPDO broadcast period per kind, milliseconds. `uint16[18]`, read/write.
+/// TPDO broadcast period per kind, milliseconds. `uint16[19]`, read/write.
 ///
 /// Sub-index *n + 1* is the period for TPDO kind *n* (see [`crate::TpdoKind`], whose discriminant
 /// is that same *n*); 0 disables that kind. A period changed here takes effect on the next tick,
@@ -966,6 +980,7 @@ mod tests {
             COM4_GO,
             RAIL_CURRENT,
             RAIL_VOLTAGE,
+            TEMPERATURE,
             ERROR_COUNTERS,
             MASTER_NODE_ID,
             FALLBACK_A_MS,

@@ -185,8 +185,8 @@ impl<R: RailSensing + AnalogSensing> Control<R> {
         // The COM5/COM6 pins are on this task's ADC but belong to the sensor plane: sampled here,
         // left in the store, and calibrated by the sensor task into whatever slot named the pin.
         // Only the pins a slot actually names are converted, so a board with no NTC fitted spends
-        // nothing on this.
-        let raw_analog = self.read_analog(&config).await;
+        // nothing on this. The die sensor rides along: same ADC, and it has no slot to go through.
+        let (raw_analog, mcu_temp_centi_c) = self.read_analog(&config).await;
 
         let direct_writes = if pending.outputs {
             let mut store = STORE.lock().await;
@@ -219,6 +219,7 @@ impl<R: RailSensing + AnalogSensing> Control<R> {
         let hco = self.outputs.current();
         let mut store = STORE.lock().await;
         store.raw_analog = raw_analog;
+        store.mcu_temp_centi_c = mcu_temp_centi_c;
         store.valve_target = outcome.targets;
         store.valve_measured = outcome.measured;
         store.valve_status = outcome.statuses;
@@ -437,8 +438,16 @@ impl<R: RailSensing + AnalogSensing> Control<R> {
     /// [`crate::store::RAW_INVALID`] for the rest, which covers three things the sensor plane
     /// treats alike: a pin nothing is configured on, a pin this build did not hand over, and a
     /// conversion that never happened.
-    async fn read_analog(&mut self, config: &Config) -> PerAnalogInput<u16> {
-        self.rails.read_analog(config.analog_inputs_used()).await
+    ///
+    /// Also the MCU die temperature, in centicelsius ([`crate::store::SENSOR_INVALID`] where it
+    /// cannot be read). One call for both keeps `tick` to a single await on the ADC.
+    async fn read_analog(&mut self, config: &Config) -> (PerAnalogInput<u16>, i16) {
+        let raw = self.rails.read_analog(config.analog_inputs_used()).await;
+        let mcu = self.rails.read_mcu_temperature_milli_c().await;
+        let mcu_centi_c = mcu.map_or(crate::store::SENSOR_INVALID, |milli_c| {
+            (milli_c / 10).clamp(i16::MIN as i32 + 1, i16::MAX as i32) as i16
+        });
+        (raw, mcu_centi_c)
     }
 
     /// Decide the LED state and publish it if it changed, returning the state to mirror into the

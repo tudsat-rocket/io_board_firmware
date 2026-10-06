@@ -188,6 +188,11 @@ fn frame_for(store: &Store, kind: TpdoKind) -> TpdoFrame {
         TpdoKind::RailVoltage => TpdoFrame::RailVoltage(*store.rail_voltage_mv.as_array()),
         TpdoKind::RailCurrent => TpdoFrame::RailCurrent(*store.rail_current_ma.as_array()),
 
+        TpdoKind::Temperature => {
+            let [board, mcu] = store.temperatures_centi_c();
+            TpdoFrame::Temperature { board, mcu }
+        }
+
         TpdoKind::Status => TpdoFrame::Status {
             link_state: store.link_state as u8,
             raw_debug: store.raw_debug,
@@ -238,6 +243,38 @@ mod tests {
 
         assert_eq!(build(&store, TpdoKind::RailCurrent), TpdoFrame::RailCurrent([111, 222, 333]).encode());
         assert_eq!(build(&store, TpdoKind::RailVoltage), TpdoFrame::RailVoltage([444, 555, 666]).encode());
+    }
+
+    /// The board half follows whichever slot holds the board thermistor, calibration and all; the
+    /// MCU half is the control task's die reading. Neither one is a guess when it is missing.
+    #[test]
+    fn temperature_carries_the_board_thermistor_slot_and_the_die_reading() {
+        use crate::config::SensorSlotConfig;
+        use crate::index::SensorSlot;
+
+        let mut store = Store::new();
+        store.config.sensors = crate::index::PerSensorSlot::splat(SensorSlotConfig::unused());
+        assert_eq!(
+            build(&store, TpdoKind::Temperature),
+            TpdoFrame::Temperature {
+                board: SENSOR_INVALID,
+                mcu: SENSOR_INVALID
+            }
+            .encode(),
+            "no thermistor slot and no die reading yet"
+        );
+
+        store.config.sensors[SensorSlot::Slot7] = SensorSlotConfig::board_ntc();
+        store.sensor_value[SensorSlot::Slot7] = 2_512;
+        store.mcu_temp_centi_c = 3_800;
+        assert_eq!(
+            build(&store, TpdoKind::Temperature),
+            TpdoFrame::Temperature {
+                board: 2_512,
+                mcu: 3_800
+            }
+            .encode()
+        );
     }
 
     #[test]

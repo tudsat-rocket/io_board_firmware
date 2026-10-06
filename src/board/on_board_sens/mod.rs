@@ -2,7 +2,7 @@ use crate::board::pins_rev3::{HC_SENSE, HC2_SENSE, I_SENSE_1, I_SENSE_2, I_SENSE
 use crate::index::PerAnalogInput;
 use embassy_stm32::{
     Peri,
-    adc::{Adc, AnyAdcChannel, SampleTime},
+    adc::{Adc, AnyAdcChannel, SampleTime, Temperature},
     peripherals::ADC1,
 };
 
@@ -26,6 +26,9 @@ pub trait VoltageSens {
 pub struct OnboardSensRev3 {
     adc: Adc<'static, ADC1>,
     pins: OnboardSens3Peri,
+    /// The die sensor's internal channel. Not a pin, so it lives here rather than in
+    /// [`OnboardSens3Peri`].
+    temperature: Temperature,
     sample_time: SampleTime,
     vref_sample: u16,
 }
@@ -76,7 +79,14 @@ impl OnboardSensRev3 {
 
     pub async fn new(adc: Peri<'static, ADC1>, pins: OnboardSens3Peri, sample_time: SampleTime) -> Self {
         let mut adc = Adc::new(adc);
+        // Sets TSVREFE, which powers VREFINT and the die sensor both, so the one t_START wait
+        // below covers the two internal channels.
         let mut vref = adc.enable_vref();
+        // Built directly rather than through `adc.enable_temperature()`: that is a second CR2
+        // write with ADON already set and no other bit changing, which on the F1 *starts a
+        // conversion* (RM0008, CR2.ADON). Its stale EOC then satisfies the next `read`, which
+        // returns the wrong sample, and every read after it stays one conversion behind.
+        let temperature = Temperature;
 
         // t_START for the internal reference; the datasheet allows up to 10 us.
         embassy_time::Timer::after_micros(20).await;
@@ -88,6 +98,7 @@ impl OnboardSensRev3 {
         Self {
             adc,
             pins,
+            temperature,
             sample_time,
             vref_sample,
         }
@@ -97,10 +108,13 @@ impl OnboardSensRev3 {
         const VREFINT_MV: u32 = 1200;
         ((raw as u32 * VREFINT_MV) / (self.vref_sample as u32)) as u16
     }
-    // fn reading_to_uv(&self, raw: u16) -> u32 {
-    //     const VREFINT_MV: u32 = 1200;
-    //     (raw as u32 * VREFINT_MV * 1000) / (self.vref_sample as u32)
-    // }
+    /// Same conversion as [`Self::reading_to_mv`], with the resolution the die sensor needs: its
+    /// slope is 4.3 mV per degree, so a millivolt of quantisation would be a quarter of a degree.
+    /// `u64` because full scale times 1_200_000 overflows a `u32`.
+    fn reading_to_uv(&self, raw: u16) -> u32 {
+        const VREFINT_UV: u64 = 1_200_000;
+        ((raw as u64 * VREFINT_UV) / (self.vref_sample as u64)) as u32
+    }
 }
 impl CurrentSens for OnboardSensRev3 {
     async fn hco12_current_ma(&mut self) -> u16 {
@@ -154,6 +168,14 @@ impl crate::sensors::AnalogSensing for OnboardSensRev3 {
             }
         }
         raw
+    }
+
+    async fn read_mcu_temperature_milli_c(&mut self) -> Option<i32> {
+        // The same 17.1 us minimum as VREFINT, for the same reason: an internal channel behind a
+        // high impedance. And unlike the thermistor, an absolute voltage against a datasheet
+        // reference, so it goes through VREFINT rather than staying in counts.
+        let raw = self.adc.read(&mut self.temperature, Self::VREF_SAMPLE_TIME).await;
+        Some(crate::sensors::mcu_sense_uv_to_milli_c(self.reading_to_uv(raw)))
     }
 }
 

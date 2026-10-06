@@ -85,7 +85,25 @@ const DEFAULT_TPDO_MS: PerTpdoKind<u16> = PerTpdoKind::new([
     200,  // 15 RailCurrent
     200,  // 16 Status
     0,    // 17 ValveCurrent
+    2000, // 18 Temperature
 ]);
+
+/// Where rev3's factory defaults fit the board thermistor: the last slot, the one a node mapping
+/// is least likely to want, and past the twelfth so it claims no TPDO channel. It reaches the bus
+/// through [`crate::store::od::TEMPERATURE`] and its own TPDO kind instead.
+pub const BOARD_NTC_SLOT: SensorSlot = SensorSlot::Slot15;
+
+/// The sensor slots every node starts from. On rev3 that is TH1 on [`BOARD_NTC_SLOT`], so every
+/// node reports its bay temperature without its mapping having to say so; a mapping that wants
+/// the slot back just overwrites it. rev2 has no ADC to read it with, so it starts empty.
+const DEFAULT_SENSORS: PerSensorSlot<SensorSlotConfig> = {
+    let empty = PerSensorSlot::splat(SensorSlotConfig::unused());
+    if cfg!(feature = "rev3") {
+        empty.with_at(BOARD_NTC_SLOT.index(), SensorSlotConfig::board_ntc())
+    } else {
+        empty
+    }
+};
 
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -116,7 +134,7 @@ impl Config {
             heartbeat_period_ms: 1000,
             valves: PerValve::splat(ValveConfig::unmapped()),
             heating: PerValve::splat(ValveHeatingConfig::none()),
-            sensors: PerSensorSlot::splat(SensorSlotConfig::unused()),
+            sensors: DEFAULT_SENSORS,
             sensor_interval_ms: 10,
             scan_interval_ms: 500,
             tpdo_interval_ms: DEFAULT_TPDO_MS,
@@ -570,6 +588,16 @@ mod tests {
         let used = cfg.analog_inputs_used();
         assert!(used[AnalogInput::Com6Pin1]);
         assert!(!used[AnalogInput::Com5Pin1], "only the pin a slot actually names is sampled");
+    }
+
+    /// Every rev3 node reports its bay temperature without its mapping having to ask, and off the
+    /// process data plane: the slot is past the twelfth and claims no channel.
+    #[cfg(feature = "rev3")]
+    #[test]
+    fn rev3_defaults_fit_the_board_thermistor_quietly() {
+        let slot = Config::new().sensors[BOARD_NTC_SLOT];
+        assert_eq!(slot.kind, SensorKind::BoardNtc);
+        assert_eq!(slot.pdo_channel, None);
     }
 
     /// TH1 is read through its own kind, and a harness NTC kind pointed at its input would read

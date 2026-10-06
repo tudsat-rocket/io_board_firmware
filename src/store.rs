@@ -145,6 +145,10 @@ pub struct Store {
     /// Zero on rev2, which has no on-board sensing.
     pub rail_current_ma: PerRail<u16>,
     pub rail_voltage_mv: PerRail<u16>,
+    /// The MCU die temperature in centicelsius, [`SENSOR_INVALID`] until the control task's first
+    /// tick and for good on rev2. The other half of [`od::TEMPERATURE`]; the board thermistor half
+    /// is derived from its sensor slot, see [`Self::board_temperature_centi_c`].
+    pub mcu_temp_centi_c: i16,
 
     /// Mirror of [`crate::errors`]'s atomics, refreshed on the control tick.
     ///
@@ -198,6 +202,7 @@ impl Store {
             ms_since_heartbeat: 0,
             rail_current_ma: PerRail::splat(0),
             rail_voltage_mv: PerRail::splat(0),
+            mcu_temp_centi_c: SENSOR_INVALID,
             error_counts: PerErrorCounter::splat(0),
             cpu_load_permille: od::CPU_LOAD_UNKNOWN,
             control_tick_peak_us: 0,
@@ -262,6 +267,25 @@ impl Store {
                 self.pdo_sensor_unit[channel] = cfg.unit as u8;
             }
         }
+    }
+
+    /// The board thermistor's reading in centicelsius: the first [`SensorKind::BoardNtc`] slot
+    /// that reports in centicelsius, with that slot's calibration applied.
+    ///
+    /// Taken from the slot rather than from the raw counts so a trim written at 0x3023..0x3026
+    /// shows up here too. A slot switched to raw counts while it is being looked at is skipped,
+    /// since its number is no longer a temperature. [`SENSOR_INVALID`] when nothing qualifies.
+    pub fn board_temperature_centi_c(&self) -> i16 {
+        self.config
+            .sensors
+            .iter()
+            .find(|(_, cfg)| cfg.kind == SensorKind::BoardNtc && cfg.unit == Unit::CentiCelsius)
+            .map_or(SENSOR_INVALID, |(slot, _)| self.sensor_value[slot])
+    }
+
+    /// [`od::TEMPERATURE`] in its wire order: board thermistor, then MCU die.
+    pub fn temperatures_centi_c(&self) -> [i16; 2] {
+        [self.board_temperature_centi_c(), self.mcu_temp_centi_c]
     }
 }
 
@@ -420,6 +444,7 @@ pub fn read(store: &Store, index: u16, sub: u8) -> Result<OdValue, AbortCode> {
         COM4_GO => scalar(OdValue::u8(store.com4_go as u8)),
         RAIL_CURRENT => read_array(store.rail_current_ma.as_slice(), sub, OdValue::u16),
         RAIL_VOLTAGE => read_array(store.rail_voltage_mv.as_slice(), sub, OdValue::u16),
+        TEMPERATURE => read_array(&store.temperatures_centi_c(), sub, OdValue::i16),
         ERROR_COUNTERS => read_array(store.error_counts.as_slice(), sub, OdValue::u32),
 
         MASTER_NODE_ID => scalar(OdValue::u8(cfg.master_node_id)),
@@ -929,7 +954,7 @@ pub fn write(store: &mut Store, index: u16, sub: u8, data: &[u8]) -> Result<(), 
         // Everything else in the 0x2000 block is process data we produce.
         RAW_ADC_BUS0 | RAW_ADC_BUS1 | RAW_ENCODER | RAW_ANALOG | I2C_PRESENT | I2C_SWEEPS | SENSOR_VALUE
         | SENSOR_UNIT | VALVE_TARGET | VALVE_MEASURED | VALVE_STATUS | VALVE_CURRENT | RELIEF_STATE | HCO_OWNER
-        | VALVE_HEATING_STATE | LINK_STATE | MS_SINCE_HEARTBEAT | RAIL_CURRENT | RAIL_VOLTAGE => {
+        | VALVE_HEATING_STATE | LINK_STATE | MS_SINCE_HEARTBEAT | RAIL_CURRENT | RAIL_VOLTAGE | TEMPERATURE => {
             return Err(AbortCode::ReadOnly);
         }
 
