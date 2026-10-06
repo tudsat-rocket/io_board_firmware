@@ -148,6 +148,18 @@ async fn run_tx(
     }
 }
 
+/// The controller's fault confinement state, for [`super::health::BusHealth`]. A plain read of
+/// one status register; the driver never writes it, so reading it from another task is harmless.
+pub fn error_status() -> super::health::ErrorStatus {
+    let esr = embassy_stm32::pac::CAN1.esr().read();
+    super::health::ErrorStatus {
+        bus_off: esr.boff(),
+        passive: esr.epvf(),
+        tec: esr.tec(),
+        rec: esr.rec(),
+    }
+}
+
 #[embassy_executor::task]
 async fn run_rx(
     mut can_rx: BufferedCanRx<'static, CAN_RX_BUF_SIZE>,

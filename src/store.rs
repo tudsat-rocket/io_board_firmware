@@ -156,6 +156,9 @@ pub struct Store {
     /// take the store's lock — an I2C error path, the CAN receive loop, the panic handler. See
     /// [`Self::refresh_error_counters`].
     pub error_counts: PerErrorCounter<u32>,
+    /// Mirror of [`crate::errors::summary`], refreshed alongside `error_counts`. What
+    /// [`od::ERROR_SUMMARY`] and its TPDO serve.
+    pub error_summary: [u16; od::NUM_ERROR_CATEGORIES],
 
     /// Mirror of [`crate::cpu`]'s published values, refreshed on the control tick — for the same
     /// reason the error counters are mirrored: they are written from the idle loop, which runs
@@ -204,6 +207,7 @@ impl Store {
             rail_voltage_mv: PerRail::splat(0),
             mcu_temp_centi_c: SENSOR_INVALID,
             error_counts: PerErrorCounter::splat(0),
+            error_summary: [0; od::NUM_ERROR_CATEGORIES],
             cpu_load_permille: od::CPU_LOAD_UNKNOWN,
             control_tick_peak_us: 0,
             config: Config::new(),
@@ -238,6 +242,8 @@ impl Store {
         if let Some(counts) = crate::errors::take_if_changed() {
             self.error_counts = counts;
         }
+        // Not behind the change flag: a window closing moves these without any new bump.
+        self.error_summary = crate::errors::summary();
     }
 
     /// Copy [`crate::cpu`]'s published utilization in. Called from the control tick, alongside
@@ -446,6 +452,7 @@ pub fn read(store: &Store, index: u16, sub: u8) -> Result<OdValue, AbortCode> {
         RAIL_VOLTAGE => read_array(store.rail_voltage_mv.as_slice(), sub, OdValue::u16),
         TEMPERATURE => read_array(&store.temperatures_centi_c(), sub, OdValue::i16),
         ERROR_COUNTERS => read_array(store.error_counts.as_slice(), sub, OdValue::u32),
+        ERROR_SUMMARY => read_array(&store.error_summary, sub, OdValue::u16),
 
         MASTER_NODE_ID => scalar(OdValue::u8(cfg.master_node_id)),
         FALLBACK_A_MS => scalar(OdValue::u32(cfg.fallback_a_ms)),
@@ -954,7 +961,8 @@ pub fn write(store: &mut Store, index: u16, sub: u8, data: &[u8]) -> Result<(), 
         // Everything else in the 0x2000 block is process data we produce.
         RAW_ADC_BUS0 | RAW_ADC_BUS1 | RAW_ENCODER | RAW_ANALOG | I2C_PRESENT | I2C_SWEEPS | SENSOR_VALUE
         | SENSOR_UNIT | VALVE_TARGET | VALVE_MEASURED | VALVE_STATUS | VALVE_CURRENT | RELIEF_STATE | HCO_OWNER
-        | VALVE_HEATING_STATE | LINK_STATE | MS_SINCE_HEARTBEAT | RAIL_CURRENT | RAIL_VOLTAGE | TEMPERATURE => {
+        | VALVE_HEATING_STATE | LINK_STATE | MS_SINCE_HEARTBEAT | RAIL_CURRENT | RAIL_VOLTAGE | TEMPERATURE
+        | ERROR_SUMMARY => {
             return Err(AbortCode::ReadOnly);
         }
 

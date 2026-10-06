@@ -140,6 +140,9 @@ pub enum TpdoFrame {
     /// [`Self::Sensor0`]. [`crate::od::SENSOR_INVALID`] for either one that has no reading. The
     /// remaining 4 bytes are unused padding.
     Temperature { board: i16, mcu: i16 },
+    /// Mirrors [`crate::od::ERROR_SUMMARY`]: one wrapping count per
+    /// [`crate::od::ErrorCategory`], in its order — general, peripheral, CAN, reboot.
+    ErrorSummary([u16; crate::od::NUM_ERROR_CATEGORIES]),
 }
 
 impl TpdoFrame {
@@ -165,6 +168,7 @@ impl TpdoFrame {
             Self::Status { .. } => TpdoKind::Status,
             Self::ValveCurrent(_) => TpdoKind::ValveCurrent,
             Self::Temperature { .. } => TpdoKind::Temperature,
+            Self::ErrorSummary(_) => TpdoKind::ErrorSummary,
         }
     }
 
@@ -175,6 +179,7 @@ impl TpdoFrame {
             Self::ValveTarget(v) => u16x4_to_bytes(v),
             Self::ValveMeasured(v) => u16x4_to_bytes(v),
             Self::ValveCurrent(v) => u16x4_to_bytes(v),
+            Self::ErrorSummary(v) => u16x4_to_bytes(v),
             Self::RawBus0A(v) | Self::RawBus0B(v) | Self::RawBus1A(v) | Self::RawBus1B(v) => u16x4_to_bytes(v),
             Self::Sensor0(v) => i16x4_to_bytes(v),
             Self::Sensor1(v) => i16x4_to_bytes(v),
@@ -225,6 +230,7 @@ impl TpdoFrame {
             TpdoKind::ValveTarget => Self::ValveTarget(u16x4_from_bytes(bytes)),
             TpdoKind::ValveMeasured => Self::ValveMeasured(u16x4_from_bytes(bytes)),
             TpdoKind::ValveCurrent => Self::ValveCurrent(u16x4_from_bytes(bytes)),
+            TpdoKind::ErrorSummary => Self::ErrorSummary(u16x4_from_bytes(bytes)),
             TpdoKind::RawBus0A => Self::RawBus0A(u16x4_from_bytes(bytes)),
             TpdoKind::RawBus0B => Self::RawBus0B(u16x4_from_bytes(bytes)),
             TpdoKind::RawBus1A => Self::RawBus1A(u16x4_from_bytes(bytes)),
@@ -382,6 +388,7 @@ mod tests {
                 board: 2_512,
                 mcu: -1_234,
             },
+            TpdoFrame::ErrorSummary([1, 2, 0xFFFF, 0]),
         ];
 
         for frame in samples {

@@ -13,6 +13,7 @@
 /// `iocan-proto/src/lib.rs`.
 pub use iocan_proto::ids;
 
+pub mod health;
 pub mod sdo;
 pub mod tpdo;
 
@@ -65,4 +66,4 @@ pub async fn next_frame(sub: &mut CanRxSub, lost: ErrorCounter) -> CanFrame {
 #[cfg(feature = "hardware")]
 mod hw;
 #[cfg(feature = "hardware")]
-pub use hw::{CAN_IN, CAN_OUT, spawn};
+pub use hw::{CAN_IN, CAN_OUT, error_status, spawn};

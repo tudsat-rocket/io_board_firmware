@@ -13,6 +13,7 @@ use embassy_time::Instant;
 
 use crate::config::{Config, ValveConfig};
 use crate::cpu::CpuMonitor;
+use crate::errors::SummaryWindow;
 use crate::hco::{HcoState, Level, State};
 use crate::heating::{Heating, HeatingState};
 use crate::index::{HcoId, PerAnalogInput, PerHco, PerSensorSlot, PerValve, ValveId};
@@ -61,6 +62,13 @@ pub struct Control<R: RailSensing + AnalogSensing = NoRails> {
     /// deadline to miss, which makes it the natural thing to measure the system against; the
     /// measurement itself is idle time and belongs to nobody. See [`crate::cpu`].
     cpu: CpuMonitor,
+    /// Closes the [`crate::errors`] summary windows. Here for the same reason as `cpu`: this loop
+    /// runs on a fixed tick whatever else is happening, and polling it is one comparison.
+    summary_window: SummaryWindow,
+    /// The CAN controller's error state as of the previous tick. Polled here rather than from the
+    /// CAN tasks, which only wake when a frame moves — and a node that is bus-off moves none.
+    #[cfg(feature = "hardware")]
+    bus_health: crate::can::health::BusHealth,
 }
 
 /// The concrete `Control` the firmware spawns, monomorphised per revision so it can cross an
@@ -153,6 +161,9 @@ impl<R: RailSensing + AnalogSensing> Control<R> {
             blink: false,
             last_blink: now,
             cpu: CpuMonitor::new(now, TICK),
+            summary_window: SummaryWindow::new(now),
+            #[cfg(feature = "hardware")]
+            bus_health: crate::can::health::BusHealth::new(),
         }
     }
 
@@ -214,6 +225,12 @@ impl<R: RailSensing + AnalogSensing> Control<R> {
             since_heartbeat,
             seen,
         });
+
+        // Both synchronous, and both before the store write below so that what they count is
+        // mirrored on this same tick.
+        #[cfg(feature = "hardware")]
+        self.bus_health.observe(crate::can::error_status());
+        self.summary_window.poll(now);
 
         // --- write observation back ----------------------------------------
         let hco = self.outputs.current();

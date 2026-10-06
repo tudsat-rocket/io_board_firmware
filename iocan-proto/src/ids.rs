@@ -27,7 +27,7 @@ pub const NODE_ID_MASK: u16 = 0x000F;
 
 /// Number of fixed TPDO kinds. Must agree with [`TpdoKind`] and with the array size of
 /// [`crate::od::TPDO_INTERVAL_MS`], which carries one period per kind.
-pub const NUM_TPDO_KINDS: usize = 19;
+pub const NUM_TPDO_KINDS: usize = 20;
 
 /// The fixed TPDO table. The discriminant is the `kind` field of the identifier *and* the index
 /// into a node's broadcast periods ([`crate::od::TPDO_INTERVAL_MS`], at sub-index `kind + 1`), so
@@ -65,6 +65,8 @@ pub enum TpdoKind {
     ValveCurrent = 17,
     /// The on-board thermistor and the MCU die sensor — see [`crate::TpdoFrame::Temperature`].
     Temperature = 18,
+    /// The four summary error counts — see [`crate::TpdoFrame::ErrorSummary`].
+    ErrorSummary = 19,
 }
 
 /// All kinds, in discriminant order. The broadcaster walks this.
@@ -88,6 +90,7 @@ pub const TPDO_KINDS: [TpdoKind; NUM_TPDO_KINDS] = [
     TpdoKind::Status,
     TpdoKind::ValveCurrent,
     TpdoKind::Temperature,
+    TpdoKind::ErrorSummary,
 ];
 
 impl TpdoKind {
@@ -118,6 +121,7 @@ impl TpdoKind {
             16 => Some(Self::Status),
             17 => Some(Self::ValveCurrent),
             18 => Some(Self::Temperature),
+            19 => Some(Self::ErrorSummary),
             _ => None,
         }
     }
@@ -149,7 +153,7 @@ mod tests {
 
     #[test]
     fn an_out_of_range_index_does_not_decode() {
-        assert_eq!(TpdoKind::from_index(19), None);
+        assert_eq!(TpdoKind::from_index(20), None);
         assert_eq!(TpdoKind::from_index(255), None);
     }
 

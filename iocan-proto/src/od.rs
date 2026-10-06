@@ -352,7 +352,7 @@ pub const TEMPERATURE: u16 = 0x2042;
 pub const ERROR_COUNTERS: u16 = 0x2050;
 
 /// Number of counters at [`ERROR_COUNTERS`], and the array size of that object.
-pub const NUM_ERROR_COUNTERS: usize = 23;
+pub const NUM_ERROR_COUNTERS: usize = 28;
 
 /// What each sub-index of [`ERROR_COUNTERS`] counts.
 ///
@@ -435,6 +435,33 @@ pub enum ErrorCounter {
     /// [`CONTROL_TICK_PEAK_US`] says how far the worst recent iteration overshot, and
     /// [`CPU_LOAD`] whether the reason is simply that there is no headroom left.
     ControlTickOverrun = 22,
+    /// **Sample counter.** One 100 ms CPU measurement window was at least 90 % busy. A spike, where
+    /// [`CPU_LOAD`] is the trend: that reports the worst window of each half second, this counts
+    /// every window that crossed the line.
+    CpuLoadHigh = 23,
+    /// The CAN controller went error-passive: one of its error counters passed 127, and it now
+    /// signals errors without disrupting other nodes' frames. One count per entry.
+    CanErrorPassive = 24,
+    /// The CAN controller went bus-off: its transmit error counter passed 255, and it stopped
+    /// taking part in bus traffic until it recovered. One count per occurrence.
+    ///
+    /// The controller recovers on its own after 128 idle bus slots — a few milliseconds — and
+    /// this is polled on the 20 ms control tick, so it is also counted when a poll finds the
+    /// transmit error counter fallen from the warning level to zero, which only a recovery does.
+    /// A bus-off that both starts and ends between two polls from a quiet node still goes
+    /// uncounted; [`Self::CanErrorCountRose`] will have caught the errors that led up to it.
+    CanBusOff = 25,
+    /// The CAN controller's transmit or receive error counter went up since the previous control
+    /// tick: some frame on the bus, sent or received, ended in an error frame. One count per
+    /// tick in which that happened, not per error frame — bxCAN does not count those itself.
+    ///
+    /// A node alone on the bus climbs this steadily, since nothing acknowledges its frames.
+    CanErrorCountRose = 26,
+    /// A configured sensor slot whose I2C device was not found by the first full presence sweep
+    /// after boot. One count per such slot, once; a device that leaves later is
+    /// [`Self::I2cDeviceLost`], and a slot that stays unwired keeps climbing
+    /// [`Self::SensorSourceMissing`].
+    SensorMissingAtBoot = 27,
 }
 
 impl ErrorCounter {
@@ -463,6 +490,11 @@ impl ErrorCounter {
         Self::ConfigInvalid,
         Self::WatchdogLate,
         Self::ControlTickOverrun,
+        Self::CpuLoadHigh,
+        Self::CanErrorPassive,
+        Self::CanBusOff,
+        Self::CanErrorCountRose,
+        Self::SensorMissingAtBoot,
     ];
 
     /// The counter at sub-index `sub` of [`ERROR_COUNTERS`], for decoding a captured read.
@@ -474,6 +506,106 @@ impl ErrorCounter {
     }
 
     /// The sub-index this counter is read at.
+    pub const fn sub(self) -> u8 {
+        self as u8 + 1
+    }
+
+    /// Which [`ERROR_SUMMARY`] entry this counter feeds, if any.
+    ///
+    /// [`Self::SensorSourceMissing`] feeds none: it climbs on every sample for as long as a slot
+    /// stays unwired, so it would hold its summary at the full rate forever.
+    /// [`Self::SensorMissingAtBoot`] says the same thing once instead.
+    pub const fn category(self) -> Option<ErrorCategory> {
+        use ErrorCategory::{Can, General, Peripheral};
+        Some(match self {
+            Self::I2cTimeout
+            | Self::I2cBusError
+            | Self::I2cNack
+            | Self::I2cDeviceLost
+            | Self::AmplifierReadFailed
+            | Self::AmplifierAlert
+            | Self::EncoderReadFailed
+            | Self::EncoderMagnetLost
+            | Self::ValveStall
+            | Self::ReliefInhibited
+            | Self::SensorMissingAtBoot => Peripheral,
+
+            Self::CanRxError
+            | Self::CanTxDropped
+            | Self::CanErrorPassive
+            | Self::CanBusOff
+            | Self::CanErrorCountRose => Can,
+
+            // The node's own queues and deadlines, the requests it was handed, and its own
+            // config storage. An RX FIFO overrun is here rather than under CAN: the bus delivered
+            // those frames, and it was this node that did not drain them in time.
+            Self::CanRxOverrun
+            | Self::CanRxDropped
+            | Self::CanTxInvalid
+            | Self::SdoRequestInvalid
+            | Self::SdoWriteRejected
+            | Self::SdoResponseDropped
+            | Self::ConfigFlashError
+            | Self::ConfigInvalid
+            | Self::WatchdogLate
+            | Self::ControlTickOverrun
+            | Self::CpuLoadHigh => General,
+
+            Self::SensorSourceMissing => return None,
+        })
+    }
+
+    /// Whether this counter is added to its summary one-for-one instead of at most once per
+    /// [`ERROR_SUMMARY_WINDOW_MS`]. Only [`Self::SensorMissingAtBoot`] is: it arrives as one batch
+    /// at boot, and how many sensors are missing is the whole of what it says.
+    pub const fn bypasses_summary_window(self) -> bool {
+        matches!(self, Self::SensorMissingAtBoot)
+    }
+}
+
+/// Four summary error counts, one per [`ErrorCategory`]. `uint16[4]`, read-only.
+///
+/// Each one goes up by one for every [`ERROR_SUMMARY_WINDOW_MS`] window in which at least one
+/// [`ERROR_COUNTERS`] entry of its category went up ([`ErrorCounter::category`] says which feeds
+/// which), so a burst of a thousand errors and a single one both read as one bad window. That is
+/// what makes them comparable between kinds of error and cheap to watch: the rate is bounded at
+/// four a second, and the detail is one SDO read away at [`ERROR_COUNTERS`].
+/// [`ErrorCounter::SensorMissingAtBoot`] is the one exception — see
+/// [`ErrorCounter::bypasses_summary_window`].
+///
+/// Free-running and wrapping at `u16`, read like [`ERROR_COUNTERS`]: by difference. Even at the
+/// full rate a wrap takes four and a half hours.
+///
+/// Broadcast as TPDO [`crate::TpdoKind::ErrorSummary`].
+pub const ERROR_SUMMARY: u16 = 0x2051;
+
+/// The window [`ERROR_SUMMARY`] counts in, milliseconds.
+pub const ERROR_SUMMARY_WINDOW_MS: u16 = 250;
+
+/// Number of entries at [`ERROR_SUMMARY`].
+pub const NUM_ERROR_CATEGORIES: usize = 4;
+
+/// What each sub-index of [`ERROR_SUMMARY`] summarises. Sub-index *n + 1* is discriminant *n*.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[repr(u8)]
+pub enum ErrorCategory {
+    /// The node itself: its queues, deadlines and CPU, malformed or refused requests, its config.
+    General = 0,
+    /// What is attached to it: I2C sensors, valves, and the relief that depends on them.
+    Peripheral = 1,
+    /// The CAN bus: error frames, error-passive, bus-off, frames the bus would not take.
+    Can = 2,
+    /// Unexpected reboots. **Not implemented yet** and always 0; the slot is reserved so that a
+    /// master's decoding does not change when it is.
+    Reboot = 3,
+}
+
+impl ErrorCategory {
+    /// All of them, in sub-index order.
+    pub const ALL: [Self; NUM_ERROR_CATEGORIES] = [Self::General, Self::Peripheral, Self::Can, Self::Reboot];
+
+    /// The sub-index this category is read at.
     pub const fn sub(self) -> u8 {
         self as u8 + 1
     }
@@ -772,7 +904,7 @@ pub const SENSOR_INTERVAL_MS: u16 = 0x3030;
 /// newly plugged-in amplifier boards does not disturb the sample rate during assembly.
 pub const SCAN_INTERVAL_MS: u16 = 0x3031;
 
-/// TPDO broadcast period per kind, milliseconds. `uint16[19]`, read/write.
+/// TPDO broadcast period per kind, milliseconds. `uint16[20]`, read/write.
 ///
 /// Sub-index *n + 1* is the period for TPDO kind *n* (see [`crate::TpdoKind`], whose discriminant
 /// is that same *n*); 0 disables that kind. A period changed here takes effect on the next tick,
@@ -946,6 +1078,34 @@ mod tests {
         assert_eq!(ErrorCounter::from_sub(NUM_ERROR_COUNTERS as u8 + 1), None);
     }
 
+    #[test]
+    fn the_error_category_order_is_pinned() {
+        for (index, category) in ErrorCategory::ALL.iter().enumerate() {
+            assert_eq!(*category as usize, index, "ALL must stay in discriminant order");
+            assert_eq!(category.sub() as usize, index + 1);
+        }
+    }
+
+    /// The reboot slot is reserved: until something can count a reset, nothing may feed it, or a
+    /// master would read some other kind of error as a reboot.
+    #[test]
+    fn nothing_feeds_the_reboot_summary_yet() {
+        for counter in ErrorCounter::ALL {
+            assert_ne!(counter.category(), Some(ErrorCategory::Reboot), "{counter:?}");
+        }
+    }
+
+    /// The one window bypass must be a counter that is actually summarised, or it bypasses into
+    /// nothing.
+    #[test]
+    fn only_summarised_counters_bypass_the_window() {
+        for counter in ErrorCounter::ALL {
+            if counter.bypasses_summary_window() {
+                assert!(counter.category().is_some(), "{counter:?}");
+            }
+        }
+    }
+
     /// Indices are the wire, so a duplicate or a typo'd digit is a silent aliasing bug rather
     /// than a compile error.
     #[test]
@@ -982,6 +1142,7 @@ mod tests {
             RAIL_VOLTAGE,
             TEMPERATURE,
             ERROR_COUNTERS,
+            ERROR_SUMMARY,
             MASTER_NODE_ID,
             FALLBACK_A_MS,
             FALLBACK_B_MS,

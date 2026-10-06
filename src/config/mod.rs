@@ -86,6 +86,8 @@ const DEFAULT_TPDO_MS: PerTpdoKind<u16> = PerTpdoKind::new([
     200,  // 16 Status
     0,    // 17 ValveCurrent
     2000, // 18 Temperature
+    250,  // 19 ErrorSummary: one window. Unchanged frames are skipped, so a healthy board only
+          //    sends the keepalive.
 ]);
 
 /// Where rev3's factory defaults fit the board thermistor: the last slot, the one a node mapping

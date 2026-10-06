@@ -328,11 +328,23 @@ parameter_name = "error counters since boot"
 object_type = "array"
 data_type = "uint32"
 access_type = "ro"
-array_size = 23
+array_size = 28
 default_value = [
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
 ]
+
+# Four summary error counts: general, peripheral, CAN, reboot (reserved, always 0). Each climbs by
+# one per 250 ms window in which an 0x2050 counter of its category climbed. Wrapping; difference
+# them. Broadcast as TPDO kind 19.
+[[objects]]
+index = 0x2051
+parameter_name = "error summary per category (general, peripheral, can, reboot)"
+object_type = "array"
+data_type = "uint16"
+access_type = "ro"
+array_size = 4
+default_value = [0, 0, 0, 0]
 
 # ============================================================================
 # 0x3000 — runtime configuration. Read/write, persisted to NOR on 0x1010.
@@ -659,8 +671,8 @@ parameter_name = "tpdo broadcast period per kind, milliseconds"
 object_type = "array"
 data_type = "uint16"
 access_type = "rw"
-array_size = 19
-default_value = [500, 500, 200, 500, 500, 500, 100, 0, 100, 0, 0, 50, 0, 5000, 1000, 1000, 1000, 0, 2000]
+array_size = 20
+default_value = [500, 500, 200, 500, 500, 500, 100, 0, 100, 0, 0, 50, 0, 5000, 1000, 1000, 1000, 0, 2000, 250]
 
 # ============================================================================
 # 0x3050 — overpressure relief: the one decision a node makes for itself.

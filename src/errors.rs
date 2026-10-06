@@ -30,12 +30,23 @@
 //! to zero them over the bus — a counter someone can reset is a counter you cannot trust to have
 //! been counting since boot, and "it went back to zero" is itself the signal that the node
 //! rebooted between two reads.
+//!
+//! # The summary
+//!
+//! On top of those, four coarse counts at [`iocan_proto::od::ERROR_SUMMARY`] — one per
+//! [`ErrorCategory`] — that a master can watch on the bus without knowing the detailed taxonomy.
+//! A [`bump`] marks its category in [`SUMMARY_DIRTY`], and [`SummaryWindow`] (driven by the
+//! control tick) closes a window every [`ERROR_SUMMARY_WINDOW_MS`], adding one to each category
+//! that was marked. So the summaries are fed by exactly the same calls as the detail, and nothing
+//! at a call site needs to know they exist.
 
-use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU16, AtomicU32, Ordering};
+
+use embassy_time::{Duration, Instant};
 
 use crate::index::{Id, PerErrorCounter};
 
-pub use iocan_proto::od::ErrorCounter;
+pub use iocan_proto::od::{ERROR_SUMMARY_WINDOW_MS, ErrorCategory, ErrorCounter, NUM_ERROR_CATEGORIES};
 
 /// One free-running counter per [`ErrorCounter`].
 ///
@@ -51,6 +62,13 @@ static COUNTS: [AtomicU32; ErrorCounter::ALL.len()] = [const { AtomicU32::new(0)
 /// one — so this turns the common case from reading every counter and writing the whole array
 /// into the store into a single load.
 static CHANGED: AtomicBool = AtomicBool::new(false);
+
+/// Bit *n* set: [`ErrorCategory`] *n* has seen a bump in the window that is open now. Cleared by
+/// [`SummaryWindow`] as it closes the window.
+static SUMMARY_DIRTY: AtomicU8 = AtomicU8::new(0);
+
+/// The summary counts themselves, wrapping at `u16` as they do on the wire.
+static SUMMARY: [AtomicU16; NUM_ERROR_CATEGORIES] = [const { AtomicU16::new(0) }; NUM_ERROR_CATEGORIES];
 
 /// Record one occurrence. Callable from anywhere, including interrupt context and non-`async`
 /// code: no lock, no allocation, no `await`.
@@ -68,6 +86,60 @@ pub fn bump_by(which: ErrorCounter, n: u32) {
     }
     COUNTS[which.index()].fetch_add(n, Ordering::Relaxed);
     CHANGED.store(true, Ordering::Relaxed);
+
+    if let Some(category) = which.category() {
+        if which.bypasses_summary_window() {
+            // Truncating is the same arithmetic as wrapping: `n` added mod 2^16.
+            SUMMARY[category as usize].fetch_add(n as u16, Ordering::Relaxed);
+        } else {
+            SUMMARY_DIRTY.fetch_or(1 << category as u8, Ordering::Relaxed);
+        }
+    }
+}
+
+/// The four summary counts, in [`ErrorCategory`] order.
+pub fn summary() -> [u16; NUM_ERROR_CATEGORIES] {
+    core::array::from_fn(|i| SUMMARY[i].load(Ordering::Relaxed))
+}
+
+/// Closes a summary window every [`ERROR_SUMMARY_WINDOW_MS`]. Owned by the control task, whose
+/// tick polls it.
+///
+/// The windows are fixed: the next one closes a whole period after the previous one was due,
+/// not after it was noticed. Polled from a 20 ms tick, each closes up to a tick late, but
+/// they do not drift, so on average a window is exactly the nominal length.
+pub struct SummaryWindow {
+    next_close: Instant,
+}
+
+impl SummaryWindow {
+    const PERIOD: Duration = Duration::from_millis(ERROR_SUMMARY_WINDOW_MS as u64);
+
+    pub fn new(now: Instant) -> Self {
+        Self {
+            next_close: now + Self::PERIOD,
+        }
+    }
+
+    /// Close the window if it is due: one count for each category that saw anything in it.
+    pub fn poll(&mut self, now: Instant) {
+        if now < self.next_close {
+            return;
+        }
+        self.next_close += Self::PERIOD;
+        // A stall of more than a whole window is not caught up by closing a row of windows at
+        // once; whatever happened during it was one bad stretch, not several.
+        if self.next_close <= now {
+            self.next_close = now + Self::PERIOD;
+        }
+
+        let dirty = SUMMARY_DIRTY.swap(0, Ordering::Relaxed);
+        for category in ErrorCategory::ALL {
+            if dirty & (1 << category as u8) != 0 {
+                SUMMARY[category as usize].fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
 }
 
 /// Read one counter.
@@ -104,6 +176,10 @@ pub fn reset_all() {
         counter.store(0, Ordering::Relaxed);
     }
     CHANGED.store(false, Ordering::Relaxed);
+    for counter in &SUMMARY {
+        counter.store(0, Ordering::Relaxed);
+    }
+    SUMMARY_DIRTY.store(0, Ordering::Relaxed);
 }
 
 /// Serialises the tests that touch this module's global state, and any test elsewhere that
@@ -182,5 +258,100 @@ mod tests {
 
         assert_eq!(snapshot[ErrorCounter::ValveStall], 3);
         assert_eq!(snapshot.as_slice()[ErrorCounter::ValveStall.sub() as usize - 1], 3);
+    }
+
+    fn at(ms: u64) -> Instant {
+        Instant::from_millis(ms)
+    }
+
+    /// A burst inside one window is one count, however many errors and however many counters of
+    /// the category it touched.
+    #[test]
+    fn a_burst_in_one_window_counts_once() {
+        let _guard = test_lock();
+        reset_all();
+        let mut window = SummaryWindow::new(at(0));
+
+        bump_by(ErrorCounter::CanRxDropped, 50);
+        bump(ErrorCounter::SdoRequestInvalid);
+        bump(ErrorCounter::ValveStall);
+        window.poll(at(240));
+        assert_eq!(summary(), [0, 0, 0, 0], "nothing is counted until the window closes");
+
+        window.poll(at(260));
+        assert_eq!(summary(), [1, 1, 0, 0]);
+        assert_eq!(count(ErrorCounter::CanRxDropped), 50, "the detail still has every one");
+    }
+
+    #[test]
+    fn every_window_with_an_error_counts_and_a_quiet_one_does_not() {
+        let _guard = test_lock();
+        reset_all();
+        let mut window = SummaryWindow::new(at(0));
+
+        bump(ErrorCounter::CanRxError);
+        window.poll(at(250));
+        window.poll(at(500)); // quiet
+        bump(ErrorCounter::CanBusOff);
+        window.poll(at(750));
+
+        assert_eq!(summary()[ErrorCategory::Can as usize], 2);
+    }
+
+    /// Polled late, a window still closes on its own schedule rather than sliding to the poll.
+    #[test]
+    fn windows_close_on_a_fixed_grid() {
+        let _guard = test_lock();
+        reset_all();
+        let mut window = SummaryWindow::new(at(0));
+
+        window.poll(at(260)); // closes the 0..250 window, next due at 500
+        bump(ErrorCounter::WatchdogLate);
+        window.poll(at(499));
+        assert_eq!(summary()[0], 0);
+        window.poll(at(500));
+        assert_eq!(summary()[0], 1);
+    }
+
+    #[test]
+    fn a_long_stall_does_not_close_a_row_of_windows() {
+        let _guard = test_lock();
+        reset_all();
+        let mut window = SummaryWindow::new(at(0));
+
+        bump(ErrorCounter::WatchdogLate);
+        window.poll(at(2_000));
+        window.poll(at(2_010));
+        assert_eq!(summary()[0], 1);
+        bump(ErrorCounter::WatchdogLate);
+        window.poll(at(2_249));
+        assert_eq!(summary()[0], 1, "re-anchored to the late poll, not still due from boot");
+        window.poll(at(2_250));
+        assert_eq!(summary()[0], 2);
+    }
+
+    #[test]
+    fn missing_sensors_at_boot_count_one_each_without_waiting() {
+        let _guard = test_lock();
+        reset_all();
+        let mut window = SummaryWindow::new(at(0));
+
+        bump_by(ErrorCounter::SensorMissingAtBoot, 3);
+        assert_eq!(summary()[ErrorCategory::Peripheral as usize], 3);
+        window.poll(at(250));
+        assert_eq!(summary()[ErrorCategory::Peripheral as usize], 3, "and the window adds nothing on top");
+    }
+
+    /// An unwired slot climbs its sample counter every tick; letting that into the summary would
+    /// pin Peripheral at the full rate for as long as the board is up.
+    #[test]
+    fn a_sample_counter_for_an_unwired_slot_stays_out_of_the_summary() {
+        let _guard = test_lock();
+        reset_all();
+        let mut window = SummaryWindow::new(at(0));
+
+        bump(ErrorCounter::SensorSourceMissing);
+        window.poll(at(250));
+        assert_eq!(summary(), [0, 0, 0, 0]);
     }
 }

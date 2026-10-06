@@ -43,7 +43,7 @@ use crate::config::Config;
 use crate::config::{ENCODER_ADDRESS, ENCODER_MAGNET_OK_BIT, ENCODER_PRESENT_BIT, SensorSource};
 use crate::config::{ENCODER_FULL_SCALE, SensorKind, SensorSlotConfig, Unit};
 #[cfg(any(feature = "hardware", test))]
-use crate::errors::{ErrorCounter, bump};
+use crate::errors::{ErrorCounter, bump, bump_by};
 #[cfg(any(feature = "hardware", test))]
 use crate::index::{AdcSlot, I2cBus, PerAdcSlot, PerI2cBus, PerSensorSlot};
 // Ungated: `AnalogSensing` is part of the calibration half of this module, which builds on the
@@ -657,6 +657,28 @@ impl<I0: I2c, I1: I2c> Sensors<I0, I1> {
         }
         if self.scan.wrapped() {
             self.sweeps = self.sweeps.wrapping_add(1);
+            if self.sweeps == 1 {
+                self.count_missing_at_boot(config);
+            }
+        }
+    }
+
+    /// Once the first sweep has looked at every address: one [`ErrorCounter::SensorMissingAtBoot`]
+    /// per configured slot whose I2C device did not answer. The COM5/COM6 pins have no presence
+    /// to check, so a slot on one of those is never counted here.
+    fn count_missing_at_boot(&self, config: &Config) {
+        let missing = config
+            .sensors
+            .iter()
+            .filter(|(_, slot)| match slot.source() {
+                Some(SensorSource::Adc(adc)) => !self.is_present(adc),
+                Some(SensorSource::Encoder(bus)) => !self.encoder_present(bus),
+                Some(SensorSource::Analog(_)) | None => false,
+            })
+            .count();
+        if missing > 0 {
+            bump_by(ErrorCounter::SensorMissingAtBoot, missing as u32);
+            defmt::warn!("{} configured sensor(s) not found by the first I2C sweep", missing);
         }
     }
 
@@ -938,6 +960,45 @@ mod tests {
         // And only the pin it names: the other three are nothing to do with this slot.
         sensors.raw_analog[AnalogInput::Com5Pin1] = 1825;
         assert_eq!(calibrate(&slot, sensors.raw_for(&slot)), 2_500);
+    }
+
+    /// Counted once the first sweep has looked everywhere, one per configured I2C slot that came
+    /// up empty — and never again on later sweeps.
+    #[test]
+    fn sensors_missing_after_the_first_sweep_are_counted_once_each() {
+        let _guard = crate::errors::test_lock();
+        crate::errors::reset_all();
+
+        use crate::index::{AnalogInput, SensorSlot};
+        let mut bus0 = MockI2c::new();
+        bus0.respond(AMPLIFIER_ADDRESSES[AmplifierId::Amp0], 100, false);
+        let mut sensors = sensors_with(bus0, MockI2c::new());
+        let config = Config::new()
+            .with_sensor(
+                SensorSlot::Slot0,
+                SensorSlotConfig::pressure(I2cBus::Bus0, AmplifierId::Amp0, Unit::CentiBar, SensorCalib::UNITY),
+            )
+            .with_sensor(
+                SensorSlot::Slot1,
+                SensorSlotConfig::pressure(I2cBus::Bus1, AmplifierId::Amp2, Unit::CentiBar, SensorCalib::UNITY),
+            )
+            .with_sensor(SensorSlot::Slot2, SensorSlotConfig::encoder(I2cBus::Bus1, 0, 1024))
+            // Not on I2C, so it has no presence to be missing from.
+            .with_sensor(SensorSlot::Slot3, SensorSlotConfig::ntc(AnalogInput::Com6Pin1));
+
+        let interval = config.scan_interval_ms as u64;
+        for step in 1..=ProbeTarget::COUNT as u64 {
+            assert_eq!(crate::errors::count(ErrorCounter::SensorMissingAtBoot), 0, "not before the sweep is done");
+            block_on(sensors.scan_step(&config, Instant::from_millis(step * interval)));
+        }
+        assert_eq!(sensors.sweeps, 1);
+        assert_eq!(crate::errors::count(ErrorCounter::SensorMissingAtBoot), 2, "the bus 1 amplifier and encoder");
+
+        for step in 1..=ProbeTarget::COUNT as u64 {
+            block_on(sensors.scan_step(&config, Instant::from_millis((ProbeTarget::COUNT as u64 + step) * interval)));
+        }
+        assert_eq!(sensors.sweeps, 2);
+        assert_eq!(crate::errors::count(ErrorCounter::SensorMissingAtBoot), 2, "boot only");
     }
 
     /// A sensor pointed at hardware that is not there never transitions, so nothing event-based

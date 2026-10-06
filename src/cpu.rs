@@ -52,6 +52,9 @@ const WINDOW: Duration = Duration::from_millis(100);
 /// Windows per published value — the reporting period is this many [`WINDOW`]s.
 const WINDOWS_PER_REPORT: u32 = 5;
 
+/// A window at least this busy, in permille, is counted as [`ErrorCounter::CpuLoadHigh`].
+const HIGH_LOAD_PERMILLE: u16 = 900;
+
 /// Highest utilization that can be reported, matching the promille everything else on this board
 /// is expressed in.
 const PERMILLE_FULL: u64 = 1000;
@@ -194,6 +197,9 @@ impl CpuMonitor {
         // `busy <= total` keeps this at or below PERMILLE_FULL, and a window of ticks times 1000
         // is nowhere near u64.
         let permille = (busy * PERMILLE_FULL / total) as u16;
+        if permille >= HIGH_LOAD_PERMILLE {
+            errors::bump(ErrorCounter::CpuLoadHigh);
+        }
         self.peak_permille = self.peak_permille.max(permille);
         self.windows = self.windows.saturating_add(1);
 
@@ -314,5 +320,22 @@ mod tests {
         assert_eq!(errors::count(ErrorCounter::ControlTickOverrun), 0);
         monitor.update(Duration::from_millis(21), start);
         assert_eq!(errors::count(ErrorCounter::ControlTickOverrun), 1);
+    }
+
+    /// A spike is counted per window that crossed the line, even when the half-second report it
+    /// lands in is the only place it would otherwise show.
+    #[test]
+    fn every_window_at_or_above_ninety_percent_is_a_spike() {
+        let _guard = errors::test_lock();
+        clear();
+
+        let start = Instant::from_millis(0);
+        let mut monitor = monitor_at(start);
+        // 89 %, 90 %, 100 %, idle.
+        for (window, idle_ms) in [(1u64, 11), (2, 10), (3, 0), (4, 100)] {
+            record_idle(Duration::from_millis(idle_ms));
+            monitor.update(Duration::from_millis(1), start + WINDOW * window as u32);
+        }
+        assert_eq!(errors::count(ErrorCounter::CpuLoadHigh), 2);
     }
 }

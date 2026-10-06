@@ -193,6 +193,8 @@ fn frame_for(store: &Store, kind: TpdoKind) -> TpdoFrame {
             TpdoFrame::Temperature { board, mcu }
         }
 
+        TpdoKind::ErrorSummary => TpdoFrame::ErrorSummary(store.error_summary),
+
         TpdoKind::Status => TpdoFrame::Status {
             link_state: store.link_state as u8,
             raw_debug: store.raw_debug,

@@ -35,10 +35,11 @@ const MAGIC: u32 = 0x4249_4F43; // "COIB", little-endian "IOCB"
 /// 7: a heating pad switches a set of outputs (`HcoSet`, a bitmask) instead of one optional
 ///    output. Same byte, different meaning — an old `2` (Hco2) would read as Hco1 — hence a bump.
 /// 8: one more TPDO period (`TpdoKind::Temperature`), so every field after it moved by two bytes.
-const VERSION: u16 = 8;
+/// 9: one more TPDO period (`TpdoKind::ErrorSummary`), the same shift again.
+const VERSION: u16 = 9;
 
 const HEADER_LEN: usize = 12;
-const BODY_LEN: usize = 485;
+const BODY_LEN: usize = 487;
 #[cfg(test)]
 const RECORD_LEN: usize = HEADER_LEN + BODY_LEN + 4;
 
