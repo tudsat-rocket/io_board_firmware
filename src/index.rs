@@ -138,22 +138,29 @@ id_domain!(
 );
 
 id_domain!(
-    /// One analog pin an external NTC can be wired to: the two pins of COM5 and the two of COM6.
+    /// One analog pin an NTC can be read from: the two pins of COM5 and the two of COM6, where an
+    /// external thermistor is wired, and the board's own TH1.
     ///
-    /// These are the STM32's own ADC inputs (`A_IN_0`..`A_IN_3`) rather than an amplifier on an
-    /// I2C bus, which is why a [`crate::config::SensorKind::Ntc`] slot names one of these instead
-    /// of a bus and an address strap:
+    /// These are the STM32's own ADC inputs rather than an amplifier on an I2C bus, which is why
+    /// a [`crate::config::SensorKind::Ntc`] slot names one of these instead of a bus and an
+    /// address strap:
     ///
-    /// | input      | label    | rev3 pin | rev2 pin |
-    /// |------------|----------|----------|----------|
-    /// | `Com5Pin1` | `A_IN_0` | PA6      | PA7      |
-    /// | `Com5Pin2` | `A_IN_1` | PA5      | PA6      |
-    /// | `Com6Pin1` | `A_IN_2` | PC5      | PC5      |
-    /// | `Com6Pin2` | `A_IN_3` | PC4      | PC4      |
+    /// | input      | label      | rev3 pin | rev2 pin |
+    /// |------------|------------|----------|----------|
+    /// | `Com5Pin1` | `A_IN_0`   | PA6      | PA7      |
+    /// | `Com5Pin2` | `A_IN_1`   | PA5      | PA6      |
+    /// | `Com6Pin1` | `A_IN_2`   | PC5      | PC5      |
+    /// | `Com6Pin2` | `A_IN_3`   | PC4      | PC4      |
+    /// | `Board`    | `TH_sense` | PA4      | PA4      |
+    ///
+    /// `Board` is last so the four COM pins keep the wire codes they always had. TH1 sits in a
+    /// different divider from the one a COM pin expects (5k1 upper leg, not 10k), so only a
+    /// [`crate::config::SensorKind::BoardNtc`] slot reads it, and
+    /// [`crate::config::Config::sanity_check`] refuses a harness NTC kind pointed at it.
     ///
     /// Only rev3 reads them: rev2 has no ADC wired up at all, so a slot configured onto one there
     /// reports no reading rather than a wrong one.
-    AnalogInput, PerAnalogInput, 4, [Com5Pin1, Com5Pin2, Com6Pin1, Com6Pin2]
+    AnalogInput, PerAnalogInput, 5, [Com5Pin1, Com5Pin2, Com6Pin1, Com6Pin2, Board]
 );
 
 id_domain!(

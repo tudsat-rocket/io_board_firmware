@@ -209,12 +209,12 @@ pub async fn init_board(spawner: Spawner) -> Board {
             v_logic_supply: p.PC1,
             v_hco12_supply: p.PC2,
             v_hco34_supply: p.PC3,
-            v_temp: p.PA4,
             analog: crate::index::PerAnalogInput::new([
                 Some(p.PA6.degrade_adc()), // COM5 pin 1, A_IN_0
                 Some(p.PA5.degrade_adc()), // COM5 pin 2, A_IN_1
                 Some(p.PC5.degrade_adc()), // COM6 pin 1, A_IN_2
                 Some(p.PC4.degrade_adc()), // COM6 pin 2, A_IN_3
+                Some(p.PA4.degrade_adc()), // TH1, TH_sense
             ]),
         },
         adc::SampleTime::CYCLES7_5,

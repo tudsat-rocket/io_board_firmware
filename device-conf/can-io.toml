@@ -109,17 +109,17 @@ access_type = "ro"
 array_size = 2
 default_value = [65535, 65535]
 
-# Uncalibrated 12-bit counts on the four analog COM pins, in the order COM5 pin 1, COM5 pin 2,
-# COM6 pin 1, COM6 pin 2 — the same order 0x3028 takes. 0xFFFF = the pin is not sampled on this
-# board. Near 4095 or near 0 is an open or shorted thermistor.
+# Uncalibrated 12-bit counts on the four analog COM pins and the on-board thermistor, in the order
+# COM5 pin 1, COM5 pin 2, COM6 pin 1, COM6 pin 2, TH1 — the same order 0x3028 takes. 0xFFFF = the
+# pin is not sampled on this board. Near 4095 or near 0 is an open or shorted thermistor.
 [[objects]]
 index = 0x2007
-parameter_name = "raw analog input counts, com5/com6"
+parameter_name = "raw analog input counts, com5/com6/th1"
 object_type = "array"
 data_type = "uint16"
 access_type = "ro"
-array_size = 4
-default_value = [65535, 65535, 65535, 65535]
+array_size = 5
+default_value = [65535, 65535, 65535, 65535, 65535]
 
 # --- valves: the three-layer state ---------------------------------------
 
@@ -547,7 +547,8 @@ array_size = 16
 default_value = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
 
 # Which analog COM pin an NTC slot (kind 5 or 6) reads: 0 COM5 pin 1, 1 COM5 pin 2, 2 COM6 pin 1,
-# 3 COM6 pin 2. Ignored by every other kind, which is on an I2C bus instead. Raw counts at 0x2007.
+# 3 COM6 pin 2, 4 the on-board TH1 (read by kind 7 only; kinds 5 and 6 on it are refused). Ignored
+# by every other kind, which is on an I2C bus instead. Raw counts at 0x2007.
 [[objects]]
 index = 0x3028
 parameter_name = "sensor slot analog input (com5/com6 pin)"
@@ -558,9 +559,10 @@ array_size = 16
 default_value = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
 
 # 0 unused, 1 pressure, 2 Pt1000, 3 MCP9700, 4 AS5600 encoder, 5 NTC on a COM5/COM6 pin (10k to
-# +3.3V, thermistor to ground), 6 the same NTC with the divider's legs swapped. Write this BEFORE
-# 0x3023..0x3026: changing it re-seeds them. Kinds 1..4 are addressed by 0x3020 and 0x3021; kinds
-# 5 and 6 are addressed by 0x3028 and ignore both.
+# +3.3V, thermistor to ground), 6 the same NTC with the divider's legs swapped, 7 the on-board
+# thermistor TH1. Write this BEFORE 0x3023..0x3026: changing it re-seeds them. Kinds 1..4 are
+# addressed by 0x3020 and 0x3021; kinds 5 and 6 are addressed by 0x3028 and ignore both; kind 7
+# needs no addressing at all.
 [[objects]]
 index = 0x3022
 parameter_name = "sensor slot kind"

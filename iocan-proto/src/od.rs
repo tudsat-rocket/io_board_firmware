@@ -139,11 +139,12 @@ pub const SENSOR_UNIT: u16 = 0x2005;
 /// number at [`SENSOR_VALUE`].
 pub const RAW_ENCODER: u16 = 0x2006;
 
-/// Raw 12-bit counts on each of the four COM5/COM6 analog pins. `uint16[4]`, read-only.
+/// Raw 12-bit counts on each of the four COM5/COM6 analog pins and on the board's own thermistor,
+/// TH1. `uint16[5]`, read-only.
 /// [`RAW_INVALID`] for a pin this board did not hand over or has not sampled yet.
 ///
-/// The order is the analog-input order: COM5 pin 1, COM5 pin 2, COM6 pin 1, COM6 pin 2, which is
-/// also what [`SENSOR_ANALOG_INPUT`] takes. These are the STM32's own ADC pins rather than an
+/// The order is the analog-input order: COM5 pin 1, COM5 pin 2, COM6 pin 1, COM6 pin 2, TH1, which
+/// is also what [`SENSOR_ANALOG_INPUT`] takes. These are the STM32's own ADC pins rather than an
 /// amplifier on an I2C bus, so they never appear in [`I2C_PRESENT`]: an NTC that is not wired up
 /// reads one end of its curve, which is what [`SENSOR_VALUE`] refusing a reading tells you.
 ///
@@ -607,12 +608,15 @@ pub const SENSOR_BUS: u16 = 0x3020;
 pub const SENSOR_AMPLIFIER: u16 = 0x3021;
 
 /// Which COM5/COM6 pin an NTC slot reads: 0 = COM5 pin 1, 1 = COM5 pin 2, 2 = COM6 pin 1,
-/// 3 = COM6 pin 2. `uint8[16]`, read/write.
+/// 3 = COM6 pin 2, 4 = the on-board TH1. `uint8[16]`, read/write.
+///
+/// TH1 is a different thermistor in a different divider, so it is read by kind 7 only, which
+/// needs nothing written here; the node refuses a configuration with kind 5 or 6 on input 4.
 ///
 /// Ignored by every kind other than an NTC (codes 5 and 6), the kinds that are not on an I2C
 /// bus: they are a divider straight onto one of the STM32's own ADC pins, so this object replaces
 /// [`SENSOR_BUS`] and [`SENSOR_AMPLIFIER`] rather than adding to them. The raw counts on all
-/// four pins are at [`RAW_ANALOG`], in this same order.
+/// inputs are at [`RAW_ANALOG`], in this same order.
 ///
 /// Defaults to 0 (COM5 pin 1), so writing nothing but the kind gives a working slot. A board can
 /// decline to hand a pin over — rev2 has no ADC at all — and a slot on such a pin reports no
@@ -630,13 +634,15 @@ pub const SENSOR_ANALOG_INPUT: u16 = 0x3028;
 /// | 4    | AS5600 magnetic rotary encoder           |
 /// | 5    | 10k NTC on a COM5/COM6 pin, to ground    |
 /// | 6    | the same NTC, wired to +3.3V instead     |
+/// | 7    | the on-board thermistor, TH1             |
 ///
 /// The kind decides which device the slot is read from and how that device's raw number is
 /// linearised. Everything after that is [`SENSOR_OFFSET`]..[`SENSOR_CONSTANT`].
 ///
 /// Kinds 1..4 are on an I2C bus and are addressed by [`SENSOR_BUS`] and [`SENSOR_AMPLIFIER`];
 /// kinds 5 and 6 are a divider on one of the STM32's own ADC pins and are addressed by
-/// [`SENSOR_ANALOG_INPUT`] instead.
+/// [`SENSOR_ANALOG_INPUT`] instead. Kind 7 is the board's own thermistor and needs no addressing
+/// at all.
 ///
 /// The two NTC codes are the two ways to wire that divider, and which one a slot is on changes
 /// what a raw count means: **5** is 10k from the pin to +3.3V with the thermistor to ground, so
@@ -651,11 +657,11 @@ pub const SENSOR_ANALOG_INPUT: u16 = 0x3028;
 /// Writing the same kind again is a no-op, so a master that resends its whole configuration will
 /// not wipe the coefficients it just sent.
 ///
-/// For kinds 2, 3, 5 and 6 the re-seeded calibration is complete and working: the Pt1000 bridge is
-/// the board's own resistors, the MCP9700's curve is in its datasheet, and the NTC's is the
-/// thermistor's own (10k at 25 degC, B = 3950 K, in a 10k divider to +3.3V), so one write is
-/// enough to get a real temperature. Kinds 1 and 4 have no honest default — a transducer's slope
-/// comes off the bench and an encoder's from where its magnet ended up — so they are left
+/// For kinds 2, 3, 5, 6 and 7 the re-seeded calibration is complete and working: the Pt1000
+/// bridge is the board's own resistors, the MCP9700's curve is in its datasheet, and the NTC's is
+/// the thermistor's own (10k at 25 degC, B = 3950 K, in a 10k divider to +3.3V; for TH1, B =
+/// 3380 K under 5k1), so one write is enough to get a real temperature. Kinds 1 and 4 have no
+/// honest default — a transducer's slope comes off the bench and an encoder's from where its magnet ended up — so they are left
 /// uncalibrated and report no reading (see [`SENSOR_SLOPE`]) until the coefficients arrive.
 pub const SENSOR_KIND: u16 = 0x3022;
 

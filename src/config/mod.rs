@@ -34,7 +34,8 @@ pub mod sensors;
 pub mod valves;
 
 use crate::index::{
-    HcoId, I2cBus, PdoSensorChannel, PerAnalogInput, PerSensorSlot, PerTpdoKind, PerValve, SensorSlot, ValveId,
+    AnalogInput, HcoId, I2cBus, PdoSensorChannel, PerAnalogInput, PerSensorSlot, PerTpdoKind, PerValve, SensorSlot,
+    ValveId,
 };
 
 pub use heating::{HcoSet, ValveHeatingConfig};
@@ -299,6 +300,11 @@ impl Config {
             if s.kind.is_on_i2c() && s.bus.is_none() {
                 return Err(ConfigError::SensorBusUnset(id));
             }
+            // TH1 is a different part in a different divider, so a harness NTC kind on it would
+            // read a plausible temperature off the wrong curve. `BoardNtc` is the kind for it.
+            if matches!(s.kind, SensorKind::Ntc | SensorKind::NtcToSupply) && s.analog == AnalogInput::Board {
+                return Err(ConfigError::NtcOnBoardInput(id));
+            }
             // Two slots on one channel means one of them silently never reaches the bus.
             for (other, t) in self.sensors.iter().skip(id.index() + 1) {
                 if s.pdo_channel.is_some() && s.pdo_channel == t.pdo_channel {
@@ -386,6 +392,9 @@ pub enum ConfigError {
     PositionSensorUnit(ValveId, SensorSlot),
     /// A configured sensor slot has no I2C bus to read from.
     SensorBusUnset(SensorSlot),
+    /// A COM5/COM6 NTC kind names the board's own thermistor input, which needs
+    /// [`SensorKind::BoardNtc`] instead.
+    NtcOnBoardInput(SensorSlot),
     /// Two sensor slots claim the same TPDO channel.
     PdoChannelShared(SensorSlot, SensorSlot),
     /// Relief is armed against a valve that is not fitted.
@@ -561,6 +570,18 @@ mod tests {
         let used = cfg.analog_inputs_used();
         assert!(used[AnalogInput::Com6Pin1]);
         assert!(!used[AnalogInput::Com5Pin1], "only the pin a slot actually names is sampled");
+    }
+
+    /// TH1 is read through its own kind, and a harness NTC kind pointed at its input would read
+    /// the wrong curve, so that one combination is refused.
+    #[test]
+    fn the_board_thermistor_is_only_read_as_a_board_ntc() {
+        let cfg = Config::new().with_sensor(SensorSlot::Slot0, SensorSlotConfig::board_ntc());
+        assert!(cfg.sanity_check().is_ok());
+        assert!(cfg.analog_inputs_used()[AnalogInput::Board]);
+
+        let cfg = Config::new().with_sensor(SensorSlot::Slot0, SensorSlotConfig::ntc(AnalogInput::Board));
+        assert!(matches!(cfg.sanity_check(), Err(ConfigError::NtcOnBoardInput(SensorSlot::Slot0))));
     }
 
     /// The default that keeps the first twelve slots behaving as they always have.

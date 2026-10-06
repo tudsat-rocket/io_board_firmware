@@ -92,8 +92,8 @@ pub struct Store {
     pub raw_adc: PerAdcSlot<u16>,
     /// Raw AS5600 angle per bus, [`RAW_INVALID`] when no encoder answered.
     pub raw_angle: PerI2cBus<u16>,
-    /// 0x2007. Raw 12-bit counts on each COM5/COM6 pin, [`RAW_INVALID`] for a pin this build did
-    /// not hand over or has not sampled yet.
+    /// 0x2007. Raw 12-bit counts on each COM5/COM6 pin and on TH1, [`RAW_INVALID`] for a pin this
+    /// build did not hand over or has not sampled yet.
     ///
     /// Written by the control task, which owns the STM32's ADC, and read by the sensor task,
     /// which calibrates it into whatever [`SensorKind::Ntc`] slot names the pin. The two never
@@ -1169,19 +1169,20 @@ mod tests {
         assert_eq!(calibrate(cfg, Some(2048)), 2_500);
         assert_eq!(read(&s, od::SENSOR_ANALOG_INPUT, sub).unwrap().data(), &[AnalogInput::Com6Pin2.as_u8()]);
 
-        // There are four pins; a fifth is a mistake worth an abort rather than a wrapped index.
-        assert!(matches!(write(&mut s, od::SENSOR_ANALOG_INPUT, sub, &[4]), Err(AbortCode::ValueTooHigh)));
+        // There are five inputs (four COM pins and TH1); a sixth is a mistake worth an abort
+        // rather than a wrapped index.
+        assert!(matches!(write(&mut s, od::SENSOR_ANALOG_INPUT, sub, &[5]), Err(AbortCode::ValueTooHigh)));
     }
 
-    /// The four COM5/COM6 pins are read-only process data like the raw amplifier counts, and
-    /// start invalid: nothing has sampled them until the control task's first tick.
+    /// The four COM5/COM6 pins and TH1 are read-only process data like the raw amplifier counts,
+    /// and start invalid: nothing has sampled them until the control task's first tick.
     #[test]
-    fn the_raw_analog_array_is_four_long_and_starts_invalid() {
+    fn the_raw_analog_array_is_five_long_and_starts_invalid() {
         let s = store_with_servo();
         assert_eq!(read(&s, od::RAW_ANALOG, 0).unwrap().data(), &[crate::config::NUM_ANALOG_INPUTS as u8]);
         assert_eq!(read(&s, od::RAW_ANALOG, 1).unwrap().data(), &RAW_INVALID.to_le_bytes());
-        assert!(read(&s, od::RAW_ANALOG, 4).is_ok());
-        assert!(matches!(read(&s, od::RAW_ANALOG, 5), Err(AbortCode::NoSuchSubIndex)));
+        assert!(read(&s, od::RAW_ANALOG, 5).is_ok());
+        assert!(matches!(read(&s, od::RAW_ANALOG, 6), Err(AbortCode::NoSuchSubIndex)));
         assert!(matches!(write(&mut store_with_servo(), od::RAW_ANALOG, 1, &[0, 0]), Err(AbortCode::ReadOnly)));
     }
 

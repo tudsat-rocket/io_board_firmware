@@ -146,12 +146,64 @@ const NTC_CURVE: [u16; 34] = [
     142,  // 125 C
 ];
 
+/// TH1's curve, on the same grid as [`NTC_CURVE`]: the board's own thermistor, a Murata
+/// `NCP18XH103F03RB` (R25 = 10k, B25/50 = 3380 K) to ground under the schematic's 5k1 upper leg
+/// (R44) to +3.3V:
+///
+/// ```text
+///   R_ntc(T) = 10k * exp(3380 * (1/T - 1/298.15))
+///   counts(T) = 4095 * R_ntc / (5100 + R_ntc)
+/// ```
+///
+/// A single beta fits the vendor's R-T table closely around room temperature and drifts from it
+/// towards the ends (the part is specified at 3428 K for 25/80 and 3455 K for 25/100). That is
+/// well inside what this reading is for, which is telling a warm bay from an overheating one.
+///
+/// Ratiometric for the same reason [`NTC_CURVE`] is: the divider hangs off +3.3V, and the ADC
+/// reference is +3.3VA, the filtered version of the same rail.
+const BOARD_NTC_CURVE: [u16; 34] = [
+    4008, // -40 C
+    3978, // -35 C
+    3940, // -30 C
+    3893, // -25 C
+    3834, // -20 C
+    3764, // -15 C
+    3680, // -10 C
+    3581, //  -5 C
+    3468, //   0 C
+    3341, //   5 C
+    3200, //  10 C
+    3047, //  15 C
+    2883, //  20 C
+    2712, //  25 C
+    2536, //  30 C
+    2358, //  35 C
+    2181, //  40 C
+    2007, //  45 C
+    1840, //  50 C
+    1680, //  55 C
+    1529, //  60 C
+    1388, //  65 C
+    1258, //  70 C
+    1138, //  75 C
+    1029, //  80 C
+    929,  //  85 C
+    839,  //  90 C
+    758,  //  95 C
+    685,  // 100 C
+    619,  // 105 C
+    560,  // 110 C
+    508,  // 115 C
+    460,  // 120 C
+    418,  // 125 C
+];
+
 /// Full scale of the STM32's 12-bit ADC, which is what [`NTC_CURVE`] is tabulated against.
 pub const ADC_FULL_SCALE: u16 = 4095;
 
-/// Temperature of `NTC_CURVE[0]`, in degrees Celsius.
+/// Temperature of the first point of either NTC curve, in degrees Celsius.
 const NTC_CURVE_MIN_C: i32 = -40;
-/// Spacing between adjacent `NTC_CURVE` entries, in degrees Celsius.
+/// Spacing between adjacent points of either NTC curve, in degrees Celsius.
 const NTC_CURVE_STEP_C: i32 = 5;
 
 /// Convert a raw 12-bit reading of an NTC divider to millidegrees Celsius, interpolating between
@@ -162,17 +214,27 @@ const NTC_CURVE_STEP_C: i32 = 5;
 /// plausible temperature: anything regulating on one of them would act on a number that is not a
 /// temperature at all.
 pub fn ntc_milli_celsius(counts: u16) -> Option<i32> {
+    interpolate_ntc(&NTC_CURVE, counts)
+}
+
+/// [`ntc_milli_celsius`] for the board's own thermistor, off [`BOARD_NTC_CURVE`]. `None` on the
+/// same open-or-shorted grounds; on a board with TH1 unpopulated it is the open case.
+pub fn board_ntc_milli_celsius(counts: u16) -> Option<i32> {
+    interpolate_ntc(&BOARD_NTC_CURVE, counts)
+}
+
+fn interpolate_ntc(curve: &[u16], counts: u16) -> Option<i32> {
     // Descending curve, so the bracket is `curve[i] >= counts >= curve[i + 1]`.
-    if counts > NTC_CURVE[0] || counts < NTC_CURVE[NTC_CURVE.len() - 1] {
+    if counts > curve[0] || counts < curve[curve.len() - 1] {
         return None;
     }
 
     let mut i = 0;
-    while NTC_CURVE[i + 1] > counts {
+    while curve[i + 1] > counts {
         i += 1;
     }
 
-    let (high, low) = (NTC_CURVE[i] as i32, NTC_CURVE[i + 1] as i32);
+    let (high, low) = (curve[i] as i32, curve[i + 1] as i32);
     let base_milli_c = (NTC_CURVE_MIN_C + i as i32 * NTC_CURVE_STEP_C) * 1000;
     Some(base_milli_c + (NTC_CURVE_STEP_C * 1000 * (high - counts as i32)) / (high - low))
 }
@@ -227,6 +289,7 @@ pub fn linearise(kind: SensorKind, raw: u16) -> Option<i32> {
         // The same curve read from the other end: swapping the two legs of a divider turns `x`
         // into `full scale - x`, and with a 10k fixed leg that is exact.
         SensorKind::NtcToSupply => ntc_milli_celsius(ADC_FULL_SCALE.saturating_sub(raw)),
+        SensorKind::BoardNtc => board_ntc_milli_celsius(raw),
     }
 }
 
@@ -911,6 +974,30 @@ mod tests {
         assert_eq!(ntc_milli_celsius(2048), Some(25_000));
         assert_eq!(ntc_milli_celsius(4095), None, "open thermistor");
         assert_eq!(ntc_milli_celsius(0), None, "shorted thermistor");
+    }
+
+    #[test]
+    fn the_board_ntc_curve_descends_and_maps_back_to_its_own_points() {
+        for pair in BOARD_NTC_CURVE.windows(2) {
+            assert!(pair[0] > pair[1], "BOARD_NTC_CURVE must fall monotonically: {pair:?}");
+        }
+        for (i, &counts) in BOARD_NTC_CURVE.iter().enumerate() {
+            let expected = (NTC_CURVE_MIN_C + i as i32 * NTC_CURVE_STEP_C) * 1000;
+            assert_eq!(board_ntc_milli_celsius(counts), Some(expected), "curve point {i}");
+        }
+    }
+
+    /// TH1 under 5k1 puts 25 C at 4095 * 10k / 15k1. If this moves, the curve was regenerated
+    /// against the wrong part or the wrong upper leg.
+    #[test]
+    fn a_board_ntc_slot_reads_th1_off_its_own_curve() {
+        let slot = SensorSlotConfig::board_ntc();
+        assert_eq!(calibrate(&slot, Some(2712)), 2_500, "25.00 C");
+        assert_eq!(calibrate(&slot, Some(4095)), SENSOR_INVALID, "open or unpopulated TH1");
+        assert_eq!(calibrate(&slot, Some(0)), SENSOR_INVALID, "shorted TH1");
+        // The same counts on a harness NTC are a different temperature, which is why the board
+        // thermistor is a kind of its own.
+        assert_ne!(calibrate(&slot, Some(2048)), 2_500);
     }
 
     /// An NTC slot is complete as soon as its kind is written: the curve is the part's, so the

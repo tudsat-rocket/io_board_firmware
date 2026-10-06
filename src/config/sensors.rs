@@ -24,7 +24,8 @@ pub const NUM_SENSOR_SLOTS: usize = SensorSlot::COUNT;
 /// How many of those slots can be on the bus as process data at once. Fewer than
 /// [`NUM_SENSOR_SLOTS`] on purpose — see [`PdoSensorChannel`].
 pub const NUM_PDO_SENSOR_CHANNELS: usize = PdoSensorChannel::COUNT;
-/// The STM32's own ADC pins an external NTC can sit on: both pins of COM5 and both of COM6.
+/// The STM32's own ADC pins an NTC can sit on: both pins of COM5, both of COM6, and the board's
+/// own TH1.
 pub const NUM_ANALOG_INPUTS: usize = AnalogInput::COUNT;
 
 /// ADC101C027 amplifier addresses, in scan order. Everything that talks about an "amplifier
@@ -109,6 +110,16 @@ pub enum SensorKind {
     /// moves the wrong way. That is worth a wire code of its own, so which one a slot is on is
     /// visible in the same object that says it is a thermistor at all.
     NtcToSupply = 6,
+    /// The board's own thermistor, TH1 on `TH_sense` (rev3 PA4): a Murata `NCP18XH103F03RB`
+    /// (10k, B = 3380 K) to ground under a 5k1 upper leg (R44) to +3.3V. It tells you how warm
+    /// the bay around the board is, not how warm anything on the harness is.
+    ///
+    /// Its own kind rather than [`Self::Ntc`] on another pin because both the part and the
+    /// divider differ, so a raw count means something else — see
+    /// `crate::sensors::board_ntc_milli_celsius`. There is exactly one, so the kind is the whole
+    /// address: the slot always reads [`AnalogInput::Board`], whatever its
+    /// [`SensorSlotConfig::analog`] says.
+    BoardNtc = 7,
 }
 
 impl SensorKind {
@@ -121,6 +132,7 @@ impl SensorKind {
             4 => Some(Self::Angle),
             5 => Some(Self::Ntc),
             6 => Some(Self::NtcToSupply),
+            7 => Some(Self::BoardNtc),
             _ => None,
         }
     }
@@ -130,7 +142,7 @@ impl SensorKind {
         match self {
             Self::None => Unit::CentiBar,
             Self::Pressure => Unit::CentiBar,
-            Self::Pt1000 | Self::Mcp9700 | Self::Ntc | Self::NtcToSupply => Unit::CentiCelsius,
+            Self::Pt1000 | Self::Mcp9700 | Self::Ntc | Self::NtcToSupply | Self::BoardNtc => Unit::CentiCelsius,
             Self::Angle => Unit::Promille,
         }
     }
@@ -144,7 +156,7 @@ impl SensorKind {
     pub const fn is_on_i2c(self) -> bool {
         match self {
             Self::Pressure | Self::Pt1000 | Self::Mcp9700 | Self::Angle => true,
-            Self::None | Self::Ntc | Self::NtcToSupply => false,
+            Self::None | Self::Ntc | Self::NtcToSupply | Self::BoardNtc => false,
         }
     }
 
@@ -173,7 +185,7 @@ impl SensorKind {
         match self {
             // Both already arrive in millicelsius, from a curve that is a property of the board
             // or the part rather than of the installation, so the trim starts at unity.
-            Self::Pt1000 | Self::Ntc | Self::NtcToSupply => SensorCalib::UNITY,
+            Self::Pt1000 | Self::Ntc | Self::NtcToSupply | Self::BoardNtc => SensorCalib::UNITY,
             Self::Mcp9700 => SensorCalib::MCP9700,
             Self::None | Self::Pressure | Self::Angle => SensorCalib::ZERO,
         }
@@ -556,6 +568,13 @@ impl SensorSlotConfig {
         Self::ntc_wired(SensorKind::NtcToSupply, analog)
     }
 
+    /// The board's own thermistor, TH1. Takes no input, because there is only one; the `analog`
+    /// field is set to [`AnalogInput::Board`] anyway so that 0x3028 reads back where the slot
+    /// actually reads.
+    pub const fn board_ntc() -> Self {
+        Self::ntc_wired(SensorKind::BoardNtc, AnalogInput::Board)
+    }
+
     const fn ntc_wired(kind: SensorKind, analog: AnalogInput) -> Self {
         Self {
             kind,
@@ -598,6 +617,7 @@ impl SensorSlotConfig {
             SensorKind::None => None,
             // The kinds that are not on a bus, answered before the bus is looked at.
             SensorKind::Ntc | SensorKind::NtcToSupply => Some(SensorSource::Analog(self.analog)),
+            SensorKind::BoardNtc => Some(SensorSource::Analog(AnalogInput::Board)),
             SensorKind::Angle => match self.bus {
                 Some(bus) => Some(SensorSource::Encoder(bus)),
                 None => None,
@@ -670,6 +690,19 @@ mod tests {
         assert_eq!(SensorSlotConfig::unused().analog, AnalogInput::Com5Pin1);
     }
 
+    /// The board thermistor has one fixed pin, so a bare `0x3022 = 7` has to find it even though
+    /// the slot's analog field still holds whatever the previous kind left there.
+    #[test]
+    fn a_board_ntc_slot_reads_th1_whatever_its_analog_field_says() {
+        let mut slot = SensorSlotConfig::board_ntc();
+        assert_eq!(slot.analog_input(), Some(AnalogInput::Board));
+        assert_eq!(slot.unit, Unit::CentiCelsius);
+        assert!(slot.calib.is_calibrated());
+
+        slot.analog = AnalogInput::Com5Pin1;
+        assert_eq!(slot.source(), Some(SensorSource::Analog(AnalogInput::Board)));
+    }
+
     /// The decomposition the unit codes are really made of, kept as accessors so the wire code
     /// stays one stable byte.
     #[test]
@@ -690,6 +723,7 @@ mod tests {
         assert_eq!(SensorKind::from_u8(2), Some(SensorKind::Pt1000));
         assert_eq!(SensorKind::from_u8(5), Some(SensorKind::Ntc));
         assert_eq!(SensorKind::from_u8(6), Some(SensorKind::NtcToSupply));
-        assert_eq!(SensorKind::from_u8(7), None);
+        assert_eq!(SensorKind::from_u8(7), Some(SensorKind::BoardNtc));
+        assert_eq!(SensorKind::from_u8(8), None);
     }
 }

@@ -1,4 +1,4 @@
-use crate::board::pins_rev3::{HC_SENSE, HC2_SENSE, I_SENSE_1, I_SENSE_2, I_SENSE_3, TH_SENSE, V_MAIN_SENSE};
+use crate::board::pins_rev3::{HC_SENSE, HC2_SENSE, I_SENSE_1, I_SENSE_2, I_SENSE_3, V_MAIN_SENSE};
 use crate::index::PerAnalogInput;
 use embassy_stm32::{
     Peri,
@@ -16,10 +16,6 @@ pub trait CurrentSens {
     async fn logic_supply_current_ma(&mut self) -> Option<u16>;
 }
 
-#[allow(async_fn_in_trait)]
-pub trait TemperatureSens {
-    async fn temperature_milli_c(&mut self) -> i32;
-}
 #[allow(async_fn_in_trait)]
 pub trait VoltageSens {
     async fn logic_supply_voltage_milli_v(&mut self) -> u16;
@@ -60,8 +56,9 @@ pub struct OnboardSens3Peri {
     pub v_logic_supply: Peri<'static, V_MAIN_SENSE>,
     pub v_hco12_supply: Peri<'static, HC2_SENSE>,
     pub v_hco34_supply: Peri<'static, HC_SENSE>,
-    pub v_temp: Peri<'static, TH_SENSE>,
-    /// The four COM5/COM6 pins, for the [`crate::config::SensorKind::Ntc`] sensor slots.
+    /// The four COM5/COM6 pins, for the [`crate::config::SensorKind::Ntc`] sensor slots, and
+    /// TH1 on `TH_sense` for [`crate::config::SensorKind::BoardNtc`]. All five are read the same
+    /// way, as raw counts, and calibrated by the sensor task.
     /// None, if the pin is used somewhere else or unused
     pub analog: PerAnalogInput<Option<AnyAdcChannel<'static, ADC1>>>,
 }
@@ -177,26 +174,6 @@ impl crate::rail_sense::RailSensing for OnboardSensRev3 {
         })
     }
 }
-
-// TODO:
-// impl TemperatureSens for OnboardSensRev3 {
-//     async fn temperature_milli_c(&mut self) -> i32 {
-//         let reading = self.adc.read(&mut self.pins.v_temp, self.sample_time).await;
-//         let v_meas_uv = self.reading_to_mv(reading) as u32 * 1000;
-//
-//         const V_REF_UV: u32 = 3_300_000;
-//         const R_UPPER_U_OHM: u32 = 5_100_000;
-//         const BETA: f32 = 3380; // 0 - 50 C
-//         const T0: f32 = 298.15;
-//
-//         // thermistor resistance
-//         let th_resistance = (R_UPPER_U_OHM * v_meas_uv) / (V_REF_UV - v_meas_uv);
-//
-//         let t_kelvin = 1.0 / ((1.0/ T0) + (1.0/BETA) * log(th_resistance /
-//
-//
-//     }
-// }
 
 /// Convert voltage read by adc to actual voltage on the target circuit.
 /// This is just because we use a voltage divider.
