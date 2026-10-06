@@ -55,6 +55,14 @@ const fn ntc(input: crate::index::AnalogInput) -> SensorSlotConfig {
     SensorSlotConfig::ntc(input)
 }
 
+/// The board's own thermistor, TH1, reporting centicelsius. rev3 only; on rev2 the slot reports
+/// no reading. Usually a [`Config::with_quiet_sensor`]: bay temperature is diagnostic, not
+/// process data.
+#[allow(dead_code, reason = "a factory default waiting on a node that wants it")]
+const fn board_ntc() -> SensorSlotConfig {
+    SensorSlotConfig::board_ntc()
+}
+
 /// A heating pad on `hco`, holding its valve at `setpoint_centi_c` as measured by `sensor`.
 ///
 /// `sensor` is an ordinary slot that this same config has to fit — in practice an [`ntc`] beside
@@ -85,7 +93,9 @@ pub const NODE4: NodeSettings = NodeSettings::new(
     4,
     Config::new()
         // upper oxidizer tank
-        .with_sensor(Slot1, pressure(Bus0, Amp0, sensors::OX_TANK_UPPER_P))
+        .with_sensor(Slot1, pressure(Bus0, Amp0, sensors::B_100BAR))
+        // pressurant (N2) tank — 400 bar
+        .with_sensor(Slot4, pressure(Bus0, Amp1, sensors::PRESSURANT_TANK_P))
         // solenoid
         .with_valve(Valve0, ValveConfig::solenoid_on(HcoId::Hco0))
         .with_relief(ReliefConfig::new(Valve0, Slot1, 5400).with_pulse_ms(500).with_cooldown_ms(500))
@@ -110,13 +120,11 @@ pub const NODE5: NodeSettings = NodeSettings::new(
     Config::new()
         .with_valve(Valve0, valves::pressurization(HcoPair::A))
         .with_valve(Valve1, valves::pressurant_vent(HcoPair::B))
-        // regulator temperature
-        .with_sensor(Slot0, pt1000(Bus0, Amp0))
-        // regulator, upper and lower
-        .with_sensor(Slot1, pressure(Bus0, Amp1, sensors::REG_2_P))
-        .with_sensor(Slot2, pressure(Bus0, Amp2, sensors::REG_1_P))
-        // pressurant (N2) tank — 400 bar
-        .with_sensor(Slot4, pressure(Bus1, Amp1, sensors::PRESSURANT_TANK_P)),
+        // upper ox tank temperature
+        .with_sensor(Slot0, pt1000(Bus0, Amp2))
+        // regulator, both
+        .with_sensor(Slot1, pressure(Bus0, Amp1, sensors::D_100BAR))
+        .with_sensor(Slot2, pressure(Bus0, Amp3, sensors::C_100BAR)),
 );
 
 /// Node 6 — lower propulsion, valve control: main valve and oxidizer fill/dump.
@@ -125,16 +133,17 @@ pub const NODE6: NodeSettings = NodeSettings::new(
     Config::new()
         .with_valve(Valve0, valves::main_valve(HcoPair::A))
         .with_valve(Valve1, valves::ox_fill_and_dump(HcoPair::B))
-        .with_sensor(Slot0, pressure(Bus0, Amp0, sensors::OX_TANK_LOWER_P))
-        .with_sensor(Slot2, pt1000(Bus0, Amp2))
-        // 40bar-F = D
-        .with_sensor(Slot1, pressure(Bus1, Amp0, sensors::F_40BAR))
-        // 40bar-E = C
-        .with_sensor(Slot3, pressure(Bus1, Amp1, sensors::E_40BAR)),
+        // lower ox tank pressure
+        .with_sensor(Slot0, pressure(Bus0, Amp3, sensors::A_100BAR))
+        // lower ox tank temperature
+        .with_sensor(Slot2, pt1000(Bus0, Amp0))
+        // combustion chamber pressure, both
+        .with_sensor(Slot3, pressure(Bus1, Amp0, sensors::F_40BAR))
+        .with_sensor(Slot1, pressure(Bus1, Amp1, sensors::E_40BAR)),
 );
+// igniter on hco12
 pub const NODE7: NodeSettings = NodeSettings::new(7, Config::new());
-// igniter on Hco12
-pub const NODE8: NodeSettings = NodeSettings::new(8, Config::new().with_valve(Valve0, valves::ext_n2(HcoPair::B)));
+pub const NODE8: NodeSettings = NodeSettings::new(8, Config::new());
 pub const NODE9: NodeSettings = NodeSettings::new(9, Config::new());
 
 #[cfg(test)]
