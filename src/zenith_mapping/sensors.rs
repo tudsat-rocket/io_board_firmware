@@ -66,12 +66,12 @@ pub const D_100BAR: Transducer = centibar(360.55, 0.1822);
 pub const E_100BAR: Transducer = centibar(233.0, 0.12787724);
 pub const F_100BAR: Transducer = centibar(200.0, 0.12771392);
 pub const G_100BAR: Transducer = centibar(496.0, 0.23419204);
-pub const H_100BAR: Transducer = centibar(404.5, 0.3368);
+pub const H_100BAR: Transducer = centibar(420.5, 0.3368);
 
 // --- 400 bar --------------------------------------------------------------
 pub const B_400BAR: Transducer = centibar(439.0, 0.91116173);
 pub const C_400BAR: Transducer = centibar(319.4, 1.2934);
-pub const X_400BAR: Transducer = centibar(0, 1);
+pub const X_400BAR: Transducer = centibar(215.0, 1.0);
 
 /// An uncalibrated slot: reports raw ADC counts, which is where a calibration starts.
 pub const PLACEHOLDER_P: Transducer = Transducer {
@@ -91,5 +91,5 @@ pub const OX_TANK_LOWER_P: Transducer = B_100BAR;
 pub const COMB_CHAMBER_1_P: Transducer = D_40BAR;
 pub const COMB_CHAMBER_2_P: Transducer = C_40BAR;
 pub const OX_FILL_EXT_P: Transducer = E_100BAR;
-pub const EXT_N2: Transducer = H_100BAR;
-pub const EXT_OX: Transducer = X_400BAR;
+pub const EXT_N2: Transducer = X_400BAR;
+pub const EXT_OX: Transducer = H_100BAR;
