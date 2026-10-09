@@ -142,7 +142,13 @@ pub const NODE6: NodeSettings = NodeSettings::new(
         .with_sensor(Slot1, pressure(Bus1, Amp1, sensors::E_40BAR)),
 );
 // igniter on hco12
-pub const NODE7: NodeSettings = NodeSettings::new(7, Config::new());
+pub const NODE7: NodeSettings = NodeSettings::new(
+    7,
+    Config::new()
+        .with_sensor(Slot0, pressure(Bus0, Amp0, sensors::EXT_OX))
+        .with_sensor(Slot1, pressure(Bus0, Amp1, sensors::EXT_N2)),
+);
+
 pub const NODE8: NodeSettings = NodeSettings::new(8, Config::new());
 pub const NODE9: NodeSettings = NodeSettings::new(9, Config::new());
 
