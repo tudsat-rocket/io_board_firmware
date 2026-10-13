@@ -96,11 +96,11 @@ impl ValveConfig {
             position_sensor: None,
             fallback_a: FallbackAction {
                 position: 0,
-                unpower: true,
+                unpower: false,
             },
             fallback_b: FallbackAction {
                 position: PROMILLE_MAX,
-                unpower: true,
+                unpower: false,
             },
         }
     }

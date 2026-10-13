@@ -25,8 +25,11 @@ const fn servo(pair: HcoPair, closed_us: u16, open_us: u16) -> ValveConfig {
     ValveConfig::servo_on_pair(pair, closed_us, open_us, UNMEASURED_TRAVEL_MS)
 }
 
+// pub const fn ox_fill_and_dump(pair: HcoPair) -> ValveConfig {
+//     servo(pair, 2050, 1060)
+// }
 pub const fn ox_fill_and_dump(pair: HcoPair) -> ValveConfig {
-    servo(pair, 2050, 1060)
+    servo(pair, 1436, 500)
 }
 
 pub const fn pressurant_vent(pair: HcoPair) -> ValveConfig {
