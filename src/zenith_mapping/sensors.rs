@@ -52,6 +52,9 @@ const fn decibar(offset: f32, bar_per_count: f32) -> Transducer {
     }
 }
 
+// --- 10 bar ---------------------------------------------------------------
+pub const PLCHOLD_10BAR: Transducer = centibar(1.0, 0.0855);
+
 // --- 40 bar ---------------------------------------------------------------
 pub const C_40BAR: Transducer = centibar(1.0, 0.0855);
 pub const D_40BAR: Transducer = centibar(-385.0, 0.0535);

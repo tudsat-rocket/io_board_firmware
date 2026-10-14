@@ -82,8 +82,9 @@ const fn heating(hco: HcoId, sensor: crate::index::SensorSlot, setpoint_centi_c:
     ValveHeatingConfig::new(hco, sensor, setpoint_centi_c)
 }
 
-/// Node 2 — nosecone / recovery. One temperature probe, no valves.
-pub const NODE2: NodeSettings = NodeSettings::new(2, Config::new().with_sensor(Slot0, pt1000(Bus0, Amp0)));
+/// Node 2 — nosecone / recovery.
+pub const NODE2: NodeSettings =
+    NodeSettings::new(2, Config::new().with_sensor(Slot0, pressure(Bus0, Amp1, sensors::PLCHOLD_10BAR)));
 
 /// Node 3 — payload avionics. Nothing wired yet.
 pub const NODE3: NodeSettings = NodeSettings::new(3, Config::new());
@@ -96,6 +97,8 @@ pub const NODE4: NodeSettings = NodeSettings::new(
         .with_sensor(Slot1, pressure(Bus0, Amp0, sensors::B_100BAR))
         // pressurant (N2) tank — 400 bar
         .with_sensor(Slot4, pressure(Bus0, Amp1, sensors::PRESSURANT_TANK_P))
+        // mreg pressure sensor
+        .with_sensor(Slot2, pressure(Bus0, Amp3, sensors::C_100BAR))
         // solenoid
         .with_valve(Valve0, ValveConfig::solenoid_on(HcoId::Hco0))
         .with_relief(ReliefConfig::new(Valve0, Slot1, 5400).with_pulse_ms(500).with_cooldown_ms(500))
@@ -108,7 +111,7 @@ pub const NODE4: NodeSettings = NodeSettings::new(
                 outputs: HcoSet::of(HcoId::Hco2),
                 sensor: Some(Slot0),
                 setpoint: 4_000,
-                hysteresis: 500,
+                hysteresis: 100,
             }
             .also_on(HcoId::Hco3),
         ),
@@ -123,8 +126,7 @@ pub const NODE5: NodeSettings = NodeSettings::new(
         // upper ox tank temperature
         .with_sensor(Slot0, pt1000(Bus0, Amp2))
         // regulator, both
-        .with_sensor(Slot1, pressure(Bus0, Amp1, sensors::D_100BAR))
-        .with_sensor(Slot2, pressure(Bus0, Amp3, sensors::C_100BAR)),
+        .with_sensor(Slot1, pressure(Bus0, Amp1, sensors::D_100BAR)),
 );
 
 /// Node 6 — lower propulsion, valve control: main valve and oxidizer fill/dump.
@@ -138,8 +140,8 @@ pub const NODE6: NodeSettings = NodeSettings::new(
         // lower ox tank temperature
         .with_sensor(Slot2, pt1000(Bus0, Amp0))
         // combustion chamber pressure, both
-        .with_sensor(Slot3, pressure(Bus1, Amp0, sensors::F_40BAR))
-        .with_sensor(Slot1, pressure(Bus1, Amp1, sensors::E_40BAR)),
+        .with_sensor(Slot1, pressure(Bus0, Amp1, sensors::E_40BAR))
+        .with_sensor(Slot3, pressure(Bus1, Amp0, sensors::F_40BAR)),
 );
 // igniter on hco12
 pub const NODE7: NodeSettings = NodeSettings::new(
