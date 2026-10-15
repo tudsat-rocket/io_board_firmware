@@ -130,7 +130,7 @@ impl Config {
     pub const fn new() -> Self {
         Self {
             master_node_id: 1,
-            fallback_a_ms: 3_000,
+            fallback_a_ms: 6_000,
             fallback_b_ms: 300_000,
             fallback_enabled: true,
             heartbeat_period_ms: 1000,
