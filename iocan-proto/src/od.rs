@@ -310,6 +310,17 @@ pub const CONTROL_TICK_PEAK_US: u16 = 0x2035;
 /// with no flow control. Any other value stops it.
 pub const COM4_GO: u16 = 0x2036;
 
+/// Reboot. `uint8`, **write-only**: reads abort with "attempt to read a write only object".
+///
+/// Writing any value above 0 resets the board; 0 is acknowledged and does nothing. The
+/// acknowledgement goes out *before* the reset, so a master sees a normal download response and
+/// then the node's heartbeat stop. A save ([`STORE_PARAMETERS`]) still in progress is allowed to
+/// finish first, so "save, then reboot" is safe to send back to back.
+///
+/// The reset goes through the cancan bootloader like any other, so an image that was never
+/// confirmed is reverted to the previous one here.
+pub const REBOOT: u16 = 0x2037;
+
 /// Rail currents in milliamps: logic, HCO1+2, HCO3+4. `uint16[3]`, read-only.
 ///
 /// rev3 only; reads 0 on rev2, which has no on-board sensing — which is also why stall detection
@@ -1138,6 +1149,7 @@ mod tests {
             CPU_LOAD,
             CONTROL_TICK_PEAK_US,
             COM4_GO,
+            REBOOT,
             RAIL_CURRENT,
             RAIL_VOLTAGE,
             TEMPERATURE,

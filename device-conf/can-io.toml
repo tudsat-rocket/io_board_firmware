@@ -289,6 +289,15 @@ data_type = "uint8"
 access_type = "rw"
 default_value = 0
 
+# Any value > 0 resets the board, after the SDO ack and any in-flight save. 0 is a no-op.
+[[objects]]
+index = 0x2037
+parameter_name = "reboot (write > 0)"
+object_type = "var"
+data_type = "uint8"
+access_type = "wo"
+default_value = 0
+
 # rev3 only; reads 0 on rev2, which has no on-board sensing.
 [[objects]]
 index = 0x2040

@@ -23,7 +23,7 @@ use crate::{
     control::{BoardControl, run_control},
     outputs::Outputs,
     sensors::{BoardSensors, ext_adc::Buses, run_sensors},
-    store::{CONTROL_WAKE, PERSIST_WAKE, STORE},
+    store::{CONTROL_WAKE, PERSIST_BUSY, PERSIST_WAKE, STORE},
 };
 
 use defmt_rtt as _;
@@ -176,6 +176,9 @@ pub async fn spawn_node(spawner: Spawner, settings: NodeSettings) {
 async fn run_persistence(mut store: ConfigStore, defaults: &'static Config) -> ! {
     loop {
         PERSIST_WAKE.wait().await;
+        // Taken before the flags so a reboot request cannot slip in between reading them and
+        // acting on them. Released at the end of the iteration.
+        let _busy = PERSIST_BUSY.lock().await;
 
         let (save, restore, config) = {
             let mut guard = STORE.lock().await;

@@ -39,6 +39,11 @@ pub static CONTROL_WAKE: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 /// waiter — sharing one between the control and persistence tasks would lose wakeups.
 pub static PERSIST_WAKE: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 
+/// Held by the persistence task for the whole of a save or restore, so a reboot (0x2037) can wait
+/// for one in flight instead of cutting it off. The record format would survive the cut — the
+/// older copy is untouched — but the save the master just asked for would silently not happen.
+pub static PERSIST_BUSY: Mutex<CriticalSectionRawMutex, ()> = Mutex::new(());
+
 /// Object dictionary indices and the wire sentinels that go with them. Defined in
 /// [`iocan_proto::od`], which is where an object's meaning is documented; re-exported here
 /// because the whole firmware reaches for them through the store.
@@ -74,15 +79,28 @@ pub struct Pending {
     pub save: bool,
     /// 0x1011 was written with the load signature.
     pub restore: bool,
+    /// 0x2037 was written with a value above 0. Taken by the SDO server under the same lock as
+    /// the write, so the control task's [`Pending::take`] never sees it.
+    pub reboot: bool,
 }
 
 impl Pending {
+    /// Take the control task's share. `save` and `restore` belong to the persistence task and are
+    /// left in place: clearing them here would drop a requested save whenever a control tick got
+    /// the lock first.
     pub fn take(&mut self) -> Self {
-        core::mem::take(self)
+        let taken = core::mem::take(self);
+        self.save = taken.save;
+        self.restore = taken.restore;
+        Self {
+            save: false,
+            restore: false,
+            ..taken
+        }
     }
 
     pub fn any(&self) -> bool {
-        self.valves.any() || self.outputs || self.config || self.save || self.restore
+        self.valves.any() || self.outputs || self.config || self.save || self.restore || self.reboot
     }
 }
 
@@ -217,6 +235,7 @@ impl Store {
                 config: false,
                 save: false,
                 restore: false,
+                reboot: false,
             },
         }
     }
@@ -401,6 +420,7 @@ pub fn read(store: &Store, index: u16, sub: u8) -> Result<OdValue, AbortCode> {
     match index {
         // Command objects. Reading them back tells you nothing, but a read must not abort.
         STORE_PARAMETERS | RESTORE_DEFAULTS => scalar(OdValue::u32(1)),
+        REBOOT => Err(AbortCode::WriteOnly),
         HEARTBEAT_PERIOD => scalar(OdValue::u16(cfg.heartbeat_period_ms)),
 
         RAW_ADC_BUS0 => read_array(&store.raw_adc.as_slice()[..crate::config::NUM_AMPLIFIERS], sub, OdValue::u16),
@@ -699,6 +719,10 @@ pub fn write(store: &mut Store, index: u16, sub: u8, data: &[u8]) -> Result<(), 
         COM4_GO => {
             expect_scalar(sub)?;
             store.com4_go = as_u8(data)? == 1;
+        }
+        REBOOT => {
+            expect_scalar(sub)?;
+            store.pending.reboot = as_u8(data)? > 0;
         }
 
         MASTER_NODE_ID => {
@@ -1320,6 +1344,33 @@ mod tests {
         s.raw_angle[I2cBus::Bus1] = 2048;
         assert_eq!(read(&s, od::RAW_ENCODER, 2).unwrap().data(), &2048u16.to_le_bytes());
         assert!(matches!(write(&mut s, od::RAW_ENCODER, 2, &0u16.to_le_bytes()), Err(AbortCode::ReadOnly)));
+    }
+
+    #[test]
+    fn the_control_task_take_leaves_save_and_restore_for_persistence() {
+        let mut p = Pending {
+            config: true,
+            save: true,
+            restore: true,
+            ..Pending::default()
+        };
+        let taken = p.take();
+        assert!(taken.config && !taken.save && !taken.restore);
+        assert!(!p.config && p.save && p.restore);
+    }
+
+    #[test]
+    fn reboot_is_write_only_and_only_fires_above_zero() {
+        let mut s = Store::new();
+        assert!(matches!(read(&s, od::REBOOT, 0), Err(AbortCode::WriteOnly)));
+
+        write(&mut s, od::REBOOT, 0, &[0]).unwrap();
+        assert!(!s.pending.reboot, "0 is acknowledged and does nothing");
+
+        write(&mut s, od::REBOOT, 0, &[1]).unwrap();
+        assert!(s.pending.reboot);
+
+        assert!(matches!(write(&mut Store::new(), od::REBOOT, 0, &[1, 0]), Err(AbortCode::DataTypeMismatchLengthHigh)));
     }
 
     #[test]

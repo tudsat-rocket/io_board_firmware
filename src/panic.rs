@@ -47,8 +47,8 @@ pub unsafe fn safe_outputs() {
     pac::TIM3.egr().write(|w| w.set_ug(true));
 }
 
-/// De-energize outputs and reset. Never returns.
-fn safe_and_reset() -> ! {
+/// De-energize outputs and reset. Never returns. Also the end of a requested reboot (0x2037).
+pub fn safe_and_reset() -> ! {
     cortex_m::interrupt::disable();
     unsafe { safe_outputs() };
     cortex_m::peripheral::SCB::sys_reset()

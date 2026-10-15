@@ -36,12 +36,19 @@ pub struct SdoServer {
     node_id: u8,
     rx: CanRxSub,
     tx: CanTxPub,
+    /// Set by an accepted write to 0x2037, acted on once the acknowledgement is queued.
+    reboot: bool,
 }
 
 #[cfg(any(feature = "hardware", test))]
 impl SdoServer {
     pub fn new(node_id: u8, rx: CanRxSub, tx: CanTxPub) -> Self {
-        Self { node_id, rx, tx }
+        Self {
+            node_id,
+            rx,
+            tx,
+            reboot: false,
+        }
     }
 
     pub async fn run(&mut self) -> ! {
@@ -76,6 +83,10 @@ impl SdoServer {
 
             let response = self.handle(request).await;
             self.reply(response).await;
+
+            if core::mem::take(&mut self.reboot) {
+                reboot().await;
+            }
         }
     }
 
@@ -131,6 +142,9 @@ impl SdoServer {
                         if store.pending.save || store.pending.restore {
                             PERSIST_WAKE.signal(());
                         }
+                        // Taken under the same lock as the write, so it never reaches the control
+                        // task's `Pending::take`.
+                        self.reboot = core::mem::take(&mut store.pending.reboot);
                     }
                     result
                 };
@@ -165,6 +179,42 @@ impl SdoServer {
         self.tx.publish((cob_id, body)).await;
     }
 }
+
+/// How long the acknowledgement of a reboot request gets to leave the node. The response is only
+/// queued when [`SdoServer::reply`] returns; the CAN TX task still has to pick it up and win
+/// arbitration. A few frame times on a busy 500 kbit/s bus, with a wide margin.
+#[cfg(feature = "hardware")]
+const REBOOT_GRACE_MS: u64 = 50;
+
+/// Reset the board in answer to 0x2037.
+///
+/// Waits out [`REBOOT_GRACE_MS`] so the master sees its write acknowledged, then takes
+/// [`store::PERSIST_BUSY`] so a save still being written finishes first, and never lets go of it.
+/// A save or restore that was requested but not yet picked up by the persistence task would not
+/// be holding the lock, so the flags are checked under it and the lock handed back until they
+/// clear. Nothing can set them meanwhile: this task is the SDO server.
+/// The reset itself is the panic handler's: outputs driven low by register, then `SYSRESETREQ`.
+#[cfg(feature = "hardware")]
+async fn reboot() -> ! {
+    embassy_time::Timer::after_millis(REBOOT_GRACE_MS).await;
+    loop {
+        let persist = store::PERSIST_BUSY.lock().await;
+        let queued = {
+            let store = STORE.lock().await;
+            store.pending.save || store.pending.restore
+        };
+        if !queued {
+            defmt::warn!("rebooting on request (0x2037)");
+            crate::panic::safe_and_reset()
+        }
+        drop(persist);
+        embassy_time::Timer::after_millis(1).await;
+    }
+}
+
+/// Host tests drive the server against plain channels; there is nothing to reset.
+#[cfg(not(feature = "hardware"))]
+async fn reboot() {}
 
 #[cfg(feature = "hardware")]
 #[embassy_executor::task]
