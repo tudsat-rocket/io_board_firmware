@@ -39,6 +39,10 @@ pub static CONTROL_WAKE: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 /// waiter — sharing one between the control and persistence tasks would lose wakeups.
 pub static PERSIST_WAKE: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 
+/// HACK(node3): raised by [`crate::outputs::Outputs::drive`] whenever any HCO goes digital high.
+/// Only node 3 listens; it pulses COM3_1 (PC10) in response. See `node::run_com3_pulse`.
+pub static HCO_WENT_HIGH: Signal<CriticalSectionRawMutex, ()> = Signal::new();
+
 /// Held by the persistence task for the whole of a save or restore, so a reboot (0x2037) can wait
 /// for one in flight instead of cutting it off. The record format would survive the cut — the
 /// older copy is untouched — but the save the master just asked for would silently not happen.

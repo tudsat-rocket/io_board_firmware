@@ -52,6 +52,11 @@ impl Outputs {
             }
         }
         if desired != self.last {
+            // HACK(node3): see `crate::store::HCO_WENT_HIGH`.
+            let high = State::Digital(Level::High);
+            if desired.iter().any(|(hco, s)| *s == high && self.last[hco] != high) {
+                crate::store::HCO_WENT_HIGH.signal(());
+            }
             self.ctl.set_state(desired);
             self.last = desired;
         }

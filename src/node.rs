@@ -164,6 +164,29 @@ pub async fn spawn_node(spawner: Spawner, settings: NodeSettings) {
     }
 
     spawner.spawn(run_cancan(cancan).unwrap());
+
+    // HACK(node3): PC10 is unclaimed by `init_board` on rev3, so stealing it here is safe.
+    #[cfg(feature = "rev3")]
+    if settings.node_id == 3 {
+        let pin = unsafe { embassy_stm32::peripherals::PC10::steal() };
+        spawner.spawn(run_com3_pulse(pin).unwrap());
+    }
+}
+
+/// HACK(node3): 1 s after any HCO goes high, drive COM3_1 (PC10) high for 4 s.
+#[cfg(feature = "rev3")]
+#[embassy_executor::task]
+async fn run_com3_pulse(pin: embassy_stm32::Peri<'static, embassy_stm32::peripherals::PC10>) -> ! {
+    use embassy_stm32::gpio::{Level, Output, Speed};
+    use embassy_time::Timer;
+    let mut out = Output::new(pin, Level::Low, Speed::Low);
+    loop {
+        crate::store::HCO_WENT_HIGH.wait().await;
+        Timer::after_secs(1).await;
+        out.set_high();
+        Timer::after_secs(4).await;
+        out.set_low();
+    }
 }
 
 /// Handle save (0x1010) and restore (0x1011) requests.
