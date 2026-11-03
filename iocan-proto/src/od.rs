@@ -27,6 +27,10 @@
 /// A raw ADC slot that did not answer during the last I2C sweep (0x2000, 0x2001, 0x2006).
 pub const RAW_INVALID: u16 = u16::MAX;
 
+/// A bridge ADC channel with nothing to show (0x2008): its NAU7802 is absent, still calibrating,
+/// or not sampling that channel. A 24-bit conversion cannot reach it.
+pub const RAW_BRIDGE_INVALID: i32 = i32::MIN;
+
 /// A sensor slot with no usable reading (0x2004, and every TPDO sensor channel).
 ///
 /// Also what an unclaimed TPDO channel carries, so a listener needs no separate encoding for
@@ -91,10 +95,14 @@ pub const RAW_ADC_BUS1: u16 = 0x2001;
 /// | 0..=8  | amplifier *n* in the address table acknowledged                 |
 /// | 9      | this bus's AS5600 magnetic encoder answered                     |
 /// | 10     | that encoder reports a magnet at a usable distance              |
+/// | 11     | this bus's NAU7802 bridge ADC answered                          |
+/// | 12     | that NAU7802 is calibrated and converting                       |
 ///
 /// Bit 10 is separate from bit 9 on purpose: an encoder whose magnet has drifted too far or too
 /// close still returns an angle, and that angle is wrong. Folding it into presence would make a
-/// mechanically broken installation look healthy.
+/// mechanically broken installation look healthy. Bit 12 is separate from bit 11 for a duller
+/// reason: a NAU7802 takes a few hundred milliseconds to power up and calibrate after it is
+/// found, and it is during that calibration that a faulty one shows itself.
 pub const I2C_PRESENT: u16 = 0x2002;
 
 /// Completed I2C presence sweeps since boot. `uint32`, read-only.
@@ -151,6 +159,21 @@ pub const RAW_ENCODER: u16 = 0x2006;
 /// Uncalibrated, and what commissioning an NTC slot runs on. A pin reading near 4095 or near 0
 /// is an open or shorted thermistor.
 pub const RAW_ANALOG: u16 = 0x2007;
+
+/// Raw NAU7802 conversions, two channels per I2C bus. `int32[4]`, read-only.
+///
+/// The order is bus 0 channel A (`VIN1`, the breakout's A+/A-), bus 0 channel B (`VIN2`, B+/B-),
+/// then the same for bus 1. Signed 24-bit counts at that bus's gain ([`BRIDGE_GAIN`]): full scale
+/// is +-2^23 at +-0.5 * AVDD / gain. [`RAW_BRIDGE_INVALID`] for a channel with nothing to show.
+///
+/// A slot does not calibrate these counts but the same reading with the gain divided out, in
+/// nV/V of the bridge excitation — see [`SENSOR_KIND`] 8. A slot set to raw counts shows that
+/// gain-independent number in uV/V, which is the one to commission a transducer against; this
+/// object is for checking the converter itself.
+///
+/// Broadcast as TPDOs [`crate::TpdoKind::RawBridge0`] and [`crate::TpdoKind::RawBridge1`], one per
+/// bus.
+pub const RAW_BRIDGE: u16 = 0x2008;
 
 // --- valves: the three-layer state -----------------------------------------
 
@@ -363,7 +386,7 @@ pub const TEMPERATURE: u16 = 0x2042;
 pub const ERROR_COUNTERS: u16 = 0x2050;
 
 /// Number of counters at [`ERROR_COUNTERS`], and the array size of that object.
-pub const NUM_ERROR_COUNTERS: usize = 28;
+pub const NUM_ERROR_COUNTERS: usize = 30;
 
 /// What each sub-index of [`ERROR_COUNTERS`] counts.
 ///
@@ -473,6 +496,13 @@ pub enum ErrorCounter {
     /// [`Self::I2cDeviceLost`], and a slot that stays unwired keeps climbing
     /// [`Self::SensorSourceMissing`].
     SensorMissingAtBoot = 27,
+    /// A transfer with a NAU7802 believed present failed — a sample, or a step of bringing it up.
+    /// It is dropped from [`I2C_PRESENT`] and brought up from scratch when it answers again.
+    BridgeReadFailed = 28,
+    /// A NAU7802 failed to power up or to calibrate: `PUR` or `CALS` did not come back in time,
+    /// or the chip set `CAL_ERR`. It is reset and tried again, so a chip that keeps failing climbs
+    /// this every few hundred milliseconds while bit 12 of [`I2C_PRESENT`] stays clear.
+    BridgeInitFailed = 29,
 }
 
 impl ErrorCounter {
@@ -506,6 +536,8 @@ impl ErrorCounter {
         Self::CanBusOff,
         Self::CanErrorCountRose,
         Self::SensorMissingAtBoot,
+        Self::BridgeReadFailed,
+        Self::BridgeInitFailed,
     ];
 
     /// The counter at sub-index `sub` of [`ERROR_COUNTERS`], for decoding a captured read.
@@ -539,7 +571,9 @@ impl ErrorCounter {
             | Self::EncoderMagnetLost
             | Self::ValveStall
             | Self::ReliefInhibited
-            | Self::SensorMissingAtBoot => Peripheral,
+            | Self::SensorMissingAtBoot
+            | Self::BridgeReadFailed
+            | Self::BridgeInitFailed => Peripheral,
 
             Self::CanRxError
             | Self::CanTxDropped
@@ -761,7 +795,9 @@ pub const SENSOR_BUS: u16 = 0x3020;
 /// raw I2C address. `uint8[16]`, read/write.
 ///
 /// Ignored for an angle slot, whose device has no address straps, and for an NTC slot, which is
-/// not on a bus at all.
+/// not on a bus at all. A bridge slot (kind 8) reads it as the NAU7802 channel instead: 0 is
+/// channel A (`VIN1`), 1 is channel B (`VIN2`), and the node's configuration check refuses
+/// anything else.
 pub const SENSOR_AMPLIFIER: u16 = 0x3021;
 
 /// Which COM5/COM6 pin an NTC slot reads: 0 = COM5 pin 1, 1 = COM5 pin 2, 2 = COM6 pin 1,
@@ -792,11 +828,12 @@ pub const SENSOR_ANALOG_INPUT: u16 = 0x3028;
 /// | 5    | 10k NTC on a COM5/COM6 pin, to ground    |
 /// | 6    | the same NTC, wired to +3.3V instead     |
 /// | 7    | the on-board thermistor, TH1             |
+/// | 8    | bridge pressure transducer on a NAU7802  |
 ///
 /// The kind decides which device the slot is read from and how that device's raw number is
 /// linearised. Everything after that is [`SENSOR_OFFSET`]..[`SENSOR_CONSTANT`].
 ///
-/// Kinds 1..4 are on an I2C bus and are addressed by [`SENSOR_BUS`] and [`SENSOR_AMPLIFIER`];
+/// Kinds 1..4 and 8 are on an I2C bus and are addressed by [`SENSOR_BUS`] and [`SENSOR_AMPLIFIER`];
 /// kinds 5 and 6 are a divider on one of the STM32's own ADC pins and are addressed by
 /// [`SENSOR_ANALOG_INPUT`] instead. Kind 7 is the board's own thermistor and needs no addressing
 /// at all.
@@ -820,6 +857,14 @@ pub const SENSOR_ANALOG_INPUT: u16 = 0x3028;
 /// 3380 K under 5k1), so one write is enough to get a real temperature. Kinds 1 and 4 have no
 /// honest default — a transducer's slope comes off the bench and an encoder's from where its magnet ended up — so they are left
 /// uncalibrated and report no reading (see [`SENSOR_SLOPE`]) until the coefficients arrive.
+/// Kind 8 is the same as kind 1 in that respect.
+///
+/// Kind 8 is a bridge transducer wired straight to a NAU7802 24-bit ADC and excited from the
+/// breakout's own AVDD (E+/E-), which is also the ADC's reference — so the reading is a ratio,
+/// independent of the excitation voltage. The NAU7802's address is fixed, so there is at most one
+/// per bus, and [`SENSOR_AMPLIFIER`] picks its channel instead of an address strap. The node
+/// divides out the gain ([`BRIDGE_GAIN`]) before calibrating, so a calibration survives a gain
+/// change.
 pub const SENSOR_KIND: u16 = 0x3022;
 
 /// Calibration offset, in thousandths of the linearised input. `int32[16]`, read/write.
@@ -845,6 +890,7 @@ pub const SENSOR_KIND: u16 = 0x3022;
 /// | Pt1000    | millicelsius | millicelsius | nanocelsius per mC, 1e9 = unity | millicelsius |
 /// | NTC (5, 6)| millicelsius | millicelsius | nanocelsius per mC, 1e9 = unity | millicelsius |
 /// | angle     | milli-counts | milli-counts | see below                | milli-promille |
+/// | bridge    | nV/V         | nV/V         | nanobar per uV/V         | millibar       |
 ///
 /// A transducer's bench calibration is recorded as `pressure_bar = (reading - offset) * factor`,
 /// which is exactly this with `offset` in milli-counts and `factor` scaled to nanobar per count.
@@ -864,6 +910,11 @@ pub const SENSOR_KIND: u16 = 0x3022;
 /// difference is **signed**: a valve whose angle decreases as it opens gets a negative slope,
 /// which is also what tells the firmware which way round the turn the travel runs. The zeroing
 /// wraps at a full turn, so a closed stop sitting across the encoder's own origin is fine.
+///
+/// For a bridge slot the transducer's datasheet gives the slope, `full_scale_bar * 1e6 /
+/// span_mv_per_v` — 100 bar at 2 mV/V is 5e7. The offset is the transducer's zero reading in
+/// nV/V, which belongs to the individual part: read it with the slot on raw counts (uV/V) at zero
+/// pressure, and write that times 1000.
 pub const SENSOR_OFFSET: u16 = 0x3023;
 
 /// Calibration slope, nano output units per linearised input unit. `int32[16]`, read/write.
@@ -915,7 +966,32 @@ pub const SENSOR_INTERVAL_MS: u16 = 0x3030;
 /// newly plugged-in amplifier boards does not disturb the sample rate during assembly.
 pub const SCAN_INTERVAL_MS: u16 = 0x3031;
 
-/// TPDO broadcast period per kind, milliseconds. `uint16[20]`, read/write.
+/// PGA gain of each bus's NAU7802: 1, 2, 4, 8, 16, 32, 64 or 128. `uint8[2]`, read/write.
+///
+/// Anything else is refused. Defaults to 128, where full scale is +-0.5 * AVDD / 128 — about
+/// +-3.9 mV/V, enough for a 2 mV/V transducer with room for its zero offset. Lower it for a
+/// transducer with a larger span or offset. The chip has one PGA for both channels, so this is
+/// per bus rather than per slot.
+///
+/// A change re-calibrates the chip's internal offset, which takes the bus's bridge readings away
+/// for a moment. Slot calibrations are unaffected, because they work on the gain-independent
+/// reading — see [`SENSOR_KIND`] 8.
+pub const BRIDGE_GAIN: u16 = 0x3032;
+
+/// Conversion rate of each bus's NAU7802, in samples per second: 10, 20, 40, 80 or 320.
+/// `uint16[2]`, read/write.
+///
+/// Anything else is refused. Defaults to 320, the fastest, which has no mains rejection at all;
+/// 10 has the chip's 50/60 Hz notch and the lowest noise, at a tenth of a second per conversion.
+/// A slower rate also lengthens what a channel switch costs, since the firmware waits out six
+/// conversions after each one: with both channels in use, each is updated about every 1.2 s at
+/// 10 SPS, against every 60-80 ms at 320. A bus with one channel in use never switches, and gets
+/// a new conversion every 100 ms at 10 SPS.
+///
+/// Like a gain change, a rate change re-calibrates the chip and leaves slot calibrations alone.
+pub const BRIDGE_RATE: u16 = 0x3033;
+
+/// TPDO broadcast period per kind, milliseconds. `uint16[22]`, read/write.
 ///
 /// Sub-index *n + 1* is the period for TPDO kind *n* (see [`crate::TpdoKind`], whose discriminant
 /// is that same *n*); 0 disables that kind. A period changed here takes effect on the next tick,
@@ -1133,6 +1209,7 @@ mod tests {
             SENSOR_UNIT,
             RAW_ENCODER,
             RAW_ANALOG,
+            RAW_BRIDGE,
             VALVE_COMMANDED,
             VALVE_TARGET,
             VALVE_MEASURED,
@@ -1186,6 +1263,8 @@ mod tests {
             SENSOR_PDO_CHANNEL,
             SENSOR_INTERVAL_MS,
             SCAN_INTERVAL_MS,
+            BRIDGE_GAIN,
+            BRIDGE_RATE,
             TPDO_INTERVAL_MS,
             RELIEF_ENABLED,
             RELIEF_VALVE,

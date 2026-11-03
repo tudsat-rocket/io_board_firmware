@@ -13,7 +13,9 @@
 //! All of it is runtime-writable (0x3020..0x3028) and persisted, so a sensor can be recalibrated,
 //! moved to a different amplifier, or taken off the process data plane without a firmware build.
 
-use crate::index::{AdcSlot, AmplifierId, AnalogInput, I2cBus, PdoSensorChannel, PerAmplifier, SensorSlot};
+use crate::index::{
+    AdcSlot, AmplifierId, AnalogInput, BridgeChannel, I2cBus, PdoSensorChannel, PerAmplifier, SensorSlot,
+};
 
 /// Sizes of the sensor-side domains. See the note in [`super`] on why these exist as plain
 /// numbers at all.
@@ -61,6 +63,62 @@ pub const ENCODER_PRESENT_BIT: u16 = 1 << 9;
 /// distance. An encoder that answers but reads `MH`/`ML` still returns an angle, and that angle
 /// is wrong — which is exactly the assembly mistake this bitmap exists to make visible.
 pub const ENCODER_MAGNET_OK_BIT: u16 = 1 << 10;
+
+/// I2C address of the NAU7802 bridge ADC. Fixed in the part like the encoder's, so a bus carries
+/// at most one and a [`SensorKind::BridgePressure`] slot's `amplifier` field is free to name its
+/// channel instead.
+pub const BRIDGE_ADDRESS: u8 = 0x2A;
+
+/// Bit of a bus's 0x2002 presence word set when its NAU7802 answered the last sweep.
+pub const BRIDGE_PRESENT_BIT: u16 = 1 << 11;
+
+/// Bit of a bus's 0x2002 presence word set while its NAU7802 is calibrated and converting. Clear
+/// between the two for the few hundred milliseconds it takes to power up and calibrate, and for
+/// good on a chip that keeps failing to.
+pub const BRIDGE_READY_BIT: u16 = 1 << 12;
+
+/// The PGA gain a bus starts at. Full scale at 128 is +-0.5 * AVDD / 128, about +-3.9 mV/V: a
+/// typical 2 mV/V transducer uses half of it, which leaves room for its zero offset.
+pub const BRIDGE_DEFAULT_GAIN: u8 = 128;
+
+/// The conversion rate a bus starts at, in samples per second: the fastest, with no mains
+/// rejection. 10 SPS is the one with the chip's 50/60 Hz notch.
+pub const BRIDGE_DEFAULT_RATE: u16 = 320;
+
+/// The NAU7802's `CRS` field for a conversion rate in samples per second, or `None` for a rate
+/// the chip does not have (10, 20, 40, 80 and 320 are all there are).
+pub const fn bridge_rate_code(sps: u16) -> Option<u8> {
+    match sps {
+        10 => Some(0),
+        20 => Some(1),
+        40 => Some(2),
+        80 => Some(3),
+        320 => Some(7),
+        _ => None,
+    }
+}
+
+/// The inverse of [`bridge_rate_code`], for reading a code back out of flash.
+pub const fn bridge_rate_sps(code: u8) -> Option<u16> {
+    match code {
+        0 => Some(10),
+        1 => Some(20),
+        2 => Some(40),
+        3 => Some(80),
+        7 => Some(320),
+        _ => None,
+    }
+}
+
+/// The NAU7802's `GAINS` field for a PGA gain: its base-2 logarithm, or `None` for a gain the
+/// chip does not have. The one check every way a gain can arrive goes through — SDO, flash.
+pub const fn bridge_gain_code(gain: u8) -> Option<u8> {
+    if gain.is_power_of_two() {
+        Some(gain.trailing_zeros() as u8)
+    } else {
+        None
+    }
+}
 
 /// What is physically on a sensor slot.
 ///
@@ -120,6 +178,16 @@ pub enum SensorKind {
     /// address: the slot always reads [`AnalogInput::Board`], whatever its
     /// [`SensorSlotConfig::analog`] says.
     BoardNtc = 7,
+    /// A bridge pressure transducer wired straight to a NAU7802 on the slot's bus, with no
+    /// amplifier in between. The slot's `amplifier` field names the chip's channel — `Amp0` is
+    /// [`BridgeChannel::A`], `Amp1` is [`BridgeChannel::B`] — since the chip's address is fixed.
+    ///
+    /// Linear in pressure like [`Self::Pressure`], but linearised to nV/V rather than milli-counts:
+    /// the sensor task divides the gain out first, so a calibration means the same thing at every
+    /// [`crate::config::Config::bridge_gain`]. With the bridge excited from the breakout's AVDD,
+    /// which is also the ADC's reference, that is the transducer's own mV/V and does not move
+    /// with the supply either. See [`SensorCalib::bridge`].
+    BridgePressure = 8,
 }
 
 impl SensorKind {
@@ -133,6 +201,7 @@ impl SensorKind {
             5 => Some(Self::Ntc),
             6 => Some(Self::NtcToSupply),
             7 => Some(Self::BoardNtc),
+            8 => Some(Self::BridgePressure),
             _ => None,
         }
     }
@@ -141,7 +210,7 @@ impl SensorKind {
     pub const fn natural_unit(self) -> Unit {
         match self {
             Self::None => Unit::CentiBar,
-            Self::Pressure => Unit::CentiBar,
+            Self::Pressure | Self::BridgePressure => Unit::CentiBar,
             Self::Pt1000 | Self::Mcp9700 | Self::Ntc | Self::NtcToSupply | Self::BoardNtc => Unit::CentiCelsius,
             Self::Angle => Unit::Promille,
         }
@@ -155,7 +224,7 @@ impl SensorKind {
     /// new transport has one place to declare itself.
     pub const fn is_on_i2c(self) -> bool {
         match self {
-            Self::Pressure | Self::Pt1000 | Self::Mcp9700 | Self::Angle => true,
+            Self::Pressure | Self::Pt1000 | Self::Mcp9700 | Self::Angle | Self::BridgePressure => true,
             Self::None | Self::Ntc | Self::NtcToSupply | Self::BoardNtc => false,
         }
     }
@@ -187,7 +256,7 @@ impl SensorKind {
             // or the part rather than of the installation, so the trim starts at unity.
             Self::Pt1000 | Self::Ntc | Self::NtcToSupply | Self::BoardNtc => SensorCalib::UNITY,
             Self::Mcp9700 => SensorCalib::MCP9700,
-            Self::None | Self::Pressure | Self::Angle => SensorCalib::ZERO,
+            Self::None | Self::Pressure | Self::Angle | Self::BridgePressure => SensorCalib::ZERO,
         }
     }
 }
@@ -304,6 +373,7 @@ pub enum UnitPrefix {
 /// | [`SensorKind::Pt1000`] | millicelsius | millicelsius | nanocelsius per millicelsius, unity `1e9` | millicelsius |
 /// | [`SensorKind::Ntc`] | millicelsius | millicelsius | nanocelsius per millicelsius, unity `1e9` | millicelsius |
 /// | [`SensorKind::Angle`] | milli-counts | milli-counts, wrapping | see [`Self::angle_over`] | milli-promille |
+/// | [`SensorKind::BridgePressure`] | nV/V | nV/V | nanobar per uV/V, see [`Self::bridge`] | millibar |
 ///
 /// Everything a slot reports is then scaled from those thousandths to its own [`Unit`], which is
 /// what lets a slot's unit change without any of its coefficients moving.
@@ -354,6 +424,24 @@ impl SensorCalib {
         Self {
             constant_milli: (whole_units * 1000.0) as i32,
             ..self
+        }
+    }
+
+    /// A bridge transducer straight off its datasheet: `full_scale` whole units of pressure at
+    /// `span_mv_per_v` of output, and zero at 0 mV/V.
+    ///
+    /// The span is usually trustworthy to a percent or so; the zero is not — a bridge's offset is
+    /// part-specific, a sizeable fraction of its span, and what the bench trim is for. Read the
+    /// slot in [`Unit::RawCounts`] (uV/V for this kind) at zero pressure and put a thousand times
+    /// that in `offset_milli`, which is the same nV/V the reading is linearised to.
+    ///
+    /// `const`, so the float arithmetic happens in the compiler and never reaches the target.
+    pub const fn bridge(full_scale: f32, span_mv_per_v: f32) -> Self {
+        // Output millibar per nV/V of input, times 1e9: (fs * 1e3) / (span * 1e6) * 1e9.
+        Self {
+            offset_milli: 0,
+            slope_nano: (full_scale * 1_000_000.0 / span_mv_per_v) as i32,
+            constant_milli: 0,
         }
     }
 
@@ -477,6 +565,8 @@ pub enum SensorSource {
     /// One of the STM32's own ADC pins on COM5 or COM6, sampled by the control task rather than
     /// over I2C — see [`crate::sensors::AnalogSensing`].
     Analog(AnalogInput),
+    /// One channel of the NAU7802 on this bus.
+    Bridge(I2cBus, BridgeChannel),
 }
 
 #[derive(Clone, Copy, Debug, defmt::Format)]
@@ -487,6 +577,12 @@ pub struct SensorSlotConfig {
     pub bus: Option<I2cBus>,
     /// Which address strap, i.e. which entry of [`AMPLIFIER_ADDRESSES`]. Ignored for
     /// [`SensorKind::Angle`], whose device has no address straps, and for [`SensorKind::Ntc`].
+    ///
+    /// A [`SensorKind::BridgePressure`] slot reads it as the NAU7802 channel instead — `Amp0` is
+    /// [`BridgeChannel::A`] and `Amp1` is [`BridgeChannel::B`]. That is the one place this field
+    /// changes meaning with the kind, accepted because the chip has a fixed address and so no
+    /// strap for it to name, and because a slot can only ever want one of the two; see
+    /// [`Self::bridge_channel`].
     pub amplifier: AmplifierId,
     /// Which COM5/COM6 pin, for the two [`SensorKind::Ntc`] wirings. Ignored by every other kind.
     ///
@@ -525,6 +621,21 @@ impl SensorSlotConfig {
             kind: SensorKind::Pressure,
             bus: Some(bus),
             amplifier,
+            unit,
+            calib,
+            ..Self::unused()
+        }
+    }
+
+    /// A bridge transducer on `channel` of the NAU7802 on `bus`.
+    pub const fn bridge_pressure(bus: I2cBus, channel: BridgeChannel, unit: Unit, calib: SensorCalib) -> Self {
+        Self {
+            kind: SensorKind::BridgePressure,
+            bus: Some(bus),
+            amplifier: match channel {
+                BridgeChannel::A => AmplifierId::Amp0,
+                BridgeChannel::B => AmplifierId::Amp1,
+            },
             unit,
             calib,
             ..Self::unused()
@@ -626,7 +737,17 @@ impl SensorSlotConfig {
                 Some(bus) => Some(SensorSource::Adc(AdcSlot::new(bus, self.amplifier))),
                 None => None,
             },
+            SensorKind::BridgePressure => match (self.bus, self.bridge_channel()) {
+                (Some(bus), Some(channel)) => Some(SensorSource::Bridge(bus, channel)),
+                _ => None,
+            },
         }
+    }
+
+    /// The NAU7802 channel the `amplifier` field names, or `None` for `Amp2` and up, which
+    /// [`super::Config::sanity_check`] refuses on a bridge slot rather than wrapping or clamping.
+    pub const fn bridge_channel(&self) -> Option<BridgeChannel> {
+        BridgeChannel::from_u8(self.amplifier.as_u8())
     }
 
     /// Which COM5/COM6 pin this slot reads, or `None` for anything that is not an NTC.
@@ -703,6 +824,30 @@ mod tests {
         assert_eq!(slot.source(), Some(SensorSource::Analog(AnalogInput::Board)));
     }
 
+    /// The NAU7802's address is fixed, so the strap field is free to name its channel — and only
+    /// the two channels it has.
+    #[test]
+    fn a_bridge_slot_reads_its_channel_from_the_amplifier_field() {
+        let slot = SensorSlotConfig::bridge_pressure(I2cBus::Bus1, BridgeChannel::B, Unit::CentiBar, SensorCalib::ZERO);
+        assert_eq!(slot.amplifier, AmplifierId::Amp1);
+        assert_eq!(slot.source(), Some(SensorSource::Bridge(I2cBus::Bus1, BridgeChannel::B)));
+        assert_eq!(slot.adc_slot(), None, "not an ADC101 amplifier");
+
+        let mut off_the_end = slot;
+        off_the_end.amplifier = AmplifierId::Amp2;
+        assert_eq!(off_the_end.source(), None);
+    }
+
+    /// 100 bar at 2 mV/V is 50 bar per mV/V, i.e. 0.05 bar per uV/V: 5e7 nanobar per uV/V.
+    #[test]
+    fn a_datasheet_bridge_span_becomes_a_slope() {
+        let calib = SensorCalib::bridge(100.0, 2.0);
+        assert_eq!(calib.slope_nano, 50_000_000);
+        // Full span is 2 mV/V = 2_000_000 nV/V, and has to come out as 100 bar in millibar.
+        assert_eq!(calib.apply(2_000_000), 100_000);
+        assert_eq!(calib.apply(0), 0);
+    }
+
     /// The decomposition the unit codes are really made of, kept as accessors so the wire code
     /// stays one stable byte.
     #[test]
@@ -724,6 +869,7 @@ mod tests {
         assert_eq!(SensorKind::from_u8(5), Some(SensorKind::Ntc));
         assert_eq!(SensorKind::from_u8(6), Some(SensorKind::NtcToSupply));
         assert_eq!(SensorKind::from_u8(7), Some(SensorKind::BoardNtc));
-        assert_eq!(SensorKind::from_u8(8), None);
+        assert_eq!(SensorKind::from_u8(8), Some(SensorKind::BridgePressure));
+        assert_eq!(SensorKind::from_u8(9), None);
     }
 }

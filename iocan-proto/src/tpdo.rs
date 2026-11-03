@@ -143,6 +143,13 @@ pub enum TpdoFrame {
     /// Mirrors [`crate::od::ERROR_SUMMARY`]: one wrapping count per
     /// [`crate::od::ErrorCategory`], in its order — general, peripheral, CAN, reboot.
     ErrorSummary([u16; crate::od::NUM_ERROR_CATEGORIES]),
+    /// Bus 0's half of [`crate::od::RAW_BRIDGE`]: the raw 24-bit NAU7802 conversions on channel
+    /// A, then channel B, each sign-extended to a little-endian `i32` in counts at that bus's
+    /// [`crate::od::BRIDGE_GAIN`]. [`crate::od::RAW_BRIDGE_INVALID`] for a channel with nothing to
+    /// show — including on every node that has no NAU7802 at all.
+    RawBridge0([i32; 2]),
+    /// Bus 1's half of [`crate::od::RAW_BRIDGE`], laid out as [`Self::RawBridge0`].
+    RawBridge1([i32; 2]),
 }
 
 impl TpdoFrame {
@@ -169,6 +176,8 @@ impl TpdoFrame {
             Self::ValveCurrent(_) => TpdoKind::ValveCurrent,
             Self::Temperature { .. } => TpdoKind::Temperature,
             Self::ErrorSummary(_) => TpdoKind::ErrorSummary,
+            Self::RawBridge0(_) => TpdoKind::RawBridge0,
+            Self::RawBridge1(_) => TpdoKind::RawBridge1,
         }
     }
 
@@ -184,6 +193,12 @@ impl TpdoFrame {
             Self::Sensor0(v) => i16x4_to_bytes(v),
             Self::Sensor1(v) => i16x4_to_bytes(v),
             Self::Sensor3(v) => i16x4_to_bytes(v),
+            Self::RawBridge0([a, b]) | Self::RawBridge1([a, b]) => {
+                let mut out = [0u8; 8];
+                out[..4].copy_from_slice(&a.to_le_bytes());
+                out[4..].copy_from_slice(&b.to_le_bytes());
+                out
+            }
 
             Self::HcoState(outputs) => u16x4_to_bytes(outputs.map(HcoOutput::to_u16)),
 
@@ -238,6 +253,16 @@ impl TpdoFrame {
             TpdoKind::Sensor0 => Self::Sensor0(i16x4_from_bytes(bytes)),
             TpdoKind::Sensor1 => Self::Sensor1(i16x4_from_bytes(bytes)),
             TpdoKind::Sensor3 => Self::Sensor3(i16x4_from_bytes(bytes)),
+            TpdoKind::RawBridge0 | TpdoKind::RawBridge1 => {
+                let channels = [
+                    i32::from_le_bytes(bytes[..4].try_into().unwrap()),
+                    i32::from_le_bytes(bytes[4..].try_into().unwrap()),
+                ];
+                match kind {
+                    TpdoKind::RawBridge0 => Self::RawBridge0(channels),
+                    _ => Self::RawBridge1(channels),
+                }
+            }
 
             TpdoKind::HcoState => Self::HcoState(u16x4_from_bytes(bytes).map(HcoOutput::from_u16)),
 
@@ -389,6 +414,8 @@ mod tests {
                 mcu: -1_234,
             },
             TpdoFrame::ErrorSummary([1, 2, 0xFFFF, 0]),
+            TpdoFrame::RawBridge0([-(1 << 23), (1 << 23) - 1]),
+            TpdoFrame::RawBridge1([crate::od::RAW_BRIDGE_INVALID, 12_345]),
         ];
 
         for frame in samples {
@@ -411,6 +438,13 @@ mod tests {
         assert_eq!(bytes[1], 0);
         assert_eq!(bytes[2], 0b0000_0100);
         assert_eq!(&bytes[4..], &0x0102_0304u32.to_le_bytes());
+    }
+
+    #[test]
+    fn a_raw_bridge_frame_is_channel_a_then_b_as_little_endian_i32() {
+        let bytes = TpdoFrame::RawBridge1([-5, 0x0012_3456]).encode();
+        assert_eq!(&bytes[..4], &(-5i32).to_le_bytes());
+        assert_eq!(&bytes[4..], &[0x56, 0x34, 0x12, 0x00]);
     }
 
     #[test]

@@ -34,16 +34,17 @@ pub mod sensors;
 pub mod valves;
 
 use crate::index::{
-    AnalogInput, HcoId, I2cBus, PdoSensorChannel, PerAnalogInput, PerSensorSlot, PerTpdoKind, PerValve, SensorSlot,
-    ValveId,
+    AnalogInput, HcoId, I2cBus, PdoSensorChannel, PerAnalogInput, PerI2cBus, PerSensorSlot, PerTpdoKind, PerValve,
+    SensorSlot, ValveId,
 };
 
 pub use heating::{HcoSet, ValveHeatingConfig};
 pub use relief::ReliefConfig;
 pub use sensors::{
-    AMPLIFIER_ADDRESSES, ENCODER_ADDRESS, ENCODER_FULL_SCALE, ENCODER_MAGNET_OK_BIT, ENCODER_PRESENT_BIT,
-    NUM_ADC_SLOTS, NUM_AMPLIFIERS, NUM_ANALOG_INPUTS, NUM_PDO_SENSOR_CHANNELS, NUM_SENSOR_SLOTS, Quantity, SensorCalib,
-    SensorKind, SensorSlotConfig, SensorSource, Unit, UnitPrefix,
+    AMPLIFIER_ADDRESSES, BRIDGE_ADDRESS, BRIDGE_DEFAULT_GAIN, BRIDGE_DEFAULT_RATE, BRIDGE_PRESENT_BIT, BRIDGE_READY_BIT,
+    ENCODER_ADDRESS, ENCODER_FULL_SCALE, ENCODER_MAGNET_OK_BIT, ENCODER_PRESENT_BIT, NUM_ADC_SLOTS, NUM_AMPLIFIERS,
+    NUM_ANALOG_INPUTS, NUM_PDO_SENSOR_CHANNELS, NUM_SENSOR_SLOTS, Quantity, SensorCalib, SensorKind, SensorSlotConfig,
+    SensorSource, Unit, UnitPrefix, bridge_gain_code, bridge_rate_code, bridge_rate_sps,
 };
 pub use valves::{FallbackAction, NUM_HCO, NUM_VALVES, PROMILLE_MAX, ValveConfig, ValveKind};
 
@@ -88,6 +89,8 @@ const DEFAULT_TPDO_MS: PerTpdoKind<u16> = PerTpdoKind::new([
     2000, // 18 Temperature
     250,  // 19 ErrorSummary: one window. Unchanged frames are skipped, so a healthy board only
           //    sends the keepalive.
+    50,   // 20 RawBridge0: as fast as the sensor channels. A bus with no NAU7802 sends the same
+    50,   // 21 RawBridge1  invalid frame every time, so it only goes out as the keepalive.
 ]);
 
 /// Where rev3's factory defaults fit the board thermistor: the last slot, the one a node mapping
@@ -122,6 +125,11 @@ pub struct Config {
     pub sensors: PerSensorSlot<SensorSlotConfig>,
     pub sensor_interval_ms: u16,
     pub scan_interval_ms: u16,
+    /// PGA gain of each bus's NAU7802, 1..=128 and a power of two. See [`BRIDGE_DEFAULT_GAIN`].
+    pub bridge_gain: PerI2cBus<u8>,
+    /// Conversion rate of each bus's NAU7802 in samples per second: 10, 20, 40, 80 or 320. See
+    /// [`BRIDGE_DEFAULT_RATE`].
+    pub bridge_rate: PerI2cBus<u16>,
     pub tpdo_interval_ms: PerTpdoKind<u16>,
     pub relief: ReliefConfig,
 }
@@ -139,6 +147,8 @@ impl Config {
             sensors: DEFAULT_SENSORS,
             sensor_interval_ms: 10,
             scan_interval_ms: 500,
+            bridge_gain: PerI2cBus::splat(BRIDGE_DEFAULT_GAIN),
+            bridge_rate: PerI2cBus::splat(BRIDGE_DEFAULT_RATE),
             tpdo_interval_ms: DEFAULT_TPDO_MS,
             relief: ReliefConfig::disabled(),
         }
@@ -146,6 +156,20 @@ impl Config {
 
     pub const fn with_relief(mut self, relief: ReliefConfig) -> Self {
         self.relief = relief;
+        self
+    }
+
+    /// Set the PGA gain of `bus`'s NAU7802. Not checked here — a gain the chip does not have
+    /// fails [`Self::sanity_check`] at boot, the same way it is refused at 0x3032.
+    pub const fn with_bridge_gain(mut self, bus: I2cBus, gain: u8) -> Self {
+        self.bridge_gain = self.bridge_gain.with_at(bus.index(), gain);
+        self
+    }
+
+    /// Set the conversion rate of `bus`'s NAU7802, in samples per second. Checked like
+    /// [`Self::with_bridge_gain`].
+    pub const fn with_bridge_rate(mut self, bus: I2cBus, sps: u16) -> Self {
+        self.bridge_rate = self.bridge_rate.with_at(bus.index(), sps);
         self
     }
 
@@ -309,6 +333,17 @@ impl Config {
             }
         }
 
+        // Refused at 0x3032 and on load, so this only catches a factory default with a typo — which
+        // would otherwise run at whatever gain the fallback picks.
+        for (bus, &gain) in self.bridge_gain.iter() {
+            if bridge_gain_code(gain).is_none() {
+                return Err(ConfigError::BridgeGainInvalid(bus));
+            }
+            if bridge_rate_code(self.bridge_rate[bus]).is_none() {
+                return Err(ConfigError::BridgeRateInvalid(bus));
+            }
+        }
+
         for (id, s) in self.sensors.iter() {
             if s.kind == SensorKind::None {
                 continue;
@@ -324,6 +359,11 @@ impl Config {
             // read a plausible temperature off the wrong curve. `BoardNtc` is the kind for it.
             if matches!(s.kind, SensorKind::Ntc | SensorKind::NtcToSupply) && s.analog == AnalogInput::Board {
                 return Err(ConfigError::NtcOnBoardInput(id));
+            }
+            // The NAU7802 has two channels, and a strap index past them would read nothing while
+            // looking configured — the same shape as the missing bus above.
+            if s.kind == SensorKind::BridgePressure && s.bridge_channel().is_none() {
+                return Err(ConfigError::BridgeChannelInvalid(id));
             }
             // Two slots on one channel means one of them silently never reaches the bus.
             for (other, t) in self.sensors.iter().skip(id.index() + 1) {
@@ -415,6 +455,12 @@ pub enum ConfigError {
     /// A COM5/COM6 NTC kind names the board's own thermistor input, which needs
     /// [`SensorKind::BoardNtc`] instead.
     NtcOnBoardInput(SensorSlot),
+    /// A bridge slot names an amplifier index other than 0 or 1, which a NAU7802 channel has to be.
+    BridgeChannelInvalid(SensorSlot),
+    /// A bus's NAU7802 gain is not one the PGA has (1, 2, 4, ... 128).
+    BridgeGainInvalid(I2cBus),
+    /// A bus's NAU7802 rate is not one the chip has (10, 20, 40, 80, 320 SPS).
+    BridgeRateInvalid(I2cBus),
     /// Two sensor slots claim the same TPDO channel.
     PdoChannelShared(SensorSlot, SensorSlot),
     /// Relief is armed against a valve that is not fitted.

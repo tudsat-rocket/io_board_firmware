@@ -7,7 +7,7 @@ features_rev2 := "--no-default-features --features rev2,hardware"
 
 # Vehicle boards as bin:node_id, split by hardware revision. The rev2 bins carry
 # `required-features = ["rev2"]` in Cargo.toml, so the rev3 build skips them.
-boards := "node3:3 node4:4 node5:5 node6:6"
+boards := "node2:2 node3:3 node4:4 node5:5 node6:6"
 boards_rev2 := "node7:7 node8:8 node9:9"
 rev2_bins := "--bin node7 --bin node8 --bin node9"
 

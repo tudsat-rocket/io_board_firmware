@@ -170,6 +170,13 @@ id_domain!(
 );
 
 id_domain!(
+    /// One of a NAU7802's two differential inputs: `A` is `VIN1` (the breakout's A+/A-), `B` is
+    /// `VIN2` (B+/B-, only on the rev C breakout). The chip has one ADC, so these are two
+    /// positions of its input mux rather than two converters.
+    BridgeChannel, PerBridgeChannel, 2, [A, B]
+);
+
+id_domain!(
     /// One of the three on-board shunt/divider rails.
     ///
     /// The pairing is not arbitrary: one shunt covers HCO1+2 and one covers HCO3+4, which is why

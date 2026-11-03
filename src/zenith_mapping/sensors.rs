@@ -52,6 +52,54 @@ const fn decibar(offset: f32, bar_per_count: f32) -> Transducer {
     }
 }
 
+/// A bridge transducer on a NAU7802 ([`crate::config::SensorKind::BridgePressure`]), from its
+/// datasheet: `full_scale_bar` at `span_mv_per_v`, reading `zero_uv_per_v` at zero pressure.
+///
+/// The span is the datasheet's; the zero is the individual part's, read off the bench with the
+/// slot on [`Unit::RawCounts`] (which a bridge slot reports in uV/V). Unlike the amplifier
+/// calibrations above, nothing here depends on the board: the reading is the transducer's own
+/// output ratio, so the same numbers hold on any bus, at any gain.
+pub const fn bridge(full_scale_bar: f32, span_mv_per_v: f32, zero_uv_per_v: f32) -> Transducer {
+    Transducer {
+        calib: P {
+            offset_milli: (zero_uv_per_v * 1000.0) as i32,
+            ..P::bridge(full_scale_bar, span_mv_per_v)
+        },
+        unit: Unit::CentiBar,
+    }
+}
+
+/// [`bridge`], with the zero given as raw NAU7802 counts (0x2008, or the `RawBridge` TPDOs) read at
+/// PGA gain `gain` instead of in uV/V.
+///
+/// **Only right at that gain.** The same zero is twice the counts at twice the gain, so this
+/// converts to uV/V once, here — `counts * 1e6 / (gain * 2^24)` — and the slot itself stays
+/// gain-independent. Changing the bus's gain later (0x3032) keeps the calibration valid; changing
+/// `gain` here without re-reading the counts at the new gain does not. No excitation voltage
+/// enters into it: the ADC's reference is the bridge excitation, so a count is already a ratio.
+///
+/// A gain the PGA does not have is a compile error, since this is only ever evaluated in a
+/// `const`.
+pub const fn bridge_counts(full_scale_bar: f32, span_mv_per_v: f32, zero_counts: i32, gain: u8) -> Transducer {
+    assert!(crate::config::bridge_gain_code(gain).is_some(), "not a NAU7802 gain: 1, 2, 4, .. 128");
+    let zero_uv_per_v = zero_counts as f32 * 1_000_000.0 / (gain as f32 * 16_777_216.0);
+    bridge(full_scale_bar, span_mv_per_v, zero_uv_per_v)
+}
+
+/// A WIKA TTF-1 thin-film bridge (datasheet PE 81.16) of `range_bar`, at its nominal span and an
+/// untrimmed zero — a placeholder until the individual sensor is on the bench.
+///
+/// The datasheet span is 2.0 mV/V nominal for every range, with a tolerance that narrows as the
+/// range grows: 1.4..2.6 mV/V at 10 bar, 1.7..2.3 from 250 bar. So the slope is within 30 % before
+/// it is trimmed. The zero is the larger error: up to +-0.5 mV/V, a quarter of the span, so an
+/// untrimmed slot can read tens of bar at ambient. Trim it (with the slot on raw counts, in uV/V)
+/// before believing an absolute reading; differences are good from the start.
+///
+/// These are gauge sensors (Relativdruck): zero is ambient, so trim the zero vented.
+pub const fn wika_ttf1(range_bar: f32) -> Transducer {
+    bridge(range_bar, 2.0, 170.0)
+}
+
 // --- 10 bar ---------------------------------------------------------------
 pub const PLCHOLD_10BAR: Transducer = centibar(1.0, 0.0855);
 
@@ -96,3 +144,20 @@ pub const COMB_CHAMBER_2_P: Transducer = C_40BAR;
 pub const OX_FILL_EXT_P: Transducer = E_100BAR;
 pub const EXT_N2: Transducer = X_400BAR;
 pub const EXT_OX: Transducer = H_100BAR;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 50 000 counts at gain 32 is 50 000 / (32 * 2^24) of the excitation: 93.13 uV/V.
+    #[test]
+    fn a_zero_in_counts_lands_on_the_same_calibration_as_in_microvolts_per_volt() {
+        let from_counts = bridge_counts(40.0, 2.0, 50_000, 32);
+        let from_ratio = bridge(40.0, 2.0, 93.132_26);
+        assert!((from_counts.calib.offset_milli - from_ratio.calib.offset_milli).abs() <= 1);
+        assert_eq!(from_counts.calib.slope_nano, from_ratio.calib.slope_nano);
+
+        // The same zero read at four times the gain is four times the counts.
+        assert_eq!(bridge_counts(40.0, 2.0, 200_000, 128).calib.offset_milli, from_counts.calib.offset_milli);
+    }
+}

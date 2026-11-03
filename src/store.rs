@@ -52,7 +52,7 @@ pub static PERSIST_BUSY: Mutex<CriticalSectionRawMutex, ()> = Mutex::new(());
 /// [`iocan_proto::od`], which is where an object's meaning is documented; re-exported here
 /// because the whole firmware reaches for them through the store.
 pub use iocan_proto::od;
-pub use iocan_proto::od::{NO_INDEX, RAW_INVALID, SENSOR_INVALID, SIGNATURE_LOAD, SIGNATURE_SAVE};
+pub use iocan_proto::od::{NO_INDEX, RAW_BRIDGE_INVALID, RAW_INVALID, SENSOR_INVALID, SIGNATURE_LOAD, SIGNATURE_SAVE};
 
 /// 0x2032. How the node currently sees the master.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, defmt::Format)]
@@ -121,6 +121,9 @@ pub struct Store {
     /// which calibrates it into whatever [`SensorKind::Ntc`] slot names the pin. The two never
     /// touch each other; this field is the whole of the handover.
     pub raw_analog: PerAnalogInput<u16>,
+    /// 0x2008. Raw NAU7802 conversions per bus and channel, [`RAW_BRIDGE_INVALID`] for one with
+    /// nothing to show. Indexed by [`crate::index::BridgeChannel`].
+    pub raw_bridge: PerI2cBus<[i32; 2]>,
     pub i2c_present: PerI2cBus<u16>,
     pub i2c_sweeps: u32,
     pub sensor_value: PerSensorSlot<i16>,
@@ -202,6 +205,7 @@ impl Store {
             raw_adc: PerAdcSlot::splat(RAW_INVALID),
             raw_angle: PerI2cBus::splat(RAW_INVALID),
             raw_analog: PerAnalogInput::splat(RAW_INVALID),
+            raw_bridge: PerI2cBus::splat([RAW_BRIDGE_INVALID; 2]),
             i2c_present: PerI2cBus::splat(0),
             i2c_sweeps: 0,
             sensor_value: PerSensorSlot::splat(SENSOR_INVALID),
@@ -435,6 +439,7 @@ pub fn read(store: &Store, index: u16, sub: u8) -> Result<OdValue, AbortCode> {
         SENSOR_UNIT => read_array(store.sensor_unit.as_slice(), sub, OdValue::u8),
         RAW_ENCODER => read_array(store.raw_angle.as_slice(), sub, OdValue::u16),
         RAW_ANALOG => read_array(store.raw_analog.as_slice(), sub, OdValue::u16),
+        RAW_BRIDGE => read_array(store.raw_bridge.as_array().as_flattened(), sub, OdValue::i32),
 
         VALVE_COMMANDED => read_array(store.valve_commanded.as_slice(), sub, OdValue::u16),
         VALVE_TARGET => read_array(store.valve_target.as_slice(), sub, OdValue::u16),
@@ -516,6 +521,8 @@ pub fn read(store: &Store, index: u16, sub: u8) -> Result<OdValue, AbortCode> {
 
         SENSOR_INTERVAL_MS => scalar(OdValue::u16(cfg.sensor_interval_ms)),
         SCAN_INTERVAL_MS => scalar(OdValue::u16(cfg.scan_interval_ms)),
+        BRIDGE_GAIN => read_array(cfg.bridge_gain.as_slice(), sub, OdValue::u8),
+        BRIDGE_RATE => read_array(cfg.bridge_rate.as_slice(), sub, OdValue::u16),
         TPDO_INTERVAL_MS => read_array(cfg.tpdo_interval_ms.as_slice(), sub, OdValue::u16),
 
         _ => Err(AbortCode::NoSuchObject),
@@ -913,6 +920,20 @@ pub fn write(store: &mut Store, index: u16, sub: u8, data: &[u8]) -> Result<(), 
             store.config.scan_interval_ms = as_u16(data)?;
             store.pending.config = true;
         }
+        BRIDGE_GAIN => {
+            let i: I2cBus = slot(sub)?;
+            let gain = as_u8(data)?;
+            crate::config::bridge_gain_code(gain).ok_or(AbortCode::InvalidValue)?;
+            store.config.bridge_gain[i] = gain;
+            store.pending.config = true;
+        }
+        BRIDGE_RATE => {
+            let i: I2cBus = slot(sub)?;
+            let sps = as_u16(data)?;
+            crate::config::bridge_rate_code(sps).ok_or(AbortCode::InvalidValue)?;
+            store.config.bridge_rate[i] = sps;
+            store.pending.config = true;
+        }
         TPDO_INTERVAL_MS => {
             let i: iocan_proto::TpdoKind = slot(sub)?;
             store.config.tpdo_interval_ms[i] = as_u16(data)?;
@@ -987,10 +1008,10 @@ pub fn write(store: &mut Store, index: u16, sub: u8, data: &[u8]) -> Result<(), 
         }
 
         // Everything else in the 0x2000 block is process data we produce.
-        RAW_ADC_BUS0 | RAW_ADC_BUS1 | RAW_ENCODER | RAW_ANALOG | I2C_PRESENT | I2C_SWEEPS | SENSOR_VALUE
-        | SENSOR_UNIT | VALVE_TARGET | VALVE_MEASURED | VALVE_STATUS | VALVE_CURRENT | RELIEF_STATE | HCO_OWNER
-        | VALVE_HEATING_STATE | LINK_STATE | MS_SINCE_HEARTBEAT | RAIL_CURRENT | RAIL_VOLTAGE | TEMPERATURE
-        | ERROR_SUMMARY => {
+        RAW_ADC_BUS0 | RAW_ADC_BUS1 | RAW_ENCODER | RAW_ANALOG | RAW_BRIDGE | I2C_PRESENT | I2C_SWEEPS
+        | SENSOR_VALUE | SENSOR_UNIT | VALVE_TARGET | VALVE_MEASURED | VALVE_STATUS | VALVE_CURRENT | RELIEF_STATE
+        | HCO_OWNER | VALVE_HEATING_STATE | LINK_STATE | MS_SINCE_HEARTBEAT | RAIL_CURRENT | RAIL_VOLTAGE
+        | TEMPERATURE | ERROR_SUMMARY => {
             return Err(AbortCode::ReadOnly);
         }
 
@@ -1245,6 +1266,44 @@ mod tests {
         assert!(read(&s, od::RAW_ANALOG, 5).is_ok());
         assert!(matches!(read(&s, od::RAW_ANALOG, 6), Err(AbortCode::NoSuchSubIndex)));
         assert!(matches!(write(&mut store_with_servo(), od::RAW_ANALOG, 1, &[0, 0]), Err(AbortCode::ReadOnly)));
+    }
+
+    /// Two channels on each of two buses, flattened bus-major so sub-index 2 is bus 0 channel B.
+    #[test]
+    fn the_raw_bridge_array_is_bus_major_and_read_only() {
+        let mut s = store_with_servo();
+        assert_eq!(read(&s, od::RAW_BRIDGE, 0).unwrap().data(), &[4]);
+        assert_eq!(read(&s, od::RAW_BRIDGE, 1).unwrap().data(), &RAW_BRIDGE_INVALID.to_le_bytes());
+        s.raw_bridge[I2cBus::Bus0][crate::index::BridgeChannel::B.index()] = -1234;
+        assert_eq!(read(&s, od::RAW_BRIDGE, 2).unwrap().data(), &(-1234i32).to_le_bytes());
+        assert!(matches!(read(&s, od::RAW_BRIDGE, 5), Err(AbortCode::NoSuchSubIndex)));
+        assert!(matches!(write(&mut s, od::RAW_BRIDGE, 1, &[0; 4]), Err(AbortCode::ReadOnly)));
+    }
+
+    /// The PGA only has the powers of two up to 128; anything else is refused rather than rounded.
+    #[test]
+    fn the_bridge_gain_takes_only_gains_the_pga_has() {
+        let mut s = store_with_servo();
+        assert_eq!(read(&s, od::BRIDGE_GAIN, 1).unwrap().data(), &[128]);
+        write(&mut s, od::BRIDGE_GAIN, 2, &[16]).unwrap();
+        assert_eq!(s.config.bridge_gain[I2cBus::Bus1], 16);
+        for bad in [0, 3, 100, 255] {
+            assert!(matches!(write(&mut s, od::BRIDGE_GAIN, 1, &[bad]), Err(AbortCode::InvalidValue)), "{bad}");
+        }
+        assert!(matches!(write(&mut s, od::BRIDGE_GAIN, 3, &[1]), Err(AbortCode::NoSuchSubIndex)));
+    }
+
+    /// The rate is in samples per second on the wire, and only the five the chip has.
+    #[test]
+    fn the_bridge_rate_takes_only_rates_the_chip_has() {
+        let mut s = store_with_servo();
+        assert_eq!(read(&s, od::BRIDGE_RATE, 1).unwrap().data(), &320u16.to_le_bytes());
+        write(&mut s, od::BRIDGE_RATE, 1, &10u16.to_le_bytes()).unwrap();
+        assert_eq!(s.config.bridge_rate[I2cBus::Bus0], 10);
+        for bad in [0u16, 7, 160, 640] {
+            let result = write(&mut s, od::BRIDGE_RATE, 2, &bad.to_le_bytes());
+            assert!(matches!(result, Err(AbortCode::InvalidValue)), "{bad}");
+        }
     }
 
     /// A pad is configured entirely over the bus, so every field has to survive a write and read

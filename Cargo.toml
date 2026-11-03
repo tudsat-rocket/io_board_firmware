@@ -141,6 +141,13 @@ hardware = [
 rev2 = []
 rev3 = []
 
+# NAU7802 bring-up diagnostics over RTT: probe misses and bring-up steps at `debug`, every sample
+# at `trace`. Off by default because the flash partition has next to nothing to spare; the
+# warnings for things actually going wrong are logged either way.
+#
+#   cargo run --release --no-default-features --features rev3,hardware,i2c-debug --bin generic
+i2c-debug = []
+
 # Everything the pure logic needs to build and link for the host, and nothing the target build
 # should ever see. `mock-driver` satisfies embassy-time's driver symbol; `defmt/unstable-test`
 # gives the logging macros a backend so tests link without a probe attached — but it also makes

@@ -29,6 +29,8 @@
 
 #[cfg(any(feature = "hardware", test))]
 pub mod ext_adc;
+#[cfg(any(feature = "hardware", test))]
+pub mod nau7802;
 
 #[cfg(any(feature = "hardware", test))]
 use embassy_time::{Instant, Timer};
@@ -40,7 +42,10 @@ use crate::config::AMPLIFIER_ADDRESSES;
 #[cfg(any(feature = "hardware", test))]
 use crate::config::Config;
 #[cfg(any(feature = "hardware", test))]
-use crate::config::{ENCODER_ADDRESS, ENCODER_MAGNET_OK_BIT, ENCODER_PRESENT_BIT, SensorSource};
+use crate::config::{
+    BRIDGE_ADDRESS, BRIDGE_PRESENT_BIT, BRIDGE_READY_BIT, ENCODER_ADDRESS, ENCODER_MAGNET_OK_BIT, ENCODER_PRESENT_BIT,
+    SensorSource, bridge_gain_code, bridge_rate_code,
+};
 use crate::config::{ENCODER_FULL_SCALE, SensorKind, SensorSlotConfig, Unit};
 #[cfg(any(feature = "hardware", test))]
 use crate::errors::{ErrorCounter, bump, bump_by};
@@ -51,9 +56,11 @@ use crate::index::{AdcSlot, I2cBus, PerAdcSlot, PerI2cBus, PerSensorSlot};
 use crate::index::PerAnalogInput;
 use crate::store::SENSOR_INVALID;
 #[cfg(any(feature = "hardware", test))]
-use crate::store::{RAW_INVALID, STORE};
+use crate::store::{RAW_BRIDGE_INVALID, RAW_INVALID, STORE};
 #[cfg(any(feature = "hardware", test))]
 use ext_adc::Buses;
+#[cfg(any(feature = "hardware", test))]
+use nau7802::{Bridge, Fault, Setting};
 
 /// Convert a raw Pt1000 bridge reading to milli-degrees Celsius.
 ///
@@ -303,7 +310,11 @@ pub fn mcu_sense_uv_to_milli_c(v_sense_uv: u32) -> i32 {
 /// scaling, the wire — is the same for all of them. Thousandths rather than whole units so that
 /// one [`crate::config::SensorCalib`] can carry a sub-count zero offset for an analogue channel and a
 /// millidegree one for the Pt1000 in the same field.
-pub fn linearise(kind: SensorKind, raw: u16) -> Option<i32> {
+///
+/// `raw` is an `i32` for the sake of [`SensorKind::BridgePressure`], whose reading arrives
+/// already in nV/V (see [`bridge_nv_per_v`]); every other kind's device is 16 bits or narrower.
+pub fn linearise(kind: SensorKind, raw: i32) -> Option<i32> {
+    let counts = raw as u16;
     match kind {
         SensorKind::None => None,
         // Already linear in the measured quantity, so the calibration slope carries the whole
@@ -311,16 +322,28 @@ pub fn linearise(kind: SensorKind, raw: u16) -> Option<i32> {
         //
         // Angle counts are linear in angle too; what is different about them is that the zeroing
         // has to wrap, which is `calibrate`'s choice of `apply_wrapped` over `apply`.
-        SensorKind::Pressure | SensorKind::Mcp9700 | SensorKind::Angle => Some(raw as i32 * 1000),
-        SensorKind::Pt1000 => Some(pt1000_milli_celsius(raw)),
+        SensorKind::Pressure | SensorKind::Mcp9700 | SensorKind::Angle => Some(counts as i32 * 1000),
+        SensorKind::Pt1000 => Some(pt1000_milli_celsius(counts)),
         // The one kind that can refuse a reading here: off either end of the curve is an open or
         // shorted thermistor, not a very hot or very cold one, and the slot reports nothing.
-        SensorKind::Ntc => ntc_milli_celsius(raw),
+        SensorKind::Ntc => ntc_milli_celsius(counts),
         // The same curve read from the other end: swapping the two legs of a divider turns `x`
         // into `full scale - x`, and with a 10k fixed leg that is exact.
-        SensorKind::NtcToSupply => ntc_milli_celsius(ADC_FULL_SCALE.saturating_sub(raw)),
-        SensorKind::BoardNtc => board_ntc_milli_celsius(raw),
+        SensorKind::NtcToSupply => ntc_milli_celsius(ADC_FULL_SCALE.saturating_sub(counts)),
+        SensorKind::BoardNtc => board_ntc_milli_celsius(counts),
+        // nV/V is already thousandths of uV/V, and linear in pressure.
+        SensorKind::BridgePressure => Some(raw),
     }
+}
+
+/// A NAU7802 conversion at gain `2^gain_code`, as nV/V of its reference — which on the breakout
+/// is also the bridge's excitation, so this is the transducer's own output ratio.
+///
+/// Full scale is +-2^23 counts at +-0.5 * VREF / gain (datasheet 1.18), so one count is
+/// `1 / (gain * 2^24)` of VREF. Dividing the gain out here is what lets a slot keep its
+/// calibration when the gain at 0x3032 changes. Full scale at gain 1 is 5e8 nV/V, inside an i32.
+pub fn bridge_nv_per_v(counts: i32, gain_code: u8) -> i32 {
+    ((counts as i64 * 1_000_000_000) >> (24 + gain_code as u32)) as i32
 }
 
 /// Clamp an i32 into the wire's i16, keeping [`SENSOR_INVALID`] reserved for "no reading".
@@ -338,7 +361,7 @@ fn saturate(v: i32) -> i16 {
 /// After that every kind goes through the same affine trim to milli-units and the same scale
 /// down to the reported unit — so recalibrating a Pt1000 and recalibrating a transducer are the
 /// same three SDO writes.
-pub fn calibrate(slot: &SensorSlotConfig, raw: Option<u16>) -> i16 {
+pub fn calibrate(slot: &SensorSlotConfig, raw: Option<i32>) -> i16 {
     let Some(raw) = raw else {
         return SENSOR_INVALID;
     };
@@ -347,7 +370,10 @@ pub fn calibrate(slot: &SensorSlotConfig, raw: Option<u16>) -> i16 {
     if slot.unit == Unit::RawCounts {
         return match slot.kind {
             SensorKind::None => SENSOR_INVALID,
-            _ => saturate(raw as i32),
+            // nV/V would clip at 33 uV/V. In uV/V the i16 covers +-32 mV/V, more than any
+            // bridge produces, at a resolution finer than its zero is repeatable to.
+            SensorKind::BridgePressure => saturate(raw / 1000),
+            _ => saturate(raw),
         };
     }
 
@@ -370,31 +396,36 @@ pub fn calibrate(slot: &SensorSlotConfig, raw: Option<u16>) -> i16 {
 
 /// One address the presence sweep can knock on.
 ///
-/// The two device families are probed by the same cursor rather than by two, so a board with an
+/// The device families are probed by the same cursor rather than by one each, so a board with an
 /// encoder fitted does not probe it 9 times as often as any one amplifier.
 #[cfg(any(feature = "hardware", test))]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum ProbeTarget {
     Amplifier(AdcSlot),
     Encoder(I2cBus),
+    Bridge(I2cBus),
 }
 
 #[cfg(any(feature = "hardware", test))]
 impl ProbeTarget {
-    /// Amplifiers first, in [`AdcSlot`] order, then one encoder per bus.
-    const COUNT: usize = AdcSlot::COUNT + I2cBus::COUNT;
+    /// Amplifiers first, in [`AdcSlot`] order, then one encoder per bus, then one NAU7802 per bus.
+    const COUNT: usize = AdcSlot::COUNT + 2 * I2cBus::COUNT;
 
     fn from_index(index: usize) -> Option<Self> {
-        match AdcSlot::from_index(index) {
-            Some(slot) => Some(Self::Amplifier(slot)),
-            None => I2cBus::from_index(index - AdcSlot::COUNT).map(Self::Encoder),
+        if let Some(slot) = AdcSlot::from_index(index) {
+            return Some(Self::Amplifier(slot));
+        }
+        let index = index - AdcSlot::COUNT;
+        match I2cBus::from_index(index) {
+            Some(bus) => Some(Self::Encoder(bus)),
+            None => I2cBus::from_index(index - I2cBus::COUNT).map(Self::Bridge),
         }
     }
 
     fn bus(self) -> I2cBus {
         match self {
             Self::Amplifier(slot) => slot.bus(),
-            Self::Encoder(bus) => bus,
+            Self::Encoder(bus) | Self::Bridge(bus) => bus,
         }
     }
 
@@ -403,6 +434,7 @@ impl ProbeTarget {
         match self {
             Self::Amplifier(slot) => 1 << slot.amplifier().index(),
             Self::Encoder(_) => ENCODER_PRESENT_BIT,
+            Self::Bridge(_) => BRIDGE_PRESENT_BIT,
         }
     }
 }
@@ -460,6 +492,10 @@ pub struct Sensors<I0: I2c, I1: I2c> {
     /// left them. Not sampled here: the STM32's own ADC belongs to the control task, and this
     /// task owns the two I2C buses and nothing else — see [`AnalogSensing`].
     raw_analog: PerAnalogInput<u16>,
+    /// Each bus's NAU7802, and the last conversion from each of its channels — in counts at the
+    /// gain [`Bridge::gain_code`] says, or [`RAW_BRIDGE_INVALID`] while it is not converting.
+    bridge: PerI2cBus<Bridge>,
+    raw_bridge: PerI2cBus<[i32; 2]>,
     scan: ScanCursor,
     sweeps: u32,
 }
@@ -481,6 +517,8 @@ impl<I0: I2c, I1: I2c> Sensors<I0, I1> {
             raw: PerAdcSlot::splat(RAW_INVALID),
             raw_angle: PerI2cBus::splat(RAW_INVALID),
             raw_analog: PerAnalogInput::splat(RAW_INVALID),
+            bridge: PerI2cBus::new([Bridge::new(), Bridge::new()]),
+            raw_bridge: PerI2cBus::splat([RAW_BRIDGE_INVALID; 2]),
             scan: ScanCursor::new(Instant::now()),
             sweeps: 0,
         }
@@ -492,6 +530,10 @@ impl<I0: I2c, I1: I2c> Sensors<I0, I1> {
 
     fn encoder_present(&self, bus: I2cBus) -> bool {
         self.present[bus] & ENCODER_PRESENT_BIT != 0
+    }
+
+    fn bridge_present(&self, bus: I2cBus) -> bool {
+        self.present[bus] & BRIDGE_PRESENT_BIT != 0
     }
 
     /// Set or clear one bit of a bus's presence word, logging only the transitions.
@@ -543,6 +585,17 @@ impl<I0: I2c, I1: I2c> Sensors<I0, I1> {
                     defmt::warn!("as5600 vanished: bus {} addr {=u8:#04x}", bus.as_u8(), ENCODER_ADDRESS);
                 }
             }
+            ProbeTarget::Bridge(_) => {
+                // A chip that comes back may have lost power in between, so it is brought up
+                // from scratch either way.
+                if present {
+                    self.bridge[bus].found();
+                    defmt::info!("nau7802 appeared: bus {} addr {=u8:#04x}", bus.as_u8(), BRIDGE_ADDRESS);
+                } else {
+                    self.bridge[bus].lost();
+                    defmt::warn!("nau7802 vanished: bus {} addr {=u8:#04x}", bus.as_u8(), BRIDGE_ADDRESS);
+                }
+            }
         }
     }
 
@@ -575,7 +628,7 @@ impl<I0: I2c, I1: I2c> Sensors<I0, I1> {
             self.raw_analog = raw_analog;
             let now = Instant::now();
 
-            self.sample(&config).await;
+            self.sample(&config, now).await;
             self.scan_step(&config, now).await;
             self.publish(&config).await;
 
@@ -584,7 +637,7 @@ impl<I0: I2c, I1: I2c> Sensors<I0, I1> {
     }
 
     /// Read every device currently believed present.
-    async fn sample(&mut self, _config: &Config) {
+    async fn sample(&mut self, config: &Config, now: Instant) {
         for slot in AdcSlot::ALL {
             if !self.is_present(slot) {
                 self.raw[slot] = RAW_INVALID;
@@ -632,6 +685,43 @@ impl<I0: I2c, I1: I2c> Sensors<I0, I1> {
                 }
             }
         }
+
+        // Which NAU7802 channels some slot reads, so a bus with one in use never switches away.
+        let mut wanted = PerI2cBus::splat([false; 2]);
+        for slot in config.sensors.values() {
+            if let Some(SensorSource::Bridge(bus, channel)) = slot.source() {
+                wanted[bus][channel.index()] = true;
+            }
+        }
+        for bus in I2cBus::ALL {
+            // Refused at the store, at load and by the sanity check, so the fallbacks are never reached.
+            let setting = Setting {
+                gain_code: bridge_gain_code(config.bridge_gain[bus]).unwrap_or(0),
+                rate_code: bridge_rate_code(config.bridge_rate[bus]).unwrap_or(0),
+            };
+            let step =
+                self.bridge[bus].step(&mut self.buses, bus, setting, wanted[bus], now, &mut self.raw_bridge[bus]);
+            match step.await {
+                Ok(()) => {}
+                // Gone, as with any other device; the scan brings it back up from a reset.
+                Err(Fault::Bus) => {
+                    bump(ErrorCounter::BridgeReadFailed);
+                    self.set_present(ProbeTarget::Bridge(bus), false);
+                }
+                Err(Fault::Init) => {
+                    bump(ErrorCounter::BridgeInitFailed);
+                    defmt::warn!("nau7802 on bus {}: failed to power up or calibrate, resetting", bus.as_u8());
+                    self.bridge[bus].found();
+                }
+            }
+            if self.bridge[bus].is_ready() {
+                self.present[bus] |= BRIDGE_READY_BIT;
+            } else {
+                // Nothing taken before or during a calibration is a sample at the current gain.
+                self.raw_bridge[bus] = [RAW_BRIDGE_INVALID; 2];
+                self.present[bus] &= !BRIDGE_READY_BIT;
+            }
+        }
     }
 
     /// Probe at most one address, so scanning never costs more than one NACK per tick.
@@ -642,6 +732,7 @@ impl<I0: I2c, I1: I2c> Sensors<I0, I1> {
         let already_here = match target {
             ProbeTarget::Amplifier(slot) => self.is_present(slot),
             ProbeTarget::Encoder(bus) => self.encoder_present(bus),
+            ProbeTarget::Bridge(bus) => self.bridge_present(bus),
         };
         // Already sampling it; no need to spend a transfer confirming that.
         if !already_here {
@@ -650,6 +741,7 @@ impl<I0: I2c, I1: I2c> Sensors<I0, I1> {
                     self.buses.probe(slot.bus(), AMPLIFIER_ADDRESSES[slot.amplifier()]).await
                 }
                 ProbeTarget::Encoder(bus) => self.buses.probe_angle(bus).await,
+                ProbeTarget::Bridge(bus) => self.buses.probe_bridge(bus).await,
             };
             if answered {
                 self.set_present(target, true);
@@ -673,6 +765,7 @@ impl<I0: I2c, I1: I2c> Sensors<I0, I1> {
             .filter(|(_, slot)| match slot.source() {
                 Some(SensorSource::Adc(adc)) => !self.is_present(adc),
                 Some(SensorSource::Encoder(bus)) => !self.encoder_present(bus),
+                Some(SensorSource::Bridge(bus, _)) => !self.bridge_present(bus),
                 Some(SensorSource::Analog(_)) | None => false,
             })
             .count();
@@ -689,21 +782,28 @@ impl<I0: I2c, I1: I2c> Sensors<I0, I1> {
     /// also shows up as an [`ErrorCounter::I2cDeviceLost`] event, while one that was never there
     /// at all — a sensor configured onto a bus or address it is not wired to — shows up only
     /// here, climbing steadily from boot.
-    fn raw_for(&self, slot: &SensorSlotConfig) -> Option<u16> {
+    ///
+    /// A bridge slot's reading comes back in nV/V rather than counts — see [`bridge_nv_per_v`] —
+    /// since only this task knows the gain the chip was running at.
+    fn raw_for(&self, slot: &SensorSlotConfig) -> Option<i32> {
+        let valid = |raw: u16| (raw != RAW_INVALID).then_some(raw as i32);
         // An unconfigured slot has no device to be missing, so it is not counted below.
         let raw = match slot.source()? {
-            SensorSource::Adc(adc) => self.raw[adc],
-            SensorSource::Encoder(bus) => self.raw_angle[bus],
+            SensorSource::Adc(adc) => valid(self.raw[adc]),
+            SensorSource::Encoder(bus) => valid(self.raw_angle[bus]),
             // Invalid until the control task has sampled the pin, and again if this build never
             // handed that pin over — which counts as a missing source for the same reason an
             // amplifier that is not wired up does.
-            SensorSource::Analog(input) => self.raw_analog[input],
+            SensorSource::Analog(input) => valid(self.raw_analog[input]),
+            SensorSource::Bridge(bus, channel) => {
+                let counts = self.raw_bridge[bus][channel.index()];
+                (counts != RAW_BRIDGE_INVALID).then(|| bridge_nv_per_v(counts, self.bridge[bus].gain_code()))
+            }
         };
-        if raw == RAW_INVALID {
+        if raw.is_none() {
             bump(ErrorCounter::SensorSourceMissing);
-            return None;
         }
-        Some(raw)
+        raw
     }
 
     async fn publish(&mut self, config: &Config) {
@@ -715,6 +815,7 @@ impl<I0: I2c, I1: I2c> Sensors<I0, I1> {
         let mut store = STORE.lock().await;
         store.raw_adc = self.raw;
         store.raw_angle = self.raw_angle;
+        store.raw_bridge = self.raw_bridge;
         store.i2c_present = self.present;
         store.i2c_sweeps = self.sweeps;
         store.sensor_value = values;
@@ -747,7 +848,7 @@ mod tests {
     /// What a real bus reports for an address with nothing on it. The kind matters: it is what
     /// tells [`ext_adc::I2cFault`] a probe found nothing rather than that the bus is broken.
     #[derive(Debug)]
-    struct Nack;
+    pub(super) struct Nack;
     impl I2cError for Nack {
         fn kind(&self) -> ErrorKind {
             ErrorKind::NoAcknowledge(embedded_hal_async::i2c::NoAcknowledgeSource::Address)
@@ -789,7 +890,7 @@ mod tests {
     /// Cargo.toml), so this busy-polls with a no-op waker. Every future here resolves on the
     /// first poll: `MockI2c::transaction` never actually awaits anything, and `with_timeout`
     /// only needs the mock clock to advance if the wrapped future does not resolve immediately.
-    fn block_on<F: core::future::Future>(fut: F) -> F::Output {
+    pub(super) fn block_on<F: core::future::Future>(fut: F) -> F::Output {
         use core::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 
         fn noop(_: *const ()) {}
@@ -822,7 +923,7 @@ mod tests {
         let mut sensors = sensors_with(bus0, MockI2c::new());
         sensors.set_present(ProbeTarget::Amplifier(AdcSlot::new(I2cBus::Bus0, AmplifierId::Amp0)), true);
 
-        block_on(sensors.sample(&Config::new()));
+        block_on(sensors.sample(&Config::new(), Instant::from_millis(0)));
 
         assert_eq!(sensors.raw[AdcSlot::new(I2cBus::Bus0, AmplifierId::Amp0)], 512);
     }
@@ -835,7 +936,7 @@ mod tests {
         let slot = AdcSlot::new(I2cBus::Bus1, AmplifierId::Amp2);
         sensors.set_present(ProbeTarget::Amplifier(slot), true);
 
-        block_on(sensors.sample(&Config::new()));
+        block_on(sensors.sample(&Config::new(), Instant::from_millis(0)));
 
         assert_eq!(sensors.raw[slot], 300, "bus 1 reads must land in the second half of the raw array");
     }
@@ -846,7 +947,7 @@ mod tests {
         let mut sensors = sensors_with(MockI2c::new(), MockI2c::new());
         sensors.set_present(ProbeTarget::Amplifier(AdcSlot::new(I2cBus::Bus0, AmplifierId::Amp0)), true);
 
-        block_on(sensors.sample(&Config::new()));
+        block_on(sensors.sample(&Config::new(), Instant::from_millis(0)));
 
         assert_eq!(sensors.raw[AdcSlot::new(I2cBus::Bus0, AmplifierId::Amp0)], RAW_INVALID);
         assert!(
@@ -862,7 +963,7 @@ mod tests {
         let mut sensors = sensors_with(bus0, MockI2c::new());
         sensors.set_present(ProbeTarget::Amplifier(AdcSlot::new(I2cBus::Bus0, AmplifierId::Amp0)), true);
 
-        block_on(sensors.sample(&Config::new()));
+        block_on(sensors.sample(&Config::new(), Instant::from_millis(0)));
 
         assert_eq!(
             sensors.raw[AdcSlot::new(I2cBus::Bus0, AmplifierId::Amp0)],
@@ -926,14 +1027,14 @@ mod tests {
         let mut sensors = sensors_with(MockI2c::new(), MockI2c::new());
         sensors.set_present(ProbeTarget::Amplifier(AdcSlot::new(I2cBus::Bus0, AmplifierId::Amp0)), true);
 
-        block_on(sensors.sample(&Config::new()));
+        block_on(sensors.sample(&Config::new(), Instant::from_millis(0)));
 
         assert_eq!(crate::errors::count(ErrorCounter::I2cNack), 1);
         assert_eq!(crate::errors::count(ErrorCounter::AmplifierReadFailed), 1);
         assert_eq!(crate::errors::count(ErrorCounter::I2cDeviceLost), 1, "and it left the presence bitmap");
 
         // Sampling again must not count another loss: it is already gone.
-        block_on(sensors.sample(&Config::new()));
+        block_on(sensors.sample(&Config::new(), Instant::from_millis(0)));
         assert_eq!(crate::errors::count(ErrorCounter::I2cDeviceLost), 1);
     }
 
@@ -1129,7 +1230,7 @@ mod tests {
 
         // Mid-scale is 25 C either way round: that is where the two legs are equal.
         assert_eq!(calibrate(&to_ground, Some(2048)), 2_500);
-        assert_eq!(calibrate(&to_supply, Some(ADC_FULL_SCALE - 2048)), 2_500);
+        assert_eq!(calibrate(&to_supply, Some((ADC_FULL_SCALE - 2048) as i32)), 2_500);
 
         // And they move in opposite directions from there.
         assert!(calibrate(&to_ground, Some(1825)) > 2_500, "falls as it heats");
@@ -1432,11 +1533,53 @@ mod tests {
             assert!(!seen.contains(&target), "{target:?} probed twice in one sweep");
             seen.push(target);
         }
-        assert_eq!(seen.len(), NUM_ADC_SLOTS + 2, "every amplifier plus one encoder per bus");
-        // The encoders are the tail of the sweep, so they are probed exactly as often as any one
-        // amplifier rather than once per amplifier.
-        assert_eq!(seen[NUM_ADC_SLOTS..], [ProbeTarget::Encoder(I2cBus::Bus0), ProbeTarget::Encoder(I2cBus::Bus1)]);
+        assert_eq!(seen.len(), NUM_ADC_SLOTS + 4, "every amplifier plus one encoder and one NAU7802 per bus");
+        // The fixed-address parts are the tail of the sweep, so they are probed exactly as often
+        // as any one amplifier rather than once per amplifier.
+        assert_eq!(
+            seen[NUM_ADC_SLOTS..],
+            [
+                ProbeTarget::Encoder(I2cBus::Bus0),
+                ProbeTarget::Encoder(I2cBus::Bus1),
+                ProbeTarget::Bridge(I2cBus::Bus0),
+                ProbeTarget::Bridge(I2cBus::Bus1)
+            ]
+        );
         assert!(cursor.wrapped(), "the sweep should have wrapped");
+    }
+
+    /// Full scale is +-0.5 VREF / gain at +-2^23 counts, so the same counts are half the ratio at
+    /// twice the gain — which is the point of dividing it out.
+    #[test]
+    fn a_bridge_reading_is_normalised_by_its_gain() {
+        assert_eq!(bridge_nv_per_v(1 << 23, 0), 500_000_000, "full scale at gain 1 is half the reference");
+        assert_eq!(bridge_nv_per_v(1 << 23, 7), 3_906_250, "and at gain 128, 3.9 mV/V");
+        assert_eq!(bridge_nv_per_v(-(1 << 23), 7), -3_906_250);
+        assert_eq!(bridge_nv_per_v(1 << 20, 6), 2 * bridge_nv_per_v(1 << 20, 7));
+    }
+
+    /// A 100 bar, 2 mV/V transducer at half its span, through the whole slot pipeline: from
+    /// counts at gain 128 to centibar, and to uV/V on raw counts.
+    #[test]
+    fn a_bridge_slot_reports_pressure_and_commissions_in_microvolts_per_volt() {
+        use crate::index::BridgeChannel;
+        let _guard = crate::errors::test_lock();
+        let mut sensors = sensors_with(MockI2c::new(), MockI2c::new());
+        let mut slot = SensorSlotConfig::bridge_pressure(
+            I2cBus::Bus1,
+            BridgeChannel::B,
+            Unit::CentiBar,
+            SensorCalib::bridge(100.0, 2.0),
+        );
+        assert_eq!(calibrate(&slot, sensors.raw_for(&slot)), SENSOR_INVALID, "nothing converted yet");
+
+        // 1 mV/V at gain 1 (a fresh `Bridge` reports gain code 0): 2^24 * 1e-3 counts.
+        sensors.raw_bridge[I2cBus::Bus1][BridgeChannel::B.index()] = 16_777;
+        assert_eq!(calibrate(&slot, sensors.raw_for(&slot)), 4_999, "49.99 bar, the count truncated");
+        assert_eq!(sensors.raw_for(&slot), Some(999_987));
+
+        slot.unit = Unit::RawCounts;
+        assert_eq!(calibrate(&slot, sensors.raw_for(&slot)), 999, "uV/V");
     }
 
     #[test]

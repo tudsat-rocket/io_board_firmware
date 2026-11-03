@@ -14,6 +14,7 @@ use embedded_storage_async::nor_flash::NorFlash;
 use super::{HcoSet, ValveHeatingConfig};
 use super::{
     Config, FallbackAction, ReliefConfig, SensorCalib, SensorKind, SensorSlotConfig, Unit, ValveConfig, ValveKind,
+    bridge_gain_code, bridge_rate_code, bridge_rate_sps,
 };
 use crate::errors::{ErrorCounter, bump};
 use crate::index::{AmplifierId, AnalogInput, HcoId, I2cBus, Id, PdoSensorChannel, SensorSlot, ValveId};
@@ -36,10 +37,13 @@ const MAGIC: u32 = 0x4249_4F43; // "COIB", little-endian "IOCB"
 ///    output. Same byte, different meaning — an old `2` (Hco2) would read as Hco1 — hence a bump.
 /// 8: one more TPDO period (`TpdoKind::Temperature`), so every field after it moved by two bytes.
 /// 9: one more TPDO period (`TpdoKind::ErrorSummary`), the same shift again.
-const VERSION: u16 = 9;
+/// 10: the NAU7802 gain per bus (`Config::bridge_gain`), appended, and two more TPDO periods
+///     (`TpdoKind::RawBridge0`/`RawBridge1`).
+/// 11: the NAU7802 conversion rate per bus (`Config::bridge_rate`), appended as its `CRS` code.
+const VERSION: u16 = 11;
 
 const HEADER_LEN: usize = 12;
-const BODY_LEN: usize = 487;
+const BODY_LEN: usize = 495;
 #[cfg(test)]
 const RECORD_LEN: usize = HEADER_LEN + BODY_LEN + 4;
 
@@ -237,6 +241,16 @@ fn write_body(cfg: &Config, out: &mut [u8]) -> usize {
         w.u16(h.hysteresis);
     }
 
+    for gain in cfg.bridge_gain.values() {
+        w.u8(*gain);
+    }
+
+    // As its `CRS` code, one byte, so the record still fits its buffer. A rate the chip lacks
+    // cannot pass the sanity check a save goes through, but would fail the load if it did.
+    for sps in cfg.bridge_rate.values() {
+        w.u8(bridge_rate_code(*sps).unwrap_or(NONE_U8));
+    }
+
     w.pos
 }
 
@@ -329,6 +343,16 @@ fn read_body(body: &[u8]) -> Option<Config> {
             setpoint: r.u16() as i16,
             hysteresis: r.u16(),
         };
+    }
+
+    for bus in I2cBus::ALL {
+        let gain = r.u8();
+        bridge_gain_code(gain)?;
+        cfg.bridge_gain[bus] = gain;
+    }
+
+    for bus in I2cBus::ALL {
+        cfg.bridge_rate[bus] = bridge_rate_sps(r.u8())?;
     }
 
     Some(cfg)
@@ -607,6 +631,44 @@ mod tests {
         let none = back.heating[ValveId::Valve0];
         assert!(!none.is_fitted() && !none.enabled);
         assert_eq!(none.setpoint, i16::MIN);
+    }
+
+    /// The gain is the one bridge setting outside the slots, and a channel B slot is the one
+    /// that leans on the amplifier field meaning something else.
+    #[test]
+    fn the_bridge_gain_and_a_bridge_slot_survive_a_round_trip() {
+        use crate::index::BridgeChannel;
+        let calib = SensorCalib::bridge(400.0, 2.0);
+        let mut cfg = Config::new().with_sensor(
+            SensorSlot::Slot5,
+            SensorSlotConfig::bridge_pressure(I2cBus::Bus1, BridgeChannel::B, Unit::DeciBar, calib),
+        );
+        cfg.bridge_gain[I2cBus::Bus1] = 32;
+        cfg.bridge_rate[I2cBus::Bus0] = 10;
+
+        let mut buf = [0u8; BUF_LEN];
+        write_record(&cfg, 1, &mut buf);
+        let (_, back) = read_record(&buf).expect("record should validate");
+
+        assert_eq!(back.bridge_gain[I2cBus::Bus0], crate::config::BRIDGE_DEFAULT_GAIN);
+        assert_eq!(back.bridge_gain[I2cBus::Bus1], 32);
+        assert_eq!(back.bridge_rate[I2cBus::Bus0], 10, "stored as a code, read back as SPS");
+        assert_eq!(back.bridge_rate[I2cBus::Bus1], crate::config::BRIDGE_DEFAULT_RATE);
+        let slot = back.sensors[SensorSlot::Slot5];
+        assert_eq!(slot.kind as u8, SensorKind::BridgePressure as u8);
+        assert_eq!(slot.bridge_channel(), Some(BridgeChannel::B));
+        assert_eq!(slot.calib, calib);
+    }
+
+    /// A gain the PGA does not have cannot have been written by this firmware, so a record
+    /// carrying one is corrupt rather than something to round to the nearest gain.
+    #[test]
+    fn a_record_with_an_impossible_bridge_gain_is_rejected() {
+        let mut cfg = Config::new();
+        cfg.bridge_gain[I2cBus::Bus0] = 3;
+        let mut buf = [0u8; BUF_LEN];
+        write_record(&cfg, 1, &mut buf);
+        assert!(read_record(&buf).is_none());
     }
 
     /// Which COM pin an NTC is on is the whole of its addressing, so a save that lost it would

@@ -195,6 +195,9 @@ fn frame_for(store: &Store, kind: TpdoKind) -> TpdoFrame {
 
         TpdoKind::ErrorSummary => TpdoFrame::ErrorSummary(store.error_summary),
 
+        TpdoKind::RawBridge0 => TpdoFrame::RawBridge0(store.raw_bridge[crate::index::I2cBus::Bus0]),
+        TpdoKind::RawBridge1 => TpdoFrame::RawBridge1(store.raw_bridge[crate::index::I2cBus::Bus1]),
+
         TpdoKind::Status => TpdoFrame::Status {
             link_state: store.link_state as u8,
             raw_debug: store.raw_debug,
