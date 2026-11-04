@@ -29,7 +29,7 @@ const fn servo(pair: HcoPair, closed_us: u16, open_us: u16) -> ValveConfig {
 //     servo(pair, 2050, 1060)
 // }
 pub const fn ox_fill_and_dump(pair: HcoPair) -> ValveConfig {
-    servo(pair, 1436, 500)
+    servo(pair, 1930, 860)
 }
 
 pub const fn pressurant_vent(pair: HcoPair) -> ValveConfig {
@@ -37,7 +37,7 @@ pub const fn pressurant_vent(pair: HcoPair) -> ValveConfig {
 }
 
 pub const fn main_valve(pair: HcoPair) -> ValveConfig {
-    servo(pair, 2470, 700)
+    servo(pair, 2450, 620)
 }
 
 pub const fn pressurization(pair: HcoPair) -> ValveConfig {
