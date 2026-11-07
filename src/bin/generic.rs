@@ -62,8 +62,8 @@ const BENCH: NodeSettings = NodeSettings::new(
         .with_bridge_gain(Bus0, GAIN)
         .with_bridge_gain(Bus1, GAIN)
         .with_sensor(Slot0, bridge(Bus0, BridgeChannel::A, wika_testing(40.0)))
-        // .with_sensor(Slot1, bridge(Bus0, BridgeChannel::B, TTF1_100BAR))
-        .with_sensor(Slot2, bridge(Bus1, BridgeChannel::A, wika_testing(40.0))), // .with_sensor(Slot3, bridge(Bus1, BridgeChannel::B, TTF1_100BAR)),
+        .with_sensor(Slot1, bridge(Bus0, BridgeChannel::B, wika_testing(40.0)))
+        .with_sensor(Slot2, bridge(Bus1, BridgeChannel::B, wika_testing(40.0))), // .with_sensor(Slot3, bridge(Bus1, BridgeChannel::B, TTF1_100BAR)),
 );
 
 const fn bridge(bus: I2cBus, channel: BridgeChannel, transducer: Transducer) -> SensorSlotConfig {

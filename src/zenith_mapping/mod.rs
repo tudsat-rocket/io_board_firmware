@@ -11,7 +11,8 @@
     reason = "SensorSlot's later variants are only used by node configs that do not exist yet"
 )]
 use crate::index::{AmplifierId::*, AnalogInput::*, HcoId, HcoPair, I2cBus::*, SensorSlot::*, ValveId::*};
-use crate::zenith_mapping::sensors::Transducer;
+use crate::index::{BridgeChannel, I2cBus};
+use crate::zenith_mapping::sensors::{NAU_40BAR_A, NAU_40BAR_B, NAU_100BAR_I, Transducer, bridge};
 use crate::{
     config::{Config, HcoSet, NodeSettings, ReliefConfig, SensorSlotConfig, ValveConfig, ValveHeatingConfig},
     index::{AnalogInput, SensorSlot},
@@ -129,6 +130,10 @@ pub const NODE5: NodeSettings = NodeSettings::new(
         .with_sensor(Slot1, pressure(Bus0, Amp1, sensors::D_100BAR)),
 );
 
+const fn bridge_config(bus: I2cBus, channel: BridgeChannel, transducer: Transducer) -> SensorSlotConfig {
+    SensorSlotConfig::bridge_pressure(bus, channel, transducer.unit, transducer.calib)
+}
+
 /// Node 6 — lower propulsion, valve control: main valve and oxidizer fill/dump.
 pub const NODE6: NodeSettings = NodeSettings::new(
     6,
@@ -136,12 +141,11 @@ pub const NODE6: NodeSettings = NodeSettings::new(
         .with_valve(Valve0, valves::main_valve(HcoPair::A))
         .with_valve(Valve1, valves::ox_fill_and_dump(HcoPair::B))
         // lower ox tank pressure
-        .with_sensor(Slot0, pressure(Bus0, Amp3, sensors::A_100BAR))
-        // lower ox tank temperature
-        .with_sensor(Slot2, pt1000(Bus0, Amp0))
+        .with_sensor(Slot0, bridge_config(Bus0, BridgeChannel::B, NAU_100BAR_I))
+        // // lower ox tank temperature
         // combustion chamber pressure, both
-        .with_sensor(Slot1, pressure(Bus0, Amp1, sensors::E_40BAR))
-        .with_sensor(Slot3, pressure(Bus1, Amp0, sensors::F_40BAR)),
+        .with_sensor(Slot1, bridge_config(Bus0, BridgeChannel::A, NAU_40BAR_A))
+        .with_sensor(Slot3, bridge_config(Bus1, BridgeChannel::A, NAU_40BAR_B)),
 );
 // igniter on hco12
 pub const NODE7: NodeSettings = NodeSettings::new(

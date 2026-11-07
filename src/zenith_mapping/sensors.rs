@@ -86,6 +86,25 @@ pub const fn bridge_counts(full_scale_bar: f32, span_mv_per_v: f32, zero_counts:
     bridge(full_scale_bar, span_mv_per_v, zero_uv_per_v)
 }
 
+/// [`bridge_counts`], with the slope given as bar per raw NAU7802 count at PGA gain `gain` too,
+/// as a two-point bench calibration measures it, rather than as a datasheet range and span.
+///
+/// The same caveat holds: both numbers are only right at the gain they were read at. A count is
+/// `1e9 / (gain * 2^24)` nV/V, so the slope folds to `bar_per_count * gain * 2^24` bar per nV/V.
+pub const fn bridge_counts_slope(zero_counts: i32, bar_per_count: f32, gain: u8) -> Transducer {
+    assert!(crate::config::bridge_gain_code(gain).is_some(), "not a NAU7802 gain: 1, 2, 4, .. 128");
+    let counts_per_unity = gain as f32 * 16_777_216.0;
+    Transducer {
+        calib: P {
+            offset_milli: (zero_counts as f32 * 1_000_000_000.0 / counts_per_unity) as i32,
+            // Millibar per nV/V, times 1e9.
+            slope_nano: (bar_per_count * counts_per_unity * 1000.0) as i32,
+            constant_milli: 0,
+        },
+        unit: Unit::CentiBar,
+    }
+}
+
 /// A WIKA TTF-1 thin-film bridge (datasheet PE 81.16) of `range_bar`, at its nominal span and an
 /// untrimmed zero — a placeholder until the individual sensor is on the bench.
 ///
@@ -99,6 +118,31 @@ pub const fn bridge_counts(full_scale_bar: f32, span_mv_per_v: f32, zero_counts:
 pub const fn wika_ttf1(range_bar: f32) -> Transducer {
     bridge(range_bar, 2.0, 170.0)
 }
+
+// --- NAU bridges ---------------------------------------------------------
+pub const NAU_40BAR_B: Transducer = {
+    let t = bridge_counts_slope(66_494, 3.37276e-05, 32);
+    Transducer {
+        calib: t.calib.with_constant(1.013),
+        ..t
+    }
+};
+
+pub const NAU_40BAR_A: Transducer = {
+    let t = bridge_counts_slope(-69_092, 3.695e-05, 32);
+    Transducer {
+        calib: t.calib.with_constant(1.013),
+        ..t
+    }
+};
+
+pub const NAU_100BAR_I: Transducer = {
+    let t = bridge_counts_slope(44070, 9.01e-05, 32);
+    Transducer {
+        calib: t.calib.with_constant(1.013),
+        ..t
+    }
+};
 
 // --- 10 bar ---------------------------------------------------------------
 pub const PLCHOLD_10BAR: Transducer = centibar(1.0, 0.0855);
@@ -159,5 +203,14 @@ mod tests {
 
         // The same zero read at four times the gain is four times the counts.
         assert_eq!(bridge_counts(40.0, 2.0, 200_000, 128).calib.offset_milli, from_counts.calib.offset_milli);
+    }
+
+    /// 40 bar over 2 mV/V is 40 / (2e-3 * 32 * 2^24) bar per count at gain 32.
+    #[test]
+    fn a_slope_per_count_lands_on_the_same_calibration_as_a_span() {
+        let from_slope = bridge_counts_slope(50_000, 40.0 / (2.0e-3 * 32.0 * 16_777_216.0), 32);
+        let from_span = bridge_counts(40.0, 2.0, 50_000, 32);
+        assert!((from_slope.calib.offset_milli - from_span.calib.offset_milli).abs() <= 1);
+        assert!((from_slope.calib.slope_nano - from_span.calib.slope_nano).abs() <= 1);
     }
 }

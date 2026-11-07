@@ -57,10 +57,11 @@ access_type = "ro"
 array_size = 9
 default_value = [65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535]
 
-# Which I2C devices answered the last sweep: bits 0..8 amplifiers, bit 9 encoder, bit 10 magnet ok.
+# Which I2C devices answered the last sweep: bits 0..8 amplifiers, bit 9 encoder, bit 10 magnet ok,
+# bit 11 NAU7802 bridge ADC, bit 12 that NAU7802 calibrated and converting.
 [[objects]]
 index = 0x2002
-parameter_name = "i2c amplifier presence bitmap, per bus"
+parameter_name = "i2c device presence bitmap, per bus"
 object_type = "array"
 data_type = "uint16"
 access_type = "ro"
@@ -120,6 +121,17 @@ data_type = "uint16"
 access_type = "ro"
 array_size = 5
 default_value = [65535, 65535, 65535, 65535, 65535]
+
+# Raw signed 24-bit NAU7802 counts at that bus's gain (0x3032): bus 0 ch A, bus 0 ch B, bus 1 ch A,
+# bus 1 ch B. -2147483648 = no chip, still calibrating, or channel not sampled.
+[[objects]]
+index = 0x2008
+parameter_name = "raw bridge adc counts, per bus and channel"
+object_type = "array"
+data_type = "int32"
+access_type = "ro"
+array_size = 4
+default_value = [-2147483648, -2147483648, -2147483648, -2147483648]
 
 # --- valves: the three-layer state ---------------------------------------
 
@@ -337,10 +349,10 @@ parameter_name = "error counters since boot"
 object_type = "array"
 data_type = "uint32"
 access_type = "ro"
-array_size = 28
+array_size = 30
 default_value = [
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
 ]
 
 # Four summary error counts: general, peripheral, CAN, reboot (reserved, always 0). Each climbs by
@@ -376,7 +388,7 @@ parameter_name = "fallback stage A timeout, milliseconds"
 object_type = "var"
 data_type = "uint32"
 access_type = "rw"
-default_value = 3000
+default_value = 6000
 
 # "The master is not coming back" — minutes, measured from the same last heartbeat.
 [[objects]]
@@ -568,7 +580,8 @@ access_type = "rw"
 array_size = 16
 default_value = [255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255]
 
-# Index into the board's amplifier address table, 0..8 — not a raw I2C address.
+# Index into the board's amplifier address table, 0..8 — not a raw I2C address. For a bridge slot
+# (kind 8) it is the NAU7802 channel instead: 0 = A (VIN1), 1 = B (VIN2).
 [[objects]]
 index = 0x3021
 parameter_name = "sensor slot source amplifier index"
@@ -592,9 +605,9 @@ default_value = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
 
 # 0 unused, 1 pressure, 2 Pt1000, 3 MCP9700, 4 AS5600 encoder, 5 NTC on a COM5/COM6 pin (10k to
 # +3.3V, thermistor to ground), 6 the same NTC with the divider's legs swapped, 7 the on-board
-# thermistor TH1. Write this BEFORE 0x3023..0x3026: changing it re-seeds them. Kinds 1..4 are
-# addressed by 0x3020 and 0x3021; kinds 5 and 6 are addressed by 0x3028 and ignore both; kind 7
-# needs no addressing at all.
+# thermistor TH1, 8 bridge pressure transducer on a NAU7802. Write this BEFORE 0x3023..0x3026:
+# changing it re-seeds them. Kinds 1..4 and 8 are addressed by 0x3020 and 0x3021; kinds 5 and 6 are
+# addressed by 0x3028 and ignore both; kind 7 needs no addressing at all.
 [[objects]]
 index = 0x3022
 parameter_name = "sensor slot kind"
@@ -604,7 +617,8 @@ access_type = "rw"
 array_size = 16
 default_value = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
 
-# out = (linear - offset) * slope / 1e9 + constant, in thousandths throughout.
+# out = (linear - offset) * slope / 1e9 + constant, in thousandths throughout. For a bridge slot
+# linear is nV/V and slope is nanobar per uV/V.
 [[objects]]
 index = 0x3023
 parameter_name = "sensor calibration offset, thousandths of the linearised input"
@@ -673,6 +687,28 @@ data_type = "uint16"
 access_type = "rw"
 default_value = 500
 
+# One PGA per chip, so per bus: 1, 2, 4, 8, 16, 32, 64 or 128. A change re-calibrates the chip;
+# slot calibrations are gain-independent and survive it.
+[[objects]]
+index = 0x3032
+parameter_name = "nau7802 pga gain, per i2c bus"
+object_type = "array"
+data_type = "uint8"
+access_type = "rw"
+array_size = 2
+default_value = [128, 128]
+
+# 10, 20, 40, 80 or 320 SPS. 10 has the 50/60 Hz notch; 320 is fastest. Re-calibrates like a gain
+# change.
+[[objects]]
+index = 0x3033
+parameter_name = "nau7802 conversion rate, samples per second, per i2c bus"
+object_type = "array"
+data_type = "uint16"
+access_type = "rw"
+array_size = 2
+default_value = [320, 320]
+
 # Sub-index n+1 is the period for TPDO kind n; 0 disables that kind.
 [[objects]]
 index = 0x3040
@@ -680,8 +716,8 @@ parameter_name = "tpdo broadcast period per kind, milliseconds"
 object_type = "array"
 data_type = "uint16"
 access_type = "rw"
-array_size = 20
-default_value = [500, 500, 200, 500, 500, 500, 100, 0, 100, 0, 0, 50, 0, 5000, 1000, 1000, 1000, 0, 2000, 250]
+array_size = 22
+default_value = [500, 500, 200, 500, 500, 100, 0, 100, 0, 50, 50, 0, 5000, 1000, 200, 200, 200, 0, 2000, 250, 50, 50]
 
 # ============================================================================
 # 0x3050 — overpressure relief: the one decision a node makes for itself.
